@@ -1,4 +1,3 @@
-use crate::config::constants::DEFAULT_MAX_WATCHED_TOKENS_LIMIT;
 use crate::domain::{BalanceEvent, EvmNetwork, SubscriptionKey};
 use crate::services::cleanup_stream;
 use crate::services::errors::{FetcherError, SubscriptionError};
@@ -108,22 +107,11 @@ impl SessionManager {
         }
     }
 
-    pub async fn create(&self, ctx: SessionContext) -> Result<(), SessionError> {
+    pub async fn upsert(&self, ctx: SessionContext) -> Result<(), SessionError> {
         let sub_key = SubscriptionKey {
             network: ctx.network,
             owner: ctx.owner,
         };
-
-        let tokens = self
-            .fetch_and_enriched_tokens(sub_key, ctx.tokens_lists_urls, ctx.custom_tokens)
-            .await?;
-
-        if tokens.len() > DEFAULT_MAX_WATCHED_TOKENS_LIMIT {
-            return Err(SessionError::TokenLimitExceeded(
-                tokens.len(),
-                self.token_limit,
-            ));
-        }
 
         let provider = match self.providers.get(&sub_key.network) {
             Some(provider) => provider.clone(),
@@ -137,16 +125,44 @@ impl SessionManager {
             Some(ws_provider) => ws_provider.clone(),
         };
 
-        let _ = self.sub_manager.create_or_update(sub_key, tokens).await;
+        let tokens = self
+            .fetch_and_enriched_tokens(sub_key, ctx.tokens_lists_urls, ctx.custom_tokens)
+            .await?;
 
-        let (_, subscription) = self
-            .sub_manager
-            .subscribe(sub_key)
-            .await
-            .map_err(Self::map_subscription_error)?;
+        let subscription = self.sub_manager.get_subscription(sub_key).await;
+        // if the sub already exists - check if there are new tokens to watch and check limits
+        let updated_tokens = if let Some(sub) = subscription {
+            let mut watched_tokens = { sub.tokens.read().await.clone() };
+
+            let new_tokens = tokens
+                .iter()
+                .filter(|t| !watched_tokens.contains(*t))
+                .copied()
+                .collect::<HashSet<_>>();
+
+            watched_tokens.extend(new_tokens);
+
+            watched_tokens
+        } else {
+            tokens
+        };
+
+        if updated_tokens.len() > self.token_limit {
+            counter!("tokens_limit_exceeded_total").increment(1);
+            tracing::error!(
+                tokens_len = updated_tokens.len(),
+                "limit of watched tokens was exceeded",
+            );
+            return Err(SessionError::TokenLimitExceeded(
+                updated_tokens.len(),
+                self.token_limit,
+            ));
+        }
+
+        let sub = self.sub_manager.upsert(sub_key, updated_tokens).await;
 
         // if there aren't spawners yet - spawn them and create a first subscription
-        let should_spawn_watchers = subscription
+        let should_spawn_watchers = sub
             .watchers_spawned
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok();
@@ -164,7 +180,7 @@ impl SessionManager {
                 "create first sse subscription and spawn watchers"
             );
 
-            Watcher::new(ctx, Arc::clone(&subscription))
+            Watcher::new(ctx, Arc::clone(&sub))
                 .spawn_watchers(self.snapshot_interval)
                 .await;
         }
@@ -172,58 +188,6 @@ impl SessionManager {
         tracing::warn!(
             sub = %sub_key,
             "session was created",
-        );
-
-        Ok(())
-    }
-
-    pub async fn update(&self, ctx: SessionContext) -> Result<(), SessionError> {
-        let sub_key = SubscriptionKey {
-            network: ctx.network,
-            owner: ctx.owner,
-        };
-
-        let sub = self
-            .sub_manager
-            .get_subscription(sub_key)
-            .await
-            .ok_or(SessionError::SessionIsNotCreated)?;
-
-        let tokens = self
-            .fetch_and_enriched_tokens(sub_key, ctx.tokens_lists_urls, ctx.custom_tokens)
-            .await?;
-
-        let mut watched_tokens = sub.tokens.write().await;
-        let prev_count = watched_tokens.len();
-
-        // count how many new unique tokens would be added
-        let new_unique = tokens
-            .iter()
-            .filter(|t| !watched_tokens.contains(*t))
-            .count();
-
-        let total_unique = prev_count + new_unique;
-        if total_unique > self.token_limit {
-            counter!("tokens_limit_exceeded_total").increment(1);
-            tracing::error!(
-                tokens_len = total_unique,
-                previous_tokens_len = prev_count,
-                "limit of watched tokens was exceeded",
-            );
-            return Err(SessionError::TokenLimitExceeded(
-                total_unique,
-                self.token_limit,
-            ));
-        }
-
-        watched_tokens.extend(tokens);
-        let new_count = watched_tokens.len();
-
-        tracing::info!(
-            tokens_len_before = prev_count,
-            current_tokens_len = new_count,
-            sub = %sub_key,
-            "session was updated",
         );
 
         Ok(())

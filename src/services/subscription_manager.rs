@@ -44,7 +44,7 @@ impl SubscriptionManager {
         }
     }
 
-    pub async fn create_or_update(
+    pub async fn upsert(
         &self,
         key: SubscriptionKey,
         tokens: HashSet<Address>,

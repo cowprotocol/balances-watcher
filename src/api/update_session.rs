@@ -40,7 +40,7 @@ pub async fn update_session(
 
     state
         .session_manager
-        .update(ctx)
+        .upsert(ctx)
         .await
         .map_err(AppError::from)
 }

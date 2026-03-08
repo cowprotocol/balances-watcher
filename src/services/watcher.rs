@@ -84,17 +84,14 @@ impl Watcher {
         let ctx = Arc::clone(&self.ctx);
         let cancel = sub.cancel_token.clone();
 
-        let (balance_call_ctx, tokens) = {
-            let tokens = sub.tokens.read().await;
-            let tokens: Vec<Address> = tokens.iter().copied().collect();
-
+        let balance_call_ctx = {
             let balance_call_ctx = BalanceCallCtx {
                 owner: ctx.owner,
                 provider: Arc::new(ctx.provider.clone()),
                 network: ctx.network,
             };
 
-            (Arc::new(balance_call_ctx), tokens)
+            Arc::new(balance_call_ctx)
         };
 
         tokio::spawn(async move {
@@ -105,7 +102,7 @@ impl Watcher {
                     _ = cancel.cancelled() => { break; }
                     _ = interval.tick() => {
                         counter!("snapshot_updater_runs_total").increment(1);
-                        Self::fetch_balances_and_broadcast(Arc::clone(&balance_call_ctx), &tokens, Arc::clone(&sub)).await;
+                        Self::fetch_balances_and_broadcast(Arc::clone(&balance_call_ctx), Arc::clone(&sub)).await;
                     }
                 }
             }
@@ -113,13 +110,17 @@ impl Watcher {
     }
 
     // request all balances for a list of watched tokens via multicall and broadcast them to clients
-    async fn fetch_balances_and_broadcast(
-        ctx: Arc<BalanceCallCtx>,
-        tokens: &[Address],
-        sub: Arc<Subscription>,
-    ) {
+    async fn fetch_balances_and_broadcast(ctx: Arc<BalanceCallCtx>, sub: Arc<Subscription>) {
         let owner = ctx.owner;
-        let result = Self::get_tokens_balance(ctx, tokens, BlockId::latest()).await;
+        let tokens = {
+            sub.tokens
+                .read()
+                .await
+                .clone()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let result = Self::get_tokens_balance(ctx, &tokens, BlockId::latest()).await;
 
         let event = match result {
             Ok(balances) => {

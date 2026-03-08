@@ -40,7 +40,7 @@ pub async fn create_session(
 
     state
         .session_manager
-        .create(ctx)
+        .upsert(ctx)
         .await
         .map_err(AppError::from)
 }
