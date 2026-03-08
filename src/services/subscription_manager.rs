@@ -109,7 +109,7 @@ impl SubscriptionManager {
             existing.clients = existing
                 .clients
                 .checked_add(1)
-                .ok_or(SubscriptionError::TooManyClients)?;
+                .ok_or(SubscriptionError::TooManySubscriptions)?;
             existing.idle_since = None;
             let receiver = existing.subscription.sender.subscribe();
 
@@ -123,7 +123,7 @@ impl SubscriptionManager {
             return Ok((receiver, Arc::clone(&existing.subscription)));
         }
 
-        Err(SubscriptionError::NoSession)
+        Err(SubscriptionError::ThereArentCreatedSubscriptions)
     }
 
     // true - if it was the last client
@@ -134,7 +134,7 @@ impl SubscriptionManager {
             existing.clients = existing
                 .clients
                 .checked_sub(1)
-                .ok_or(SubscriptionError::ThereIsNoClients)?;
+                .ok_or(SubscriptionError::ThereArentCreatedSubscriptions)?;
 
             if existing.clients == 0 {
                 existing.idle_since = Some(Instant::now());
@@ -158,7 +158,7 @@ impl SubscriptionManager {
             return Ok(false);
         }
 
-        Err(SubscriptionError::ThereIsNoClients)
+        Err(SubscriptionError::ThereArentCreatedSubscriptions)
     }
 
     pub fn spawn_cleanup(self: Arc<Self>) {

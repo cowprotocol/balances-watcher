@@ -14,7 +14,6 @@ pub struct BalanceCallCtx {
     pub network: EvmNetwork,
     pub owner: Address,
     pub provider: Arc<DynProvider>,
-    pub multicall3: Address,
 }
 
 pub type BalancesWithBlock = (HashMap<Address, U256>, U256);
@@ -33,7 +32,7 @@ pub async fn fetch_balances_via_multicall(
     erc20_tokens.sort();
 
     // todo check that clone is not expensive here
-    let multicall3 = Multicall3::new(ctx.multicall3, ctx.provider.clone());
+    let multicall3 = Multicall3::new(ctx.network.multicall3_address(), ctx.provider.clone());
     // one for erc balances
     let mut calls: Vec<Multicall3::Call> = Vec::with_capacity(erc20_tokens.len() + 1);
     let owner = ctx.owner;
@@ -50,7 +49,7 @@ pub async fn fetch_balances_via_multicall(
     let eth_balance_call = Multicall3::getEthBalanceCall { addr: ctx.owner };
     let eth_balance_call_data = eth_balance_call.abi_encode();
     calls.push(Multicall3::Call {
-        target: ctx.multicall3,
+        target: ctx.network.multicall3_address(),
         callData: eth_balance_call_data.into(),
     });
 

@@ -1,7 +1,7 @@
 use crate::config::network_config::NetworkConfig;
 use crate::domain::EvmNetwork;
+use crate::services::session_manager::SessionManager;
 use crate::services::subscription_manager::SubscriptionManager;
-use crate::services::token_list_fetcher::TokenListFetcher;
 use alloy::network::Ethereum;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
 use std::collections::HashMap;
@@ -9,11 +9,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub network_config: Arc<NetworkConfig>,
-    pub providers: Arc<HashMap<EvmNetwork, DynProvider<Ethereum>>>,
-    pub ws_providers: Arc<HashMap<EvmNetwork, DynProvider>>,
-    pub sub_manager: Arc<SubscriptionManager>,
-    pub token_list_fetcher: Arc<TokenListFetcher>,
+    pub session_manager: Arc<SessionManager>,
 }
 
 impl AppState {
@@ -24,15 +20,14 @@ impl AppState {
         let sub_manager = Arc::new(SubscriptionManager::new());
         Arc::clone(&sub_manager).spawn_cleanup();
 
-        let token_list_fetcher = Arc::new(TokenListFetcher::new());
+        let session_manager = Arc::new(SessionManager::new(
+            providers,
+            ws_providers,
+            network_config.snapshot_interval,
+            network_config.max_watched_tokens_limit,
+        ));
 
-        Arc::new(Self {
-            network_config: Arc::new(network_config),
-            providers: Arc::new(providers),
-            ws_providers: Arc::new(ws_providers),
-            sub_manager,
-            token_list_fetcher,
-        })
+        Arc::new(Self { session_manager })
     }
 
     async fn build_rpc_roviders_map(

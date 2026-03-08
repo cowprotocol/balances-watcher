@@ -13,9 +13,6 @@ pub struct Args {
     #[arg(long, env="TOKEN_LIST_PATH", default_value=DEFAULT_TOKEN_LIST_PATH)]
     pub token_list_path: String,
 
-    #[arg(long, env = "MULTICALL_ADDRESS", default_value = "")]
-    pub multicall_address: String,
-
     #[arg(long, env = "SNAPSHOT_INTERVAL", default_value = "60")]
     pub snapshot_interval: String,
 
@@ -24,9 +21,6 @@ pub struct Args {
 
     #[arg(long, env = "ALLOWED_ORIGINS", default_value = "")]
     pub allowed_origins: String,
-
-    #[arg(long, env = "WETH_CONTRACT_ADDRESSES", default_value = "")]
-    pub weth_contract_addresses: String,
 }
 
 impl Args {

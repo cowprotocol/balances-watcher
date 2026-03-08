@@ -50,9 +50,7 @@ pub struct WatcherContext {
     pub owner: Address,
     pub provider: DynProvider,
     pub network: EvmNetwork,
-    pub multicall3: Address,
     pub ws_provider: DynProvider,
-    pub weth9_address: Address,
 }
 
 pub struct Watcher {
@@ -92,7 +90,6 @@ impl Watcher {
 
             let balance_call_ctx = BalanceCallCtx {
                 owner: ctx.owner,
-                multicall3: ctx.multicall3,
                 provider: Arc::new(ctx.provider.clone()),
                 network: ctx.network,
             };
@@ -176,7 +173,7 @@ impl Watcher {
      */
     async fn spawn_weth9_events_listener(&self) {
         let ctx = Arc::clone(&self.ctx);
-        let weth9_address = ctx.weth9_address;
+        let weth9_address = ctx.network.weth9_address();
 
         let event_signatures = vec![
             WrappedToken::Deposit::SIGNATURE_HASH,
@@ -195,7 +192,6 @@ impl Watcher {
                 owner: ctx.owner,
                 network: ctx.network,
                 provider: Arc::new(self.ctx.provider.clone()),
-                multicall3: ctx.multicall3,
             };
 
             Arc::new(ctx)
@@ -434,7 +430,6 @@ impl Watcher {
                 owner: ctx.owner,
                 network: ctx.network,
                 provider: Arc::new(ctx.provider.clone()),
-                multicall3: ctx.multicall3,
             };
 
             Arc::new(ctx)

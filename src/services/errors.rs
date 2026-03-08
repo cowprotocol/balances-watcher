@@ -8,14 +8,11 @@ pub enum ServiceError {
 
 #[derive(Debug, Clone, Error)]
 pub enum SubscriptionError {
-    #[error("There is no session for provided key")]
-    NoSession,
+    #[error("Too many subscriptions")]
+    TooManySubscriptions,
 
-    #[error("Too many clients")]
-    TooManyClients,
-
-    #[error("There is no more clients")]
-    ThereIsNoClients,
+    #[error("There aren't created subscriptions")]
+    ThereArentCreatedSubscriptions,
 }
 
 #[derive(Debug, Clone, Error)]
