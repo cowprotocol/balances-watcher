@@ -120,6 +120,7 @@ impl Watcher {
                 .into_iter()
                 .collect::<Vec<_>>()
         };
+        tracing::info!(tokens_count = tokens.len(), "snapshot updater fetching balances");
         let result = Self::get_tokens_balance(ctx, &tokens, BlockId::latest()).await;
 
         let event = match result {
@@ -144,11 +145,7 @@ impl Watcher {
             }
         };
 
-        if let Some(event) = event {
-            let _ = sub.sender.send(event).inspect(|_| {
-                counter!("balance_updates_sent_total").increment(1);
-            });
-        }
+        Self::send_balance_update_event(event, Arc::clone(&sub))
     }
 
     // request balances via multicall for a list of tokens and map error
@@ -226,15 +223,19 @@ impl Watcher {
                             }),
                         };
 
-                    if let Some(event) = event {
-                        let _ = sub.sender.send(event).inspect(|_| {
-                            counter!("balance_updates_sent_total").increment(1);
-                        });
-                    }
+                    Self::send_balance_update_event(event, Arc::clone(&sub));
                 })
             })
             .await;
         });
+    }
+
+    fn send_balance_update_event(event: Option<BalanceEvent>, sub: Arc<Subscription>) {
+        if let Some(event) = event {
+            let _ = sub.sender.send(event).inspect(|_| {
+                counter!("balance_updates_sent_total").increment(1);
+            });
+        }
     }
 
     // create a subscription to ws provider and run a loop to listen to logs
@@ -467,11 +468,7 @@ impl Watcher {
                         }),
                     };
 
-                    if let Some(event) = event {
-                        let _ = sub.sender.send(event).inspect(|_| {
-                            counter!("balance_updates_sent_total").increment(1);
-                        });
-                    }
+                    Self::send_balance_update_event(event, Arc::clone(&sub));
                 })
             })
             .await;
