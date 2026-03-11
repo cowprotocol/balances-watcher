@@ -1,4 +1,4 @@
-use crate::domain::EvmNetwork;
+use crate::domain::Session;
 use crate::evm::{erc20::ERC20, multicall3::Multicall3};
 use crate::services::errors::ServiceError;
 use alloy::eips::BlockId;
@@ -11,8 +11,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 pub struct BalanceCallCtx {
-    pub network: EvmNetwork,
-    pub owner: Address,
+    pub session: Session,
     pub provider: Arc<DynProvider>,
 }
 
@@ -23,7 +22,7 @@ pub async fn fetch_balances_via_multicall(
     tokens: &[Address],
     block_id: BlockId,
 ) -> Result<BalancesWithBlock, ServiceError> {
-    let native_address = ctx.network.native_token_address();
+    let native_address = ctx.session.network.native_token_address();
     let mut erc20_tokens: Vec<Address> = tokens
         .iter()
         .cloned()
@@ -32,10 +31,13 @@ pub async fn fetch_balances_via_multicall(
     erc20_tokens.sort();
 
     // todo check that clone is not expensive here
-    let multicall3 = Multicall3::new(ctx.network.multicall3_address(), ctx.provider.clone());
+    let multicall3 = Multicall3::new(
+        ctx.session.network.multicall3_address(),
+        ctx.provider.clone(),
+    );
     // one for erc balances
     let mut calls: Vec<Multicall3::Call> = Vec::with_capacity(erc20_tokens.len() + 1);
-    let owner = ctx.owner;
+    let owner = ctx.session.owner;
 
     for address in &erc20_tokens {
         let call = ERC20::balanceOfCall { owner };
@@ -46,10 +48,12 @@ pub async fn fetch_balances_via_multicall(
         });
     }
 
-    let eth_balance_call = Multicall3::getEthBalanceCall { addr: ctx.owner };
+    let eth_balance_call = Multicall3::getEthBalanceCall {
+        addr: ctx.session.owner,
+    };
     let eth_balance_call_data = eth_balance_call.abi_encode();
     calls.push(Multicall3::Call {
-        target: ctx.network.multicall3_address(),
+        target: ctx.session.network.multicall3_address(),
         callData: eth_balance_call_data.into(),
     });
 
@@ -107,8 +111,8 @@ pub async fn fetch_balances_via_multicall(
                 tracing::error!(
                     error = %e,
                     token = %erc20_token,
-                    "abi_decode failed\
-                ");
+                    "abi_decode failed"
+                );
             }
         }
     }

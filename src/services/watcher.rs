@@ -15,6 +15,7 @@ use thiserror::Error;
 use tokio::sync::RwLockWriteGuard;
 use tokio::time::interval;
 
+use crate::domain::Session;
 use crate::services::fetch_balances_via_multicall::{BalanceCallCtx, BalancesWithBlock};
 use crate::services::subscription_manager::{Balance, BalanceSnapshot};
 use crate::{
@@ -86,9 +87,11 @@ impl Watcher {
 
         let balance_call_ctx = {
             let balance_call_ctx = BalanceCallCtx {
-                owner: ctx.owner,
+                session: Session {
+                    owner: ctx.owner,
+                    network: ctx.network,
+                },
                 provider: Arc::new(ctx.provider.clone()),
-                network: ctx.network,
             };
 
             Arc::new(balance_call_ctx)
@@ -111,7 +114,8 @@ impl Watcher {
 
     // request all balances for a list of watched tokens via multicall and broadcast them to clients
     async fn fetch_balances_and_broadcast(ctx: Arc<BalanceCallCtx>, sub: Arc<Subscription>) {
-        let owner = ctx.owner;
+        let owner = ctx.session.owner;
+        let network = ctx.session.network;
         let tokens = {
             sub.tokens
                 .read()
@@ -120,7 +124,10 @@ impl Watcher {
                 .into_iter()
                 .collect::<Vec<_>>()
         };
-        tracing::info!(tokens_count = tokens.len(), "snapshot updater fetching balances");
+        tracing::info!(
+            tokens_count = tokens.len(),
+            "snapshot updater fetching balances"
+        );
         let result = Self::get_tokens_balance(ctx, &tokens, BlockId::latest()).await;
 
         let event = match result {
@@ -137,7 +144,11 @@ impl Watcher {
                 }
             }
             Err(e) => {
-                tracing::error!("Failed to get balances for {}: {}", owner, e);
+                tracing::error!(
+                    owner = %owner,
+                    error = %e,
+                    "failed to get balances"
+                );
                 Some(BalanceEvent::Error {
                     code: 500,
                     message: "Error when make multicall3 request".to_string(),
@@ -145,7 +156,7 @@ impl Watcher {
             }
         };
 
-        Self::send_balance_update_event(event, Arc::clone(&sub))
+        Self::send_balance_update_event(event, Arc::clone(&sub), Session { owner, network })
     }
 
     // request balances via multicall for a list of tokens and map error
@@ -154,8 +165,8 @@ impl Watcher {
         tokens: &[Address],
         block_id: BlockId,
     ) -> Result<BalancesWithBlock, WatcherError> {
-        let owner = ctx.owner;
-        let network = ctx.network;
+        let owner = ctx.session.owner;
+        let network = ctx.session.network;
         fetch_balances_via_multicall::fetch_balances_via_multicall(ctx, tokens, block_id)
             .await
             .map_err(|e| {
@@ -187,8 +198,10 @@ impl Watcher {
 
         let balance_call_ctx = {
             let ctx = BalanceCallCtx {
-                owner: ctx.owner,
-                network: ctx.network,
+                session: Session {
+                    owner: ctx.owner,
+                    network: ctx.network,
+                },
                 provider: Arc::new(self.ctx.provider.clone()),
             };
 
@@ -205,36 +218,53 @@ impl Watcher {
                 Box::pin(async move {
                     counter!("weth9_events_received_total").increment(1);
 
-                    let event =
-                        match Self::parse_weth9_logs_and_fetch_balance(ctx, &log, weth9_address)
-                            .await
-                        {
-                            Ok(balances) => {
-                                let balance_snapshot = sub.balances_snapshot.write().await;
-                                counter!("partial_snapshot_updater_runs_total").increment(1);
-                                let diff =
-                                    Self::update_balances_and_take_diff(balance_snapshot, balances);
+                    let event = match Self::parse_weth9_logs_and_fetch_balance(
+                        ctx.clone(),
+                        &log,
+                        weth9_address,
+                    )
+                    .await
+                    {
+                        Ok(balances) => {
+                            let balance_snapshot = sub.balances_snapshot.write().await;
+                            counter!("partial_snapshot_updater_runs_total").increment(1);
+                            let diff =
+                                Self::update_balances_and_take_diff(balance_snapshot, balances);
 
-                                (!diff.is_empty()).then_some(BalanceEvent::BalanceUpdate(diff))
-                            }
-                            Err(err) => Some(BalanceEvent::Error {
-                                code: 500,
-                                message: err.to_string(),
-                            }),
-                        };
+                            (!diff.is_empty()).then_some(BalanceEvent::BalanceUpdate(diff))
+                        }
+                        Err(err) => Some(BalanceEvent::Error {
+                            code: 500,
+                            message: err.to_string(),
+                        }),
+                    };
 
-                    Self::send_balance_update_event(event, Arc::clone(&sub));
+                    Self::send_balance_update_event(event, Arc::clone(&sub), ctx.session);
                 })
             })
             .await;
         });
     }
 
-    fn send_balance_update_event(event: Option<BalanceEvent>, sub: Arc<Subscription>) {
+    fn send_balance_update_event(
+        event: Option<BalanceEvent>,
+        sub: Arc<Subscription>,
+        session: Session,
+    ) {
         if let Some(event) = event {
-            let _ = sub.sender.send(event).inspect(|_| {
-                counter!("balance_updates_sent_total").increment(1);
-            });
+            let _ = sub
+                .sender
+                .send(event)
+                .inspect(|_| {
+                    counter!("balance_updates_sent_total").increment(1);
+                })
+                .inspect_err(|err| {
+                    tracing::info!(
+                        error = %err,
+                        sub = %session,
+                        "failed to send balance update event"
+                    )
+                });
         }
     }
 
@@ -310,8 +340,8 @@ impl Watcher {
         token: Address,
         block_id: BlockId,
     ) -> Result<BalancesWithBlock, WatcherError> {
-        let network = ctx.network;
-        let owner = ctx.owner;
+        let network = ctx.session.network;
+        let owner = ctx.session.owner;
         let native_address = network.native_token_address();
         let tokens = vec![token, network.native_token_address()];
 
@@ -334,7 +364,7 @@ impl Watcher {
     ) -> Result<BalancesWithBlock, WatcherError> {
         let parsed_log = Self::parse_weth9_logs(log).map_err(|err| {
             counter!("parse_weth9_logs_failed_total").increment(1);
-            WatcherError::ParseLog(ctx.network, ctx.owner, err.to_string())
+            WatcherError::ParseLog(ctx.session.network, ctx.session.owner, err.to_string())
         })?;
 
         let block_id = match parsed_log {
@@ -429,8 +459,10 @@ impl Watcher {
 
         let balance_call_ctx = {
             let ctx = BalanceCallCtx {
-                owner: ctx.owner,
-                network: ctx.network,
+                session: Session {
+                    owner: ctx.owner,
+                    network: ctx.network,
+                },
                 provider: Arc::new(ctx.provider.clone()),
             };
 
@@ -468,7 +500,7 @@ impl Watcher {
                         }),
                     };
 
-                    Self::send_balance_update_event(event, Arc::clone(&sub));
+                    Self::send_balance_update_event(event, Arc::clone(&sub), ctx.session);
                 })
             })
             .await;
@@ -523,7 +555,7 @@ impl Watcher {
     ) -> Option<BalancesWithBlock> {
         let Some(block_number) = log.block_number else {
             tracing::warn!(
-                network = %ctx.network,
+                network = %ctx.session.network,
                 "block number is undefined"
             );
             return None;
@@ -535,8 +567,8 @@ impl Watcher {
                 counter!("parse_erc20_log_errors_total").increment(1);
                 tracing::error!(
                     error = %err,
-                    netowrk = %ctx.network,
-                    owner = %ctx.owner,
+                    netowrk = %ctx.session.network,
+                    owner = %ctx.session.owner,
                     "error when parse log",
                 );
                 return None;

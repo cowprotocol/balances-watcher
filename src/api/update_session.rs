@@ -8,7 +8,11 @@ use axum::{
 use serde::Deserialize;
 
 use crate::services::session_manager::SessionContext;
-use crate::{app_error::AppError, app_state::AppState, domain::EvmNetwork};
+use crate::{
+    app_error::AppError,
+    app_state::AppState,
+    domain::{EvmNetwork, Session},
+};
 
 #[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -32,8 +36,7 @@ pub async fn update_session(
     }
 
     let ctx = SessionContext {
-        network,
-        owner,
+        session: Session { network, owner },
         tokens_lists_urls: body.tokens_lists_urls,
         custom_tokens: body.custom_tokens,
     };

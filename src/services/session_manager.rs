@@ -1,4 +1,4 @@
-use crate::domain::{BalanceEvent, EvmNetwork, SubscriptionKey};
+use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::services::cleanup_stream;
 use crate::services::errors::{FetcherError, SubscriptionError};
 use crate::services::subscription_manager::SubscriptionManager;
@@ -31,8 +31,7 @@ pub struct SessionManager {
 }
 
 pub struct SessionContext {
-    pub owner: Address,
-    pub network: EvmNetwork,
+    pub session: Session,
     pub custom_tokens: Vec<Address>,
     pub tokens_lists_urls: Vec<String>,
 }
@@ -108,17 +107,14 @@ impl SessionManager {
     }
 
     pub async fn upsert(&self, ctx: SessionContext) -> Result<(), SessionError> {
-        let sub_key = SubscriptionKey {
-            network: ctx.network,
-            owner: ctx.owner,
-        };
+        let session = ctx.session;
 
-        let provider = match self.providers.get(&sub_key.network) {
+        let provider = match self.providers.get(&session.network) {
             Some(provider) => provider.clone(),
             None => return Err(SessionError::ProviderIsNotDefined),
         };
 
-        let ws_provider = match self.ws_providers.get(&sub_key.network) {
+        let ws_provider = match self.ws_providers.get(&session.network) {
             None => {
                 return Err(SessionError::WsProviderIsNotDefined);
             }
@@ -126,10 +122,10 @@ impl SessionManager {
         };
 
         let tokens = self
-            .fetch_and_enriched_tokens(sub_key, ctx.tokens_lists_urls, ctx.custom_tokens)
+            .fetch_and_enriched_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
 
-        let subscription = self.sub_manager.get_subscription(sub_key).await;
+        let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
         let updated_tokens = if let Some(sub) = subscription {
             let mut watched_tokens = { sub.tokens.read().await.clone() };
@@ -159,7 +155,7 @@ impl SessionManager {
             ));
         }
 
-        let sub = self.sub_manager.upsert(sub_key, updated_tokens).await;
+        let sub = self.sub_manager.upsert(session, updated_tokens).await;
 
         // if there aren't spawners yet - spawn them and create a first subscription
         let should_spawn_watchers = sub
@@ -170,13 +166,13 @@ impl SessionManager {
         if should_spawn_watchers {
             let ctx = WatcherContext {
                 provider,
-                owner: sub_key.owner,
-                network: sub_key.network,
+                owner: session.owner,
+                network: session.network,
                 ws_provider,
             };
 
             tracing::info!(
-                sub = %sub_key,
+                session = %session,
                 "create first sse subscription and spawn watchers"
             );
 
@@ -186,7 +182,7 @@ impl SessionManager {
         }
 
         tracing::warn!(
-            sub = %sub_key,
+            session = %session,
             "session was created",
         );
 
@@ -195,21 +191,21 @@ impl SessionManager {
 
     async fn fetch_and_enriched_tokens(
         &self,
-        sub_key: SubscriptionKey,
+        session: Session,
         token_lists_urls: Vec<String>,
         custom_tokens: Vec<Address>,
     ) -> Result<HashSet<Address>, SessionError> {
         let token_list_fetcher = Arc::clone(&self.fetcher);
 
         let mut tokens = token_list_fetcher
-            .get_tokens(&token_lists_urls, sub_key.network)
+            .get_tokens(&token_lists_urls, session.network)
             .await
             .map_err(|err| match err {
                 FetcherError::UnableToLoadList(url, _) => SessionError::TokenListNotFound(url),
             })?;
         tokens.extend(custom_tokens);
-        tokens.insert(sub_key.network.weth9_address());
-        tokens.insert(sub_key.network.native_token_address());
+        tokens.insert(session.network.weth9_address());
+        tokens.insert(session.network.native_token_address());
 
         Ok(tokens)
     }
@@ -240,8 +236,8 @@ impl SessionManager {
         owner: Address,
         network: EvmNetwork,
     ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
-        let sub_key = SubscriptionKey { network, owner };
-        let (rx, subscription) = self.sub_manager.subscribe(sub_key).await.map_err(|err| {
+        let session = Session { network, owner };
+        let (rx, subscription) = self.sub_manager.subscribe(session).await.map_err(|err| {
             let err = Self::map_subscription_error(err);
             StreamError::from(err)
         })?;
@@ -252,7 +248,7 @@ impl SessionManager {
         // otherwise, send balance snapshot
         let event = if balance_snapshot.is_empty() {
             tracing::info!(
-                sub = %sub_key,
+                sub = %session,
                 "balance snapshot is empty"
             );
             None
@@ -267,14 +263,14 @@ impl SessionManager {
 
         if let Some(event) = event {
             tracing::info!(
-                sub = %sub_key,
+                sub = %session,
                 "sending first balance snapshot to new sse connection (full)"
             );
 
             let _ = subscription.sender.send(event).inspect_err(|err| {
                 tracing::info!(
                     error = %err,
-                    sub = %sub_key,
+                    sub = %session,
                     "error when send balance_snapshot update"
                 );
             });
@@ -309,7 +305,7 @@ impl SessionManager {
         });
 
         let cleanup_stream =
-            cleanup_stream::CleanupStream::new(sse_stream, manager_for_cleanup, sub_key);
+            cleanup_stream::CleanupStream::new(sse_stream, manager_for_cleanup, session);
 
         Ok(Sse::new(cleanup_stream))
     }

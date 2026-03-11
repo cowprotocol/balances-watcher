@@ -2,12 +2,12 @@ use alloy::{primitives::Address, transports::http::Client};
 use futures::{stream, StreamExt};
 use metrics::{counter, histogram};
 use serde::Deserialize;
+use std::slice::from_ref;
 use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
-use std::slice::from_ref;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
