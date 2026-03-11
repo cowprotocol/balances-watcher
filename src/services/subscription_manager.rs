@@ -1,10 +1,9 @@
-use crate::config::constants::BROADCAST_CHANNEL_CAPACITY;
 use crate::domain::{BalanceEvent, Session};
 use crate::services::errors::SubscriptionError;
+use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, U256};
 use metrics::{counter, gauge};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
@@ -23,14 +22,6 @@ pub struct Balance {
 
 pub type BalanceSnapshot = HashMap<Address, Balance>;
 
-pub struct Subscription {
-    pub sender: broadcast::Sender<BalanceEvent>,
-    pub balances_snapshot: RwLock<BalanceSnapshot>,
-    pub cancel_token: tokio_util::sync::CancellationToken,
-    pub tokens: RwLock<HashSet<Address>>,
-    pub watchers_spawned: AtomicBool,
-}
-
 pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
 }
@@ -47,29 +38,20 @@ impl SubscriptionManager {
     pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
         let mut subs = self.subscriptions.write().await;
         if let Some(existing) = subs.get_mut(&session) {
-            let mut watchet_tokens = existing.subscription.tokens.write().await;
-            watchet_tokens.extend(tokens);
+            let watched_tokens_len = existing.subscription.extend_tokens(tokens).await;
 
             counter!("sessions_updated_total").increment(1);
             tracing::info!(
                 session = %session,
-                tokens_len = watchet_tokens.len(),
+                tokens_len = watched_tokens_len,
                 "session is updated"
             );
 
             return Arc::clone(&existing.subscription);
         }
 
-        let (sender, _) = broadcast::channel::<BalanceEvent>(BROADCAST_CHANNEL_CAPACITY);
-
         let tokens_len = tokens.len();
-        let subscription = Arc::new(Subscription {
-            sender,
-            balances_snapshot: RwLock::new(HashMap::new()),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            tokens: RwLock::new(tokens),
-            watchers_spawned: AtomicBool::new(false),
-        });
+        let subscription = Arc::new(Subscription::new(tokens));
 
         let sub_with_counter = SubWithCounter {
             clients: 0,
@@ -107,7 +89,7 @@ impl SubscriptionManager {
                 .checked_add(1)
                 .ok_or(SubscriptionError::TooManySubscriptions)?;
             existing.idle_since = None;
-            let receiver = existing.subscription.sender.subscribe();
+            let receiver = existing.subscription.subscribe();
 
             counter!("sse_connections_total").increment(1);
             gauge!("sse_connections_active").increment(1);
@@ -183,7 +165,7 @@ impl SubscriptionManager {
             };
 
             if should_remove {
-                sub.subscription.cancel_token.cancel();
+                sub.subscription.cancellable().cancel();
                 counter!("sessions_expired_total").increment(1);
                 gauge!("active_sessions").decrement(1);
                 tracing::info!(

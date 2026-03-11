@@ -16,7 +16,6 @@ use metrics::counter;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -128,7 +127,7 @@ impl SessionManager {
         let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
         let updated_tokens = if let Some(sub) = subscription {
-            let mut watched_tokens = { sub.tokens.read().await.clone() };
+            let mut watched_tokens = sub.watched_tokens().await;
 
             let new_tokens = tokens
                 .iter()
@@ -158,10 +157,7 @@ impl SessionManager {
         let sub = self.sub_manager.upsert(session, updated_tokens).await;
 
         // if there aren't spawners yet - spawn them and create a first subscription
-        let should_spawn_watchers = sub
-            .watchers_spawned
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok();
+        let should_spawn_watchers = sub.try_mark_watchers_spawned();
 
         if should_spawn_watchers {
             let ctx = WatcherContext {
@@ -242,7 +238,7 @@ impl SessionManager {
             StreamError::from(err)
         })?;
 
-        let balance_snapshot = subscription.balances_snapshot.read().await;
+        let balance_snapshot = subscription.current_snapshot().await;
 
         // if it's a first sse connection, the watcher should send updates when it fetches balances
         // otherwise, send balance snapshot
@@ -267,13 +263,7 @@ impl SessionManager {
                 "sending first balance snapshot to new sse connection (full)"
             );
 
-            let _ = subscription.sender.send(event).inspect_err(|err| {
-                tracing::info!(
-                    error = %err,
-                    session = %session,
-                    "error when send balance_snapshot update"
-                );
-            });
+            subscription.send_event(event, session);
         }
 
         let manager_for_cleanup = Arc::clone(&self.sub_manager);
