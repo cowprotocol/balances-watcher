@@ -61,7 +61,7 @@ impl TokenListFetcher {
 
             let _guard = lock.lock().await;
 
-            if self.is_cached(url.clone()).await {
+            if !self.is_cached(url.clone()).await {
                 self.fetch_and_cache(from_ref(url)).await?;
             }
         }

@@ -248,7 +248,7 @@ impl SessionManager {
         // otherwise, send balance snapshot
         let event = if balance_snapshot.is_empty() {
             tracing::info!(
-                sub = %session,
+                session = %session,
                 "balance snapshot is empty"
             );
             None
@@ -263,14 +263,14 @@ impl SessionManager {
 
         if let Some(event) = event {
             tracing::info!(
-                sub = %session,
+                session = %session,
                 "sending first balance snapshot to new sse connection (full)"
             );
 
             let _ = subscription.sender.send(event).inspect_err(|err| {
                 tracing::info!(
                     error = %err,
-                    sub = %session,
+                    session = %session,
                     "error when send balance_snapshot update"
                 );
             });

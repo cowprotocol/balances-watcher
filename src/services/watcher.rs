@@ -140,6 +140,7 @@ impl Watcher {
                 if !diff.is_empty() {
                     Some(BalanceEvent::BalanceUpdate(diff))
                 } else {
+                    tracing::info!(session = %Session { owner, network }, "diff is empty, skipping broadcast");
                     None
                 }
             }
@@ -251,21 +252,29 @@ impl Watcher {
         sub: Arc<Subscription>,
         session: Session,
     ) {
-        if let Some(event) = event {
-            let _ = sub
-                .sender
-                .send(event)
-                .inspect(|_| {
-                    counter!("balance_updates_sent_total").increment(1);
-                })
-                .inspect_err(|err| {
-                    tracing::info!(
-                        error = %err,
-                        sub = %session,
-                        "failed to send balance update event"
-                    )
-                });
-        }
+        let Some(event) = event else {
+            tracing::info!(session = %session, "no balance update to send (empty diff)");
+            return;
+        };
+
+        let _ = sub
+            .sender
+            .send(event)
+            .inspect(|receivers| {
+                counter!("balance_updates_sent_total").increment(1);
+                tracing::info!(
+                    session = %session,
+                    receivers,
+                    "balance update sent"
+                );
+            })
+            .inspect_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    session = %session,
+                    "failed to send balance update event: no receivers"
+                );
+            });
     }
 
     // create a subscription to ws provider and run a loop to listen to logs
