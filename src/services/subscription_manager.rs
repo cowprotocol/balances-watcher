@@ -1,10 +1,9 @@
-use crate::config::constants::BROADCAST_CHANNEL_CAPACITY;
-use crate::domain::{BalanceEvent, SubscriptionKey};
+use crate::domain::{BalanceEvent, Session};
 use crate::services::errors::SubscriptionError;
+use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, U256};
 use metrics::{counter, gauge};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
@@ -23,16 +22,8 @@ pub struct Balance {
 
 pub type BalanceSnapshot = HashMap<Address, Balance>;
 
-pub struct Subscription {
-    pub sender: broadcast::Sender<BalanceEvent>,
-    pub balances_snapshot: RwLock<BalanceSnapshot>,
-    pub cancel_token: tokio_util::sync::CancellationToken,
-    pub tokens: RwLock<HashSet<Address>>,
-    pub watchers_spawned: AtomicBool,
-}
-
 pub struct SubscriptionManager {
-    subscriptions: RwLock<HashMap<SubscriptionKey, SubWithCounter>>,
+    subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(60);
@@ -44,36 +35,23 @@ impl SubscriptionManager {
         }
     }
 
-    pub async fn create_or_update(
-        &self,
-        key: SubscriptionKey,
-        tokens: HashSet<Address>,
-    ) -> Arc<Subscription> {
+    pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
         let mut subs = self.subscriptions.write().await;
-        if let Some(existing) = subs.get_mut(&key) {
-            let mut watchet_tokens = existing.subscription.tokens.write().await;
-            watchet_tokens.extend(tokens);
+        if let Some(existing) = subs.get_mut(&session) {
+            let watched_tokens_len = existing.subscription.extend_tokens(tokens).await;
 
             counter!("sessions_updated_total").increment(1);
             tracing::info!(
-                sub = %key,
-                tokens_len = watchet_tokens.len(),
+                session = %session,
+                tokens_len = watched_tokens_len,
                 "session is updated"
             );
 
             return Arc::clone(&existing.subscription);
         }
 
-        let (sender, _) = broadcast::channel::<BalanceEvent>(BROADCAST_CHANNEL_CAPACITY);
-
         let tokens_len = tokens.len();
-        let subscription = Arc::new(Subscription {
-            sender,
-            balances_snapshot: RwLock::new(HashMap::new()),
-            cancel_token: tokio_util::sync::CancellationToken::new(),
-            tokens: RwLock::new(tokens),
-            watchers_spawned: AtomicBool::new(false),
-        });
+        let subscription = Arc::new(Subscription::new(tokens));
 
         let sub_with_counter = SubWithCounter {
             clients: 0,
@@ -81,60 +59,60 @@ impl SubscriptionManager {
             idle_since: Some(Instant::now()),
         };
 
-        subs.insert(key, sub_with_counter);
+        subs.insert(session, sub_with_counter);
 
         counter!("sessions_created_total").increment(1);
         gauge!("active_sessions").increment(1);
         tracing::info!(
             tokens_len = %tokens_len,
-            sub = %key,
+            session = %session,
             "session is created"
         );
 
         Arc::clone(&subscription)
     }
 
-    pub async fn get_subscription(&self, key: SubscriptionKey) -> Option<Arc<Subscription>> {
+    pub async fn get_subscription(&self, session: Session) -> Option<Arc<Subscription>> {
         let subs = self.subscriptions.read().await;
-        subs.get(&key).map(|sub| Arc::clone(&sub.subscription))
+        subs.get(&session).map(|sub| Arc::clone(&sub.subscription))
     }
 
     pub async fn subscribe(
         &self,
-        key: SubscriptionKey,
+        session: Session,
     ) -> Result<(broadcast::Receiver<BalanceEvent>, Arc<Subscription>), SubscriptionError> {
         let mut subs = self.subscriptions.write().await;
 
-        if let Some(existing) = subs.get_mut(&key) {
+        if let Some(existing) = subs.get_mut(&session) {
             existing.clients = existing
                 .clients
                 .checked_add(1)
-                .ok_or(SubscriptionError::TooManyClients)?;
+                .ok_or(SubscriptionError::TooManySubscriptions)?;
             existing.idle_since = None;
-            let receiver = existing.subscription.sender.subscribe();
+            let receiver = existing.subscription.subscribe();
 
             counter!("sse_connections_total").increment(1);
             gauge!("sse_connections_active").increment(1);
             tracing::info!(
-                sub = %key,
+                session = %session,
                 "sse connection created"
             );
 
             return Ok((receiver, Arc::clone(&existing.subscription)));
         }
 
-        Err(SubscriptionError::NoSession)
+        Err(SubscriptionError::ThereArentCreatedSubscriptions)
     }
 
     // true - if it was the last client
-    pub async fn unsubscribe(&self, key: &SubscriptionKey) -> Result<bool, SubscriptionError> {
+    pub async fn unsubscribe(&self, session: &Session) -> Result<bool, SubscriptionError> {
         let mut subs = self.subscriptions.write().await;
 
-        if let Some(existing) = subs.get_mut(key) {
+        if let Some(existing) = subs.get_mut(session) {
             existing.clients = existing
                 .clients
                 .checked_sub(1)
-                .ok_or(SubscriptionError::ThereIsNoClients)?;
+                .ok_or(SubscriptionError::ThereArentCreatedSubscriptions)?;
 
             if existing.clients == 0 {
                 existing.idle_since = Some(Instant::now());
@@ -142,7 +120,7 @@ impl SubscriptionManager {
                 counter!("sessions_expired_total").increment(1);
                 gauge!("sse_connections_active").decrement(1);
                 tracing::info!(
-                    sub = %key,
+                    session = %session,
                     "session expired"
                 );
 
@@ -151,14 +129,14 @@ impl SubscriptionManager {
 
             gauge!("sse_connections_active").decrement(1);
             tracing::info!(
-                sub = %key,
+                session = %session,
                 "sse connection is closed"
             );
 
             return Ok(false);
         }
 
-        Err(SubscriptionError::ThereIsNoClients)
+        Err(SubscriptionError::ThereArentCreatedSubscriptions)
     }
 
     pub fn spawn_cleanup(self: Arc<Self>) {
@@ -176,7 +154,7 @@ impl SubscriptionManager {
 
         let now = Instant::now();
 
-        subs.retain(|key, sub| {
+        subs.retain(|session, sub| {
             let should_remove = if sub.clients == 0 {
                 match sub.idle_since {
                     Some(idle_since) => now.duration_since(idle_since) > SESSION_TTL,
@@ -187,11 +165,11 @@ impl SubscriptionManager {
             };
 
             if should_remove {
-                sub.subscription.cancel_token.cancel();
+                sub.subscription.cancellable().cancel();
                 counter!("sessions_expired_total").increment(1);
                 gauge!("active_sessions").decrement(1);
                 tracing::info!(
-                    key = %key,
+                    session = %session,
                     "subscription cleanup"
                 );
             }

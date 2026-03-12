@@ -1,13 +1,14 @@
-use std::{
-    collections::{HashMap, HashSet},
-    time::{Duration, Instant},
-};
-
 use alloy::{primitives::Address, transports::http::Client};
 use futures::{stream, StreamExt};
 use metrics::{counter, histogram};
 use serde::Deserialize;
-use tokio::sync::RwLock;
+use std::slice::from_ref;
+use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     config::constants::TOKEN_FETCH_CONCURRENCY,
@@ -24,7 +25,7 @@ struct CachedTokenList {
 
 pub struct TokenListFetcher {
     cache: RwLock<HashMap<String, CachedTokenList>>,
-    in_flight: RwLock<HashSet<String>>,
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     client: Client,
     ttl: Duration,
 }
@@ -40,7 +41,7 @@ impl TokenListFetcher {
             cache: RwLock::new(HashMap::new()),
             client: Client::new(),
             ttl: CACHE_TTL,
-            in_flight: RwLock::new(HashSet::new()),
+            locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -49,31 +50,24 @@ impl TokenListFetcher {
         urls: &[String],
         network: EvmNetwork,
     ) -> Result<HashSet<Address>, FetcherError> {
-        let uncached_urls = self.get_uncached_urls(urls).await;
+        for url in urls {
+            let lock = {
+                let mut locks = self.locks.lock().await;
+                locks
+                    .entry(url.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone()
+            };
 
-        // fetch uncached lists
-        if !uncached_urls.is_empty() {
-            {
-                // flag fetching urls
-                let mut in_flight = self.in_flight.write().await;
-                in_flight.extend(urls.iter().cloned());
+            let _guard = lock.lock().await;
+
+            if !self.is_cached(url.clone()).await {
+                self.fetch_and_cache(from_ref(url)).await?;
             }
-
-            let result = self.fetch_and_cache(&uncached_urls).await;
-
-            {
-                // unflag fetching urls
-                let mut in_flight = self.in_flight.write().await;
-                for url in urls {
-                    in_flight.remove(url);
-                }
-            }
-
-            result?;
         }
 
-        let from_cache = self.collect_from_cache(urls, network).await;
-        Ok(from_cache)
+        let cached = self.collect_from_cache(urls, network).await;
+        Ok(cached)
     }
 
     async fn fetch_and_cache(&self, urls: &[String]) -> Result<(), FetcherError> {
@@ -171,23 +165,11 @@ impl TokenListFetcher {
         result
     }
 
-    async fn get_uncached_urls(&self, urls: &[String]) -> Vec<String> {
-        let cached_lists = self.cache.read().await;
-        let in_flight = self.in_flight.read().await;
-        let now = Instant::now();
-
-        urls.iter()
-            .filter(|url| {
-                if in_flight.contains(*url) {
-                    return false;
-                }
-
-                match cached_lists.get(*url) {
-                    Some(cached_list) => now.duration_since(cached_list.fetched_at) >= self.ttl,
-                    None => true,
-                }
-            })
-            .cloned()
-            .collect()
+    async fn is_cached(&self, url: String) -> bool {
+        let cache = self.cache.read().await;
+        match cache.get(&url) {
+            Some(cached) => cached.fetched_at.elapsed() < self.ttl,
+            None => false,
+        }
     }
 }

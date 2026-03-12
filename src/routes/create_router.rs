@@ -1,6 +1,6 @@
-use crate::api::create_sse_session::create_sse_session;
+use crate::api::create_session::create_session;
+use crate::api::create_sse_session::create_sse_connection;
 use crate::api::update_session::update_session;
-use crate::api::{balance::get_token_balance, create_session::create_session};
 use crate::app_state::AppState;
 use axum::routing::put;
 use axum::{
@@ -43,13 +43,12 @@ pub fn create_router(
             "/metrics",
             get(move || async move { prometheus_handler.render() }),
         )
-        .route("/sse/{chain_id}/balances/{owner}", get(create_sse_session))
+        .route(
+            "/sse/{chain_id}/balances/{owner}",
+            get(create_sse_connection),
+        )
         .route("/{chain_id}/sessions/{owner}", post(create_session))
         .route("/{chain_id}/sessions/{owner}", put(update_session))
-        .route(
-            "/{chain_id}/balance/{owner}/{token}",
-            get(get_token_balance),
-        )
         .layer(cors)
         .with_state(app_state)
 }

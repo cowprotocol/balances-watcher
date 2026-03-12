@@ -1,14 +1,10 @@
 use super::constants::{DEFAULT_MAX_WATCHED_TOKENS_LIMIT, DEFAULT_SNAPSHOT_INTERVAL_SECS};
 use crate::args::Args;
-use crate::config::wrapped_address::get_wrapped_address;
 use crate::domain::EvmNetwork;
-use alloy::primitives::Address;
-use std::str::FromStr;
 
 #[derive(Debug)]
 pub struct NetworkConfig {
     api_key: String,
-    pub multicall_address: Address,
     pub snapshot_interval: usize,
     pub max_watched_tokens_limit: usize,
     pub allowed_origins: Vec<String>,
@@ -17,12 +13,6 @@ pub struct NetworkConfig {
 impl NetworkConfig {
     pub fn init(args: &Args) -> Self {
         let api_key = args.alchemy_api_key.clone();
-
-        let multicall_address = Address::from_str(&args.multicall_address)
-            .inspect_err(|err| {
-                tracing::error!("Failed to parse multicall_address {}", err);
-            })
-            .unwrap_or(Address::ZERO);
 
         let snapshot_interval: usize = args
             .snapshot_interval
@@ -51,15 +41,10 @@ impl NetworkConfig {
 
         Self {
             api_key,
-            multicall_address,
             snapshot_interval,
             max_watched_tokens_limit,
             allowed_origins,
         }
-    }
-
-    pub fn multicall_address(&self) -> &Address {
-        &self.multicall_address
     }
 
     fn network_subdomain(network: EvmNetwork) -> &'static str {
@@ -78,9 +63,5 @@ impl NetworkConfig {
     pub fn alchemy_ws_url(&self, network: EvmNetwork) -> String {
         let subdomain = Self::network_subdomain(network);
         format!("wss://{}.g.alchemy.com/v2/{}", subdomain, self.api_key)
-    }
-
-    pub fn weth_address(&self, network: &EvmNetwork) -> Address {
-        get_wrapped_address(network)
     }
 }

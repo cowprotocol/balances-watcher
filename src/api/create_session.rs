@@ -1,17 +1,16 @@
-use std::sync::Arc;
-
 use alloy::primitives::Address;
 use axum::{
     extract::{Path, State},
     Json,
 };
 use serde::Deserialize;
+use std::sync::Arc;
 
+use crate::services::session_manager::SessionContext;
 use crate::{
     app_error::AppError,
     app_state::AppState,
-    config::constants::DEFAULT_MAX_WATCHED_TOKENS_LIMIT,
-    domain::{EvmNetwork, SubscriptionKey},
+    domain::{EvmNetwork, Session},
 };
 
 #[derive(Deserialize, Clone, Debug)]
@@ -23,6 +22,8 @@ pub struct CreateSessionRequest {
     custom_tokens: Vec<Address>,
 }
 
+// handler to create a session - this endpoint should be called before sse request
+// it creates necessary web3 listeners and snapshot updaters
 pub async fn create_session(
     Path((network, owner)): Path<(EvmNetwork, Address)>,
     State(state): State<Arc<AppState>>,
@@ -34,35 +35,15 @@ pub async fn create_session(
         ));
     }
 
-    let key = SubscriptionKey { network, owner };
+    let ctx = SessionContext {
+        session: Session { network, owner },
+        tokens_lists_urls: body.tokens_lists_urls,
+        custom_tokens: body.custom_tokens,
+    };
 
-    let fetcher = Arc::clone(&state.token_list_fetcher);
-
-    let mut tokens = fetcher
-        .get_tokens(&body.tokens_lists_urls, network)
+    state
+        .session_manager
+        .upsert(ctx)
         .await
-        .map_err(|err| AppError::BadRequest(err.to_string()))?;
-
-    let weth_address = state.network_config.weth_address(&network);
-    tokens.insert(weth_address);
-
-    let mut combined = tokens.clone();
-    combined.extend(body.custom_tokens.clone());
-
-    if combined.len() > DEFAULT_MAX_WATCHED_TOKENS_LIMIT {
-        return Err(AppError::TokenLimitExceeded);
-    }
-
-    tokens.extend(body.custom_tokens);
-
-    let _ = state.sub_manager.create_or_update(key, tokens).await;
-
-    tracing::warn!(
-        "session for wallet:network {}:{} was created, watched tokens count is {}",
-        owner,
-        network,
-        combined.len(),
-    );
-
-    Ok(())
+        .map_err(AppError::from)
 }

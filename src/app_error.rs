@@ -1,26 +1,18 @@
-use alloy::primitives::Address;
+use crate::services::session_manager::SessionError;
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::domain::EvmNetwork;
-
 #[derive(Error, Debug)]
 pub enum AppError {
-    #[error("Internal error: {0}")]
-    Internal(String),
+    #[error("Not found: {0}")]
+    NotFound(String),
 
     #[error("Bad request: {0}")]
     BadRequest(String),
 
-    #[error("Provider is not defined for network {0}")]
-    ProviderIsNotDefined(EvmNetwork),
-
-    #[error("No session with network({0}) and owner({1})")]
-    NoSession(EvmNetwork, Address),
-
-    #[error("Token limit exceeded")]
-    TokenLimitExceeded,
+    #[error("Internal error: {0}")]
+    Internal(String),
 }
 
 #[derive(Serialize)]
@@ -29,21 +21,32 @@ pub struct ErrorBody {
     message: String,
 }
 
+impl From<SessionError> for AppError {
+    fn from(e: SessionError) -> Self {
+        match e {
+            SessionError::SessionIsNotCreated => AppError::NotFound(e.to_string()),
+            SessionError::ProviderIsNotDefined => AppError::Internal(e.to_string()),
+            SessionError::WsProviderIsNotDefined => AppError::Internal(e.to_string()),
+            SessionError::TokenLimitExceeded(_, _) => AppError::BadRequest(e.to_string()),
+            SessionError::TokenListNotFound(_) => AppError::BadRequest(e.to_string()),
+            SessionError::TooManyClients => AppError::BadRequest(e.to_string()),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        let (status, message) = match &self {
-            AppError::Internal(message) => (StatusCode::INTERNAL_SERVER_ERROR, message),
-            AppError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
-            AppError::ProviderIsNotDefined(_) => (StatusCode::NOT_FOUND, &self.to_string()),
-            AppError::NoSession(_, _) => (StatusCode::NOT_FOUND, &self.to_string()),
-            AppError::TokenLimitExceeded => (StatusCode::BAD_REQUEST, &self.to_string()),
+        let status = match &self {
+            AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         (
             status,
             Json(ErrorBody {
                 code: status.as_u16(),
-                message: message.clone(),
+                message: self.to_string(),
             }),
         )
             .into_response()

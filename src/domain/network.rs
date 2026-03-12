@@ -14,8 +14,6 @@ pub enum EvmNetwork {
     Sepolia = 11155111,
 }
 
-const NATIVE_ADDRESS: Address = address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE");
-
 impl EvmNetwork {
     pub const ALL: [EvmNetwork; 3] = [EvmNetwork::Eth, EvmNetwork::Arbitrum, EvmNetwork::Sepolia];
 
@@ -24,7 +22,19 @@ impl EvmNetwork {
     }
 
     pub fn native_token_address(self) -> Address {
-        NATIVE_ADDRESS
+        address!("0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE")
+    }
+
+    pub fn multicall3_address(self) -> Address {
+        address!("0xcA11bde05977b3631167028862bE2a173976CA11")
+    }
+
+    pub fn weth9_address(self) -> Address {
+        match self {
+            EvmNetwork::Eth => address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+            EvmNetwork::Sepolia => address!("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"),
+            EvmNetwork::Arbitrum => address!("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+        }
     }
 }
 
