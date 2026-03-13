@@ -5,9 +5,10 @@ use crate::services::subscription_manager::{Balance, BalanceSnapshot};
 use alloy::primitives::Address;
 use metrics::counter;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::broadcast::Receiver;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, Notify, RwLock};
+use tokio::sync::futures::Notified;
 use tokio_util::sync::CancellationToken;
 
 pub struct Subscription {
@@ -16,24 +17,42 @@ pub struct Subscription {
     tokens: RwLock<HashSet<Address>>,
     watchers_spawned: AtomicBool,
     cancel_token: CancellationToken,
+    sync_notify: Notify,
 }
 
 impl Subscription {
     pub fn new(tokens: HashSet<Address>) -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
+            // snapshot of all watched tokens
             balances_snapshot: RwLock::new(HashMap::new()),
-            sender,
+            // signal to cancel all watchers for this sub
             cancel_token: CancellationToken::new(),
+            // watched tokens
             tokens: RwLock::new(tokens),
+            // flag to detect if the watcher was spawned for this subscription
             watchers_spawned: AtomicBool::new(false),
+            // notifier to force balance snapshot update (if watched token list was updated)
+            sync_notify: Notify::new(),
+            // send events to clients
+            sender,
         }
+    }
+
+    pub fn sync_balance(&self) {
+        self.sync_notify.notify_one();
+    }
+
+    pub fn take_sync_notifier(&self) -> &Notified<'_> {
+        &self.sync_notify.notified()
     }
 
     pub fn cancellable(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
 
+    // check the flag that watcher was spawned and switched it if it wasn't
+    // return true if the flag was switched
     pub fn try_mark_watchers_spawned(&self) -> bool {
         self.watchers_spawned
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -44,6 +63,7 @@ impl Subscription {
         self.tokens.read().await.clone()
     }
 
+    // update watched token list
     pub async fn extend_tokens(&self, tokens: HashSet<Address>) -> usize {
         let mut watched_tokens = self.tokens.write().await;
         watched_tokens.extend(tokens);
@@ -71,13 +91,14 @@ impl Subscription {
             });
     }
 
-    pub fn subscribe(&self) -> Receiver<BalanceEvent> {
+    // subscribe new client to events
+    pub fn subscribe(&self) -> broadcast::Receiver<BalanceEvent> {
         self.sender.subscribe()
     }
 
-    // update snapshot with new balances
-    // first compare block_number, if it is bigger than in snapshot - update it
-    // if the balance is different - put it in diff
+    // update a snapshot with new balances
+    // first compare block_number, if it is bigger than in the snapshot - update it
+    // if the balance is different - put it in diff (only if the block_number the same or bigger)
     // return diff
     pub async fn update_balances_and_take_diff(
         &self,
@@ -91,12 +112,14 @@ impl Subscription {
 
         let mut snapshot = self.balances_snapshot.write().await;
 
-        for (address, new_balance) in new_balances {
-            let current_balance = snapshot.get_mut(&address);
+        for (token, new_balance) in new_balances {
+            let current_balance = snapshot.get_mut(&token);
             if let Some(current_balance) = current_balance {
+                // first check the block_number it should be higher than in the snapshot
                 if current_balance.block_number < block_number {
+                    // if balance is different - add it to diff and update
                     if current_balance.amount != new_balance {
-                        diff.insert(address, new_balance.to_string());
+                        diff.insert(token, new_balance.to_string());
                     }
 
                     *current_balance = Balance {
@@ -105,9 +128,10 @@ impl Subscription {
                     };
                 }
             } else {
-                diff.insert(address, new_balance.to_string());
+                // if the token is not in the snapshot -> add it to diff and update the snapshot
+                diff.insert(token, new_balance.to_string());
                 snapshot.insert(
-                    address,
+                    token,
                     Balance {
                         amount: new_balance,
                         block_number,
@@ -119,6 +143,7 @@ impl Subscription {
         diff
     }
 
+    // return the cloned snapshot
     pub async fn current_snapshot(&self) -> BalanceSnapshot {
         self.balances_snapshot.read().await.clone()
     }

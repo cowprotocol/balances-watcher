@@ -126,7 +126,7 @@ impl SessionManager {
 
         let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
-        let updated_tokens = if let Some(sub) = subscription {
+        let (updated_tokens, new_uniq_tokens) = if let Some(sub) = subscription {
             let mut watched_tokens = sub.watched_tokens().await;
 
             let new_tokens = tokens
@@ -135,11 +135,11 @@ impl SessionManager {
                 .copied()
                 .collect::<HashSet<_>>();
 
-            watched_tokens.extend(new_tokens);
+            watched_tokens.extend(new_tokens.clone());
 
-            watched_tokens
+            (watched_tokens, Some(new_tokens))
         } else {
-            tokens
+            (tokens, None)
         };
 
         if updated_tokens.len() > self.token_limit {
@@ -154,7 +154,8 @@ impl SessionManager {
             ));
         }
 
-        let sub = self.sub_manager.upsert(session, updated_tokens).await;
+        let new_tokens = new_uniq_tokens.unwrap_or(updated_tokens);
+        let sub = self.sub_manager.upsert(session, new_tokens).await;
 
         // if there aren't spawners yet - spawn them and create a first subscription
         let should_spawn_watchers = sub.try_mark_watchers_spawned();
