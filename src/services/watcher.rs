@@ -8,7 +8,7 @@ use alloy::{
 };
 use backon::{ExponentialBuilder, Retryable};
 use futures::future::BoxFuture;
-use futures::StreamExt;
+use futures::{StreamExt, TryFutureExt};
 use metrics::counter;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
@@ -35,6 +35,9 @@ pub enum WatcherError {
 
     #[error("Parse log error for network: {1}, owner: {2}: {0}")]
     ParseLog(EvmNetwork, Address, String),
+
+    #[error("WS subscription is exhausted with retires")]
+    WsSubscriptionExhausted,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -283,31 +286,19 @@ impl Watcher {
         cancel: tokio_util::sync::CancellationToken,
         mut on_log: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
     ) {
-        loop {
-            let backoff = Self::create_ws_sub_backoff();
-            let ws_sub = (|| async { ws_provider.clone().subscribe_logs(&filter).await })
-                .retry(backoff)
-                .notify(|err, duration| {
-                    tracing::error!(
-                        error = %err,
-                        duration = ?duration,
-                        "failed to subscribe logs"
-                    );
-                    counter!("ws_subscribe_errors_total").increment(1);
-                });
-
+        'ws_connection_loop: loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     tracing::info!("cancelled log subscription");
-                    break;
+                    break 'ws_connection_loop;
                 },
                 _ = async {
-                    match ws_sub.await {
+                    match Self::ws_sub_with_retries(ws_provider.clone(), filter.clone()).await {
                         Ok(sub) => {
                             tracing::info!("subscribed to logs");
 
                             let mut stream = sub.into_stream();
-                            loop {
+                             'logs_loop: loop {
                                 tokio::select! {
                                     _ = cancel.cancelled() => {
                                         tracing::info!("cancelled log subscription");
@@ -322,7 +313,7 @@ impl Watcher {
                                             None => {
                                                 counter!("ws_provider_disconnected_total").increment(1);
                                                 tracing::warn!("ws stream ended (disconnect). will resubscribe");
-                                                break;
+                                                break 'logs_loop;
                                             }
                                         }
                                     }
@@ -341,6 +332,26 @@ impl Watcher {
                 } => {}
             }
         }
+    }
+
+    // subscribe to events with backoff
+    async fn ws_sub_with_retries(
+        ws_provider: DynProvider,
+        filter: Filter,
+    ) -> Result<alloy::pubsub::Subscription<Log>, WatcherError> {
+        let backoff = Self::create_ws_sub_backoff();
+        (|| async { ws_provider.subscribe_logs(&filter).await })
+            .retry(backoff)
+            .notify(|err, duration| {
+                tracing::error!(
+                        error = %err,
+                        duration = ?duration,
+                        "failed to subscribe logs"
+                    );
+                counter!("ws_subscribe_errors_total").increment(1);
+            })
+            .await
+            .map_err(|_| WatcherError::WsSubscriptionExhausted)
     }
     fn create_ws_sub_backoff() -> ExponentialBuilder {
         ExponentialBuilder::default()
