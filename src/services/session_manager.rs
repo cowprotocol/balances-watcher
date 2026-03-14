@@ -94,9 +94,11 @@ impl SessionManager {
     ) -> Self {
         let token_list_fetcher = TokenListFetcher::new();
 
-        let sub_manager = SubscriptionManager::new();
+        let sub_manager = Arc::new(SubscriptionManager::new());
+        Arc::clone(&sub_manager).spawn_cleanup();
+
         Self {
-            sub_manager: Arc::new(sub_manager),
+            sub_manager: Arc::clone(&sub_manager),
             providers: Arc::new(providers),
             ws_providers: Arc::new(ws_providers),
             fetcher: Arc::new(token_list_fetcher),
