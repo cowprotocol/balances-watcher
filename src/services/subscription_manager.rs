@@ -26,7 +26,7 @@ pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
 }
 
-const SESSION_TTL: Duration = Duration::from_secs(60);
+const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
     pub fn new() -> Self {
@@ -35,8 +35,11 @@ impl SubscriptionManager {
         }
     }
 
+    // create or update subscriptions clients count and watched token list
     pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
         let mut subs = self.subscriptions.write().await;
+        let new_tokens_len = tokens.len();
+
         if let Some(existing) = subs.get_mut(&session) {
             let watched_tokens_len = existing.subscription.extend_tokens(tokens).await;
 
@@ -46,6 +49,12 @@ impl SubscriptionManager {
                 tokens_len = watched_tokens_len,
                 "session is updated"
             );
+
+            if new_tokens_len > 0 {
+                // if there are new tokens -> we should immediately make multicall
+                // to update a balance snapshot for the current subscription
+                existing.subscription.sync_balance();
+            }
 
             return Arc::clone(&existing.subscription);
         }

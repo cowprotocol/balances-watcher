@@ -1,7 +1,6 @@
 use crate::config::network_config::NetworkConfig;
 use crate::domain::EvmNetwork;
 use crate::services::session_manager::SessionManager;
-use crate::services::subscription_manager::SubscriptionManager;
 use alloy::network::Ethereum;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
 use std::collections::HashMap;
@@ -16,9 +15,6 @@ impl AppState {
     pub async fn build(network_config: NetworkConfig) -> Arc<Self> {
         let providers = Self::build_rpc_roviders_map(&network_config).await;
         let ws_providers = Self::build_ws_rpc_providers(&network_config).await;
-
-        let sub_manager = Arc::new(SubscriptionManager::new());
-        Arc::clone(&sub_manager).spawn_cleanup();
 
         let session_manager = Arc::new(SessionManager::new(
             providers,

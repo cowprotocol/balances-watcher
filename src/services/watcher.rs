@@ -82,6 +82,7 @@ impl Watcher {
         let sub = Arc::clone(&self.sub);
         let ctx = Arc::clone(&self.ctx);
         let cancel = sub.cancellable();
+        let notifier = sub.take_sync_notifier();
 
         let balance_call_ctx = {
             let balance_call_ctx = BalanceCallCtx {
@@ -97,13 +98,35 @@ impl Watcher {
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(interval_secs as u64));
+            let session = Session {
+                owner: ctx.owner,
+                network: ctx.network,
+            };
 
             loop {
                 tokio::select! {
-                    _ = cancel.cancelled() => { break; }
+                    _ = cancel.cancelled() => {
+                        tracing::info!(
+                            session = %session,
+                            "cancelled watcher"
+                        );
+                        break;
+                    }
                     _ = interval.tick() => {
+                        // every n secs we make a multicall to sync all token balances
                         counter!("snapshot_updater_runs_total").increment(1);
                         Self::fetch_balances_and_broadcast(Arc::clone(&balance_call_ctx), Arc::clone(&sub)).await;
+                    }
+                    _ = notifier.notified() => {
+                        // if there are new tokens that were added to a subscription, we should immediately update a snapshot to not
+                        //  wait for the next interval
+                        tracing::info!(
+                            session = %session,
+                            "watched tokens were updated - force sync and reset interval"
+                        );
+                        counter!("snapshot_updater_runs_total").increment(1);
+                        Self::fetch_balances_and_broadcast(Arc::clone(&balance_call_ctx), Arc::clone(&sub)).await;
+                        interval.reset();
                     }
                 }
             }
