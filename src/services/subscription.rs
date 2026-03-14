@@ -5,10 +5,9 @@ use crate::services::subscription_manager::{Balance, BalanceSnapshot};
 use alloy::primitives::Address;
 use metrics::counter;
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{broadcast, mpsc, Notify, RwLock};
-use tokio::sync::futures::Notified;
+use std::sync::Arc;
+use tokio::sync::{broadcast, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
 pub struct Subscription {
@@ -17,7 +16,7 @@ pub struct Subscription {
     tokens: RwLock<HashSet<Address>>,
     watchers_spawned: AtomicBool,
     cancel_token: CancellationToken,
-    sync_notify: Notify,
+    sync_notify: Arc<Notify>,
 }
 
 impl Subscription {
@@ -33,7 +32,7 @@ impl Subscription {
             // flag to detect if the watcher was spawned for this subscription
             watchers_spawned: AtomicBool::new(false),
             // notifier to force balance snapshot update (if watched token list was updated)
-            sync_notify: Notify::new(),
+            sync_notify: Arc::new(Notify::new()),
             // send events to clients
             sender,
         }
@@ -43,8 +42,8 @@ impl Subscription {
         self.sync_notify.notify_one();
     }
 
-    pub fn take_sync_notifier(&self) -> &Notified<'_> {
-        &self.sync_notify.notified()
+    pub fn take_sync_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.sync_notify)
     }
 
     pub fn cancellable(&self) -> CancellationToken {

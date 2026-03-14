@@ -4,7 +4,7 @@ use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, U256};
 use metrics::{counter, gauge};
 use std::collections::{HashMap, HashSet};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
 
@@ -26,7 +26,7 @@ pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
 }
 
-const SESSION_TTL: Duration = Duration::from_secs(60);
+const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
     pub fn new() -> Self {
