@@ -6,6 +6,7 @@ use alloy::{
     rpc::types::{Filter, Log, Topic},
     sol_types::SolEvent,
 };
+use backon::{ExponentialBuilder, Retryable};
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use metrics::counter;
@@ -282,26 +283,35 @@ impl Watcher {
         cancel: tokio_util::sync::CancellationToken,
         mut on_log: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
     ) {
-        let mut attempt: u32 = 0;
-
         loop {
+            let backoff = Self::create_ws_sub_backoff();
+            let ws_sub = (|| async { ws_provider.clone().subscribe_logs(&filter).await })
+                .retry(backoff)
+                .notify(|err, duration| {
+                    tracing::error!(
+                        error = %err,
+                        duration = ?duration,
+                        "failed to subscribe logs"
+                    );
+                    counter!("ws_subscribe_errors_total").increment(1);
+                });
+
             tokio::select! {
                 _ = cancel.cancelled() => {
                     tracing::info!("cancelled log subscription");
                     break;
                 },
                 _ = async {
-                    match ws_provider.clone().subscribe_logs(&filter).await {
+                    match ws_sub.await {
                         Ok(sub) => {
                             tracing::info!("subscribed to logs");
-                            attempt = 0;
 
                             let mut stream = sub.into_stream();
                             loop {
                                 tokio::select! {
                                     _ = cancel.cancelled() => {
                                         tracing::info!("cancelled log subscription");
-                                        break;
+                                        return;
                                     },
                                     item = stream.next() => {
                                         match item {
@@ -320,19 +330,24 @@ impl Watcher {
                             }
                         },
                         Err(err) => {
-                            counter!("ws_subscribe_errors_total").increment(1);
-                            tracing::error!(error = %err, "error to subscribe on logs");
+                            counter!("ws_subscribe_is_down_total").increment(1);
+                            tracing::error!(error = %err, "ws subscribe exhausted retries, cancelling");
+                            cancel.cancel();
+                            return;
                         }
                     }
 
-                    // TODO make it more configurable
-                    let delay = Duration::from_secs(1);
-                    attempt = attempt.saturating_add(1);
-                    tokio::time::sleep(delay).await;
                     counter!("ws_reconnect_attempts_total").increment(1);
                 } => {}
             }
         }
+    }
+    fn create_ws_sub_backoff() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(5))
+            .with_max_times(5)
+            .with_jitter()
     }
 
     // this function is requesting balance per token + eth balance via multicall
