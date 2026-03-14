@@ -518,10 +518,10 @@ impl Watcher {
                             Self::parse_transfer_event_and_fetch_balance(Arc::clone(&ctx), &log)
                                 .await;
 
-                        let sub_1 = Arc::clone(&sub);
+                        let cloned_sub = Arc::clone(&sub);
                         let event = match token_balance {
                             Some(token_balance) => {
-                                let diff = sub_1.update_balances_and_take_diff(token_balance).await;
+                                let diff = cloned_sub.update_balances_and_take_diff(token_balance).await;
                                 counter!("partial_snapshot_updater_runs_total").increment(1);
 
                                 (!diff.is_empty()).then_some(BalanceEvent::BalanceUpdate(diff))
