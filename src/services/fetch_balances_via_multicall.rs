@@ -88,9 +88,9 @@ pub async fn fetch_balances_via_multicall(
 
     for (i, erc20_token) in erc20_tokens.iter().enumerate() {
         let resp = return_data.get(i).ok_or_else(|| {
-            ServiceError::BalancesMultiCallError(
-                "multicall: missing response at index={i} for token={token}".to_string(),
-            )
+            ServiceError::BalancesMultiCallError(format!(
+                "multicall: missing response at index={i} for token={erc20_token}"
+            ))
         })?;
 
         if !resp.success {
@@ -122,9 +122,7 @@ pub async fn fetch_balances_via_multicall(
     }
 
     let eth_balance_resp = return_data.get(erc20_tokens.len()).ok_or_else(|| {
-        ServiceError::BalancesMultiCallError(
-            "multicall3: missing response at index={i} for token={token}".to_string(),
-        )
+        ServiceError::BalancesMultiCallError("multicall3: missing response for token=ETH".into())
     })?;
 
     match <U256 as SolValue>::abi_decode(&eth_balance_resp.returnData) {
