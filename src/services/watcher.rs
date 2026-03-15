@@ -50,9 +50,8 @@ pub enum ParseWeb3LogsError {
 }
 
 pub struct WatcherContext {
-    pub owner: Address,
+    pub session: Session,
     pub provider: DynProvider,
-    pub network: EvmNetwork,
     pub ws_provider: DynProvider,
 }
 
@@ -89,10 +88,7 @@ impl Watcher {
 
         let balance_call_ctx = {
             let balance_call_ctx = BalanceCallCtx {
-                session: Session {
-                    owner: ctx.owner,
-                    network: ctx.network,
-                },
+                session: ctx.session,
                 provider: Arc::new(ctx.provider.clone()),
             };
 
@@ -101,10 +97,7 @@ impl Watcher {
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(interval_secs as u64));
-            let session = Session {
-                owner: ctx.owner,
-                network: ctx.network,
-            };
+            let session = ctx.session;
 
             loop {
                 tokio::select! {
@@ -197,7 +190,7 @@ impl Watcher {
      */
     async fn spawn_weth9_events_listener(&self) {
         let ctx = Arc::clone(&self.ctx);
-        let weth9_address = ctx.network.weth9_address();
+        let weth9_address = ctx.session.network.weth9_address();
 
         let event_signatures = vec![
             WrappedToken::Deposit::SIGNATURE_HASH,
@@ -206,16 +199,13 @@ impl Watcher {
         let filter = Filter::new()
             .address(weth9_address)
             .event_signature(event_signatures)
-            .topic1(Topic::from(ctx.owner));
+            .topic1(Topic::from(ctx.session.owner));
 
         let sub: Arc<Subscription> = Arc::clone(&self.sub);
 
         let balance_call_ctx = {
             let ctx = BalanceCallCtx {
-                session: Session {
-                    owner: ctx.owner,
-                    network: ctx.network,
-                },
+                session: ctx.session,
                 provider: Arc::new(self.ctx.provider.clone()),
             };
 
@@ -266,10 +256,7 @@ impl Watcher {
                             code: 503,
                             message: "WebSocket connection lost permanently".to_string(),
                         },
-                        Session {
-                            owner: ctx.owner,
-                            network: ctx.network,
-                        },
+                        ctx.session,
                     );
                 },
             )
@@ -488,8 +475,8 @@ impl Watcher {
     async fn spawn_erc20_transfer_listeners(&self) {
         let ctx = Arc::clone(&self.ctx);
         let base = Filter::new().event_signature(ERC20::Transfer::SIGNATURE_HASH);
-        let from = base.clone().topic1(Topic::from(ctx.owner));
-        let to = base.clone().topic2(Topic::from(ctx.owner));
+        let from = base.clone().topic1(Topic::from(ctx.session.owner));
+        let to = base.clone().topic2(Topic::from(ctx.session.owner));
 
         self.spawn_erc20_transfer_listener_with_filter(from).await;
         self.spawn_erc20_transfer_listener_with_filter(to).await;
@@ -504,10 +491,7 @@ impl Watcher {
 
         let balance_call_ctx = {
             let ctx = BalanceCallCtx {
-                session: Session {
-                    owner: ctx.owner,
-                    network: ctx.network,
-                },
+                session: ctx.session,
                 provider: Arc::new(ctx.provider.clone()),
             };
 
@@ -559,10 +543,7 @@ impl Watcher {
                             code: 503,
                             message: "WebSocket connection lost permanently".to_string(),
                         },
-                        Session {
-                            owner: ctx.owner,
-                            network: ctx.network,
-                        },
+                        ctx.session,
                     );
                 },
             )

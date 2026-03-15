@@ -164,9 +164,8 @@ impl SessionManager {
 
         if should_spawn_watchers {
             let ctx = WatcherContext {
+                session,
                 provider,
-                owner: session.owner,
-                network: session.network,
                 ws_provider,
             };
 
