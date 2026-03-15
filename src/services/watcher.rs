@@ -76,7 +76,6 @@ impl Watcher {
     pub async fn spawn_watchers(&self, interval_secs: usize) {
         self.spawn_snapshot_updater(interval_secs).await;
         self.spawn_erc20_transfer_listeners().await;
-        self.spawn_weth9_events_listener().await;
     }
 
     // watcher to request balances via multicall every interval_secs to have an actual state
@@ -226,10 +225,12 @@ impl Watcher {
         let ws_provider = self.ctx.ws_provider.clone();
 
         tokio::spawn(async move {
+            let sub_for_session = Arc::clone(&sub);
+
             Self::run_log_subscription_loop(
                 ws_provider,
                 filter,
-                sub.cancellable(),
+                sub_for_session.cancellable(),
                 move |log: Log| {
                     let sub = Arc::clone(&sub);
                     let ctx = Arc::clone(&balance_call_ctx);
@@ -259,6 +260,18 @@ impl Watcher {
                         Self::send_balance_update_event(event, Arc::clone(&sub), ctx.session);
                     })
                 },
+                move || {
+                    sub_for_session.send_event(
+                        BalanceEvent::Error {
+                            code: 503,
+                            message: "WebSocket connection lost permanently".to_string(),
+                        },
+                        Session {
+                            owner: ctx.owner,
+                            network: ctx.network,
+                        },
+                    );
+                },
             )
             .await;
         });
@@ -285,6 +298,7 @@ impl Watcher {
         filter: Filter,
         cancel: tokio_util::sync::CancellationToken,
         mut on_log: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+        mut on_drop: impl FnMut() + Send + 'static,
     ) {
         'ws_connection_loop: loop {
             tokio::select! {
@@ -323,6 +337,7 @@ impl Watcher {
                         Err(err) => {
                             counter!("ws_subscribe_is_down_total").increment(1);
                             tracing::error!(error = %err, "ws subscribe exhausted retries, cancelling");
+                            on_drop();
                             cancel.cancel();
                             return;
                         }
@@ -502,10 +517,11 @@ impl Watcher {
         let ws_provider = self.ctx.ws_provider.clone();
 
         tokio::spawn(async move {
+            let sub_for_session = Arc::clone(&sub);
             Self::run_log_subscription_loop(
                 ws_provider,
                 filter,
-                sub.cancellable(),
+                sub_for_session.cancellable(),
                 move |log: Log| {
                     let sub = Arc::clone(&sub);
                     let ctx = Arc::clone(&balance_call_ctx);
@@ -536,6 +552,18 @@ impl Watcher {
 
                         Self::send_balance_update_event(event, Arc::clone(&sub), ctx.session);
                     })
+                },
+                move || {
+                    sub_for_session.send_event(
+                        BalanceEvent::Error {
+                            code: 503,
+                            message: "WebSocket connection lost permanently".to_string(),
+                        },
+                        Session {
+                            owner: ctx.owner,
+                            network: ctx.network,
+                        },
+                    );
                 },
             )
             .await;
