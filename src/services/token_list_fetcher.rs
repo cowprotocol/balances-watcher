@@ -1,8 +1,9 @@
+use alloy::transports::http::reqwest::Response;
 use alloy::{primitives::Address, transports::http::Client};
+use backon::{ExponentialBuilder, Retryable};
 use futures::{stream, StreamExt};
 use metrics::{counter, histogram};
 use serde::Deserialize;
-use std::slice::from_ref;
 use std::sync::Arc;
 use std::{
     collections::{HashMap, HashSet},
@@ -50,27 +51,63 @@ impl TokenListFetcher {
         urls: &[String],
         network: EvmNetwork,
     ) -> Result<HashSet<Address>, FetcherError> {
-        for url in urls {
-            let lock = {
-                let mut locks = self.locks.lock().await;
-                locks
-                    .entry(url.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(())))
-                    .clone()
-            };
+        let mut normalized_urls: Vec<String> = urls.to_owned();
+        // sort urls to have the same order during all requests to not get deadlock
+        normalized_urls.sort();
+        // remove possible duplicates for the same reason
+        normalized_urls.dedup();
 
-            let _guard = lock.lock().await;
+        self.fetch_with_locks(&normalized_urls).await?;
 
-            if !self.is_cached(url.clone()).await {
-                self.fetch_and_cache(from_ref(url)).await?;
-            }
-        }
-
-        let cached = self.collect_from_cache(urls, network).await;
+        let cached = self.collect_from_cache(&normalized_urls, network).await;
         Ok(cached)
     }
 
+    async fn fetch_with_locks(&self, normalized_urls: &[String]) -> Result<(), FetcherError> {
+        // create locks per each url if needed and gather them
+        let arcs: Vec<_> = {
+            let mut locks = self.locks.lock().await;
+            normalized_urls
+                .iter()
+                .map(|url| {
+                    locks
+                        .entry(url.clone())
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                })
+                .collect()
+        };
+
+        let mut guards = Vec::with_capacity(arcs.len());
+        for arc in arcs {
+            // lock url
+            guards.push(arc.lock_owned().await);
+        }
+
+        let uncached: Vec<String> = {
+            let cache = self.cache.read().await;
+            normalized_urls
+                .iter()
+                .filter(|url| {
+                    cache
+                        .get(*url)
+                        .map(|c| c.fetched_at.elapsed() > self.ttl)
+                        .unwrap_or(true)
+                })
+                .cloned()
+                .collect()
+        };
+
+        if !uncached.is_empty() {
+            self.fetch_and_cache(&uncached).await?;
+        }
+
+        Ok(())
+    }
+
     async fn fetch_and_cache(&self, urls: &[String]) -> Result<(), FetcherError> {
+        let t0 = Instant::now();
+        // make request parallel
         let result: Vec<(String, Result<ApiResponse, FetcherError>)> =
             stream::iter(urls.iter().cloned())
                 .map(move |url| {
@@ -83,6 +120,11 @@ impl TokenListFetcher {
                 .buffer_unordered(TOKEN_FETCH_CONCURRENCY)
                 .collect()
                 .await;
+        tracing::info!(
+            time_ms = t0.elapsed().as_millis(),
+            count = result.len(),
+            "all tokens lists loaded"
+        );
 
         for (_, response) in &result {
             if let Err(err) = response {
@@ -128,9 +170,7 @@ impl TokenListFetcher {
     async fn fetch_list(client: &Client, url: &String) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
 
-        client
-            .get(url)
-            .send()
+        Self::fetch_with_backoff(client, url)
             .await
             .inspect(move |_| {
                 counter!("token_list_load_total").increment(1);
@@ -140,14 +180,31 @@ impl TokenListFetcher {
                     url = ?url,
                     "token list loaded"
                 );
-            })
-            .map_err(|err| {
-                counter!("token_list_load_failed_total").increment(1);
-                FetcherError::UnableToLoadList(url.clone(), err.to_string())
             })?
             .json()
             .await
             .map_err(|err| FetcherError::UnableToLoadList(url.clone(), err.to_string()))
+    }
+
+    async fn fetch_with_backoff(client: &Client, url: &String) -> Result<Response, FetcherError> {
+        let backoff = Self::get_backoff();
+        let resp = (|| async { client.get(url).send().await })
+            .retry(backoff)
+            .await
+            .map_err(|err| {
+                counter!("token_list_load_failed_total").increment(1);
+                FetcherError::UnableToLoadList(url.clone(), err.to_string())
+            })?;
+
+        Ok(resp)
+    }
+
+    fn get_backoff() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(3))
+            .with_max_times(3)
+            .with_jitter()
     }
 
     async fn collect_from_cache(&self, urls: &[String], network: EvmNetwork) -> HashSet<Address> {
@@ -163,13 +220,5 @@ impl TokenListFetcher {
         }
 
         result
-    }
-
-    async fn is_cached(&self, url: String) -> bool {
-        let cache = self.cache.read().await;
-        match cache.get(&url) {
-            Some(cached) => cached.fetched_at.elapsed() < self.ttl,
-            None => false,
-        }
     }
 }

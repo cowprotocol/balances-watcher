@@ -6,6 +6,7 @@ use alloy::{
     rpc::types::{Filter, Log, Topic},
     sol_types::SolEvent,
 };
+use backon::{ExponentialBuilder, Retryable};
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use metrics::counter;
@@ -34,6 +35,9 @@ pub enum WatcherError {
 
     #[error("Parse log error for network: {1}, owner: {2}: {0}")]
     ParseLog(EvmNetwork, Address, String),
+
+    #[error("WS subscription is exhausted with retires")]
+    WsSubscriptionExhausted,
 }
 
 #[derive(Error, Debug, Clone)]
@@ -72,7 +76,6 @@ impl Watcher {
     pub async fn spawn_watchers(&self, interval_secs: usize) {
         self.spawn_snapshot_updater(interval_secs).await;
         self.spawn_erc20_transfer_listeners().await;
-        self.spawn_weth9_events_listener().await;
     }
 
     // watcher to request balances via multicall every interval_secs to have an actual state
@@ -222,10 +225,12 @@ impl Watcher {
         let ws_provider = self.ctx.ws_provider.clone();
 
         tokio::spawn(async move {
+            let sub_for_session = Arc::clone(&sub);
+
             Self::run_log_subscription_loop(
                 ws_provider,
                 filter,
-                sub.cancellable(),
+                sub_for_session.cancellable(),
                 move |log: Log| {
                     let sub = Arc::clone(&sub);
                     let ctx = Arc::clone(&balance_call_ctx);
@@ -255,6 +260,18 @@ impl Watcher {
                         Self::send_balance_update_event(event, Arc::clone(&sub), ctx.session);
                     })
                 },
+                move || {
+                    sub_for_session.send_event(
+                        BalanceEvent::Error {
+                            code: 503,
+                            message: "WebSocket connection lost permanently".to_string(),
+                        },
+                        Session {
+                            owner: ctx.owner,
+                            network: ctx.network,
+                        },
+                    );
+                },
             )
             .await;
         });
@@ -281,27 +298,25 @@ impl Watcher {
         filter: Filter,
         cancel: tokio_util::sync::CancellationToken,
         mut on_log: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+        mut on_drop: impl FnMut() + Send + 'static,
     ) {
-        let mut attempt: u32 = 0;
-
-        loop {
+        'ws_connection_loop: loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     tracing::info!("cancelled log subscription");
-                    break;
+                    break 'ws_connection_loop;
                 },
                 _ = async {
-                    match ws_provider.clone().subscribe_logs(&filter).await {
+                    match Self::ws_sub_with_retries(ws_provider.clone(), filter.clone()).await {
                         Ok(sub) => {
                             tracing::info!("subscribed to logs");
-                            attempt = 0;
 
                             let mut stream = sub.into_stream();
-                            loop {
+                             'logs_loop: loop {
                                 tokio::select! {
                                     _ = cancel.cancelled() => {
                                         tracing::info!("cancelled log subscription");
-                                        break;
+                                        return;
                                     },
                                     item = stream.next() => {
                                         match item {
@@ -312,7 +327,7 @@ impl Watcher {
                                             None => {
                                                 counter!("ws_provider_disconnected_total").increment(1);
                                                 tracing::warn!("ws stream ended (disconnect). will resubscribe");
-                                                break;
+                                                break 'logs_loop;
                                             }
                                         }
                                     }
@@ -320,19 +335,45 @@ impl Watcher {
                             }
                         },
                         Err(err) => {
-                            counter!("ws_subscribe_errors_total").increment(1);
-                            tracing::error!(error = %err, "error to subscribe on logs");
+                            counter!("ws_subscribe_is_down_total").increment(1);
+                            tracing::error!(error = %err, "ws subscribe exhausted retries, cancelling");
+                            on_drop();
+                            cancel.cancel();
+                            return;
                         }
                     }
 
-                    // TODO make it more configurable
-                    let delay = Duration::from_secs(1);
-                    attempt = attempt.saturating_add(1);
-                    tokio::time::sleep(delay).await;
                     counter!("ws_reconnect_attempts_total").increment(1);
                 } => {}
             }
         }
+    }
+
+    // subscribe to events with backoff
+    async fn ws_sub_with_retries(
+        ws_provider: DynProvider,
+        filter: Filter,
+    ) -> Result<alloy::pubsub::Subscription<Log>, WatcherError> {
+        let backoff = Self::create_ws_sub_backoff();
+        (|| async { ws_provider.subscribe_logs(&filter).await })
+            .retry(backoff)
+            .notify(|err, duration| {
+                tracing::error!(
+                    error = %err,
+                    duration = ?duration,
+                    "failed to subscribe logs"
+                );
+                counter!("ws_subscribe_errors_total").increment(1);
+            })
+            .await
+            .map_err(|_| WatcherError::WsSubscriptionExhausted)
+    }
+    fn create_ws_sub_backoff() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(5))
+            .with_max_times(5)
+            .with_jitter()
     }
 
     // this function is requesting balance per token + eth balance via multicall
@@ -476,10 +517,11 @@ impl Watcher {
         let ws_provider = self.ctx.ws_provider.clone();
 
         tokio::spawn(async move {
+            let sub_for_session = Arc::clone(&sub);
             Self::run_log_subscription_loop(
                 ws_provider,
                 filter,
-                sub.cancellable(),
+                sub_for_session.cancellable(),
                 move |log: Log| {
                     let sub = Arc::clone(&sub);
                     let ctx = Arc::clone(&balance_call_ctx);
@@ -492,10 +534,12 @@ impl Watcher {
                             Self::parse_transfer_event_and_fetch_balance(Arc::clone(&ctx), &log)
                                 .await;
 
-                        let sub_1 = Arc::clone(&sub);
+                        let cloned_sub = Arc::clone(&sub);
                         let event = match token_balance {
                             Some(token_balance) => {
-                                let diff = sub_1.update_balances_and_take_diff(token_balance).await;
+                                let diff = cloned_sub
+                                    .update_balances_and_take_diff(token_balance)
+                                    .await;
                                 counter!("partial_snapshot_updater_runs_total").increment(1);
 
                                 (!diff.is_empty()).then_some(BalanceEvent::BalanceUpdate(diff))
@@ -508,6 +552,18 @@ impl Watcher {
 
                         Self::send_balance_update_event(event, Arc::clone(&sub), ctx.session);
                     })
+                },
+                move || {
+                    sub_for_session.send_event(
+                        BalanceEvent::Error {
+                            code: 503,
+                            message: "WebSocket connection lost permanently".to_string(),
+                        },
+                        Session {
+                            owner: ctx.owner,
+                            network: ctx.network,
+                        },
+                    );
                 },
             )
             .await;
