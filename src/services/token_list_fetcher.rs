@@ -1,4 +1,6 @@
+use alloy::transports::http::reqwest::Response;
 use alloy::{primitives::Address, transports::http::Client};
+use backon::{ExponentialBuilder, Retryable};
 use futures::{stream, StreamExt};
 use metrics::{counter, histogram};
 use serde::Deserialize;
@@ -49,10 +51,7 @@ impl TokenListFetcher {
         urls: &[String],
         network: EvmNetwork,
     ) -> Result<HashSet<Address>, FetcherError> {
-        let mut normalized_urls: Vec<String> = urls
-            .iter()
-            .map(|url| url.to_lowercase())
-            .collect();
+        let mut normalized_urls: Vec<String> = urls.to_owned();
         // sort urls to have the same order during all requests to not get deadlock
         normalized_urls.sort();
         // remove possible duplicates for the same reason
@@ -68,11 +67,15 @@ impl TokenListFetcher {
         // create locks per each url if needed and gather them
         let arcs: Vec<_> = {
             let mut locks = self.locks.lock().await;
-            normalized_urls.iter().map(|url| {
-                locks.entry(url.clone())
-                    .or_insert_with(|| Arc::new(Mutex::new(())))
-                    .clone()
-            }).collect()
+            normalized_urls
+                .iter()
+                .map(|url| {
+                    locks
+                        .entry(url.clone())
+                        .or_insert_with(|| Arc::new(Mutex::new(())))
+                        .clone()
+                })
+                .collect()
         };
 
         let mut guards = Vec::with_capacity(arcs.len());
@@ -83,10 +86,14 @@ impl TokenListFetcher {
 
         let uncached: Vec<String> = {
             let cache = self.cache.read().await;
-            normalized_urls.iter().filter(|url| {
-                cache.get(*url)
-                    .map(|c| c.fetched_at.elapsed() > self.ttl).unwrap_or(true)
-            })
+            normalized_urls
+                .iter()
+                .filter(|url| {
+                    cache
+                        .get(*url)
+                        .map(|c| c.fetched_at.elapsed() > self.ttl)
+                        .unwrap_or(true)
+                })
                 .cloned()
                 .collect()
         };
@@ -100,6 +107,7 @@ impl TokenListFetcher {
 
     async fn fetch_and_cache(&self, urls: &[String]) -> Result<(), FetcherError> {
         let t0 = Instant::now();
+        // make request parallel
         let result: Vec<(String, Result<ApiResponse, FetcherError>)> =
             stream::iter(urls.iter().cloned())
                 .map(move |url| {
@@ -162,9 +170,7 @@ impl TokenListFetcher {
     async fn fetch_list(client: &Client, url: &String) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
 
-        client
-            .get(url)
-            .send()
+        Self::fetch_with_backoff(client, url)
             .await
             .inspect(move |_| {
                 counter!("token_list_load_total").increment(1);
@@ -174,14 +180,31 @@ impl TokenListFetcher {
                     url = ?url,
                     "token list loaded"
                 );
-            })
-            .map_err(|err| {
-                counter!("token_list_load_failed_total").increment(1);
-                FetcherError::UnableToLoadList(url.clone(), err.to_string())
             })?
             .json()
             .await
             .map_err(|err| FetcherError::UnableToLoadList(url.clone(), err.to_string()))
+    }
+
+    async fn fetch_with_backoff(client: &Client, url: &String) -> Result<Response, FetcherError> {
+        let backoff = Self::get_backoff();
+        let resp = (|| async { client.get(url).send().await })
+            .retry(backoff)
+            .await
+            .map_err(|err| {
+                counter!("token_list_load_failed_total").increment(1);
+                FetcherError::UnableToLoadList(url.clone(), err.to_string())
+            })?;
+
+        Ok(resp)
+    }
+
+    fn get_backoff() -> ExponentialBuilder {
+        ExponentialBuilder::default()
+            .with_min_delay(Duration::from_secs(1))
+            .with_max_delay(Duration::from_secs(3))
+            .with_max_times(3)
+            .with_jitter()
     }
 
     async fn collect_from_cache(&self, urls: &[String], network: EvmNetwork) -> HashSet<Address> {
