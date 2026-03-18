@@ -176,7 +176,7 @@ impl SessionManager {
 
             Watcher::new(ctx, Arc::clone(&sub))
                 .spawn_watchers(self.snapshot_interval)
-                .await;
+                .await
         }
 
         tracing::warn!(
@@ -187,6 +187,7 @@ impl SessionManager {
         Ok(())
     }
 
+    // fetch tokens from lists and add eth/weth9 as watched
     async fn fetch_and_enriched_tokens(
         &self,
         session: Session,
