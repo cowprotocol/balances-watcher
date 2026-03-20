@@ -1,12 +1,15 @@
-use thiserror::Error;
+use thiserror;
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ServiceError {
     #[error("Error getting balances from multicall: {0}")]
     BalancesMultiCallError(String),
+
+    #[error("Error to send data via tx: {0}")]
+    ErrorToSend(String),
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum SubscriptionError {
     #[error("Too many subscriptions")]
     TooManySubscriptions,
@@ -15,7 +18,7 @@ pub enum SubscriptionError {
     ThereArentCreatedSubscriptions,
 }
 
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum FetcherError {
     #[error("Unable to load token list, url: {0}, error: {1}")]
     UnableToLoadList(String, String),

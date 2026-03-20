@@ -7,7 +7,7 @@ use crate::services::watcher::{Watcher, WatcherContext};
 use alloy::primitives::Address;
 use alloy::providers::DynProvider;
 use alloy::transports::http::reqwest::StatusCode;
-use axum::response::sse::Event;
+use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
 use axum::Json;
 use futures::Stream;
@@ -164,9 +164,8 @@ impl SessionManager {
 
         if should_spawn_watchers {
             let ctx = WatcherContext {
+                session,
                 provider,
-                owner: session.owner,
-                network: session.network,
                 ws_provider,
             };
 
@@ -177,7 +176,7 @@ impl SessionManager {
 
             Watcher::new(ctx, Arc::clone(&sub))
                 .spawn_watchers(self.snapshot_interval)
-                .await;
+                .await
         }
 
         tracing::warn!(
@@ -188,6 +187,7 @@ impl SessionManager {
         Ok(())
     }
 
+    // fetch tokens from lists and add eth/weth9 as watched
     async fn fetch_and_enriched_tokens(
         &self,
         session: Session,
@@ -300,7 +300,7 @@ impl SessionManager {
         let cleanup_stream =
             cleanup_stream::CleanupStream::new(sse_stream, manager_for_cleanup, session);
 
-        Ok(Sse::new(cleanup_stream))
+        Ok(Sse::new(cleanup_stream).keep_alive(KeepAlive::default()))
     }
 
     fn map_subscription_error(sub_error: SubscriptionError) -> SessionError {

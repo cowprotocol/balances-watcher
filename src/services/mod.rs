@@ -1,3 +1,4 @@
+pub mod calls_queue;
 pub mod cleanup_stream;
 pub mod errors;
 pub mod fetch_balances_via_multicall;
