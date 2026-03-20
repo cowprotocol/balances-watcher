@@ -85,7 +85,7 @@ impl CallsQueue {
             let this = Arc::clone(&self);
             let session = self.session;
 
-            let _ = tokio::spawn(async move {
+            let task = tokio::spawn(async move {
                 let _ = this.flush().await.inspect_err(|err| {
                     tracing::error!(
                         error = %err,
@@ -93,8 +93,10 @@ impl CallsQueue {
                         "Error upserting delayed call"
                     );
                 });
-            })
-            .await;
+            });
+            // we don't need to wait response from this task
+            // we should fire it and goes further without waiting the delay
+            drop(task);
         }
     }
 
@@ -118,10 +120,11 @@ impl CallsQueue {
             let should_reschedule = {
                 let mut state = self.state.write().await;
 
-                if !state.pending.is_empty() && state.status != Status::Scheduled {
+                if !state.pending.is_empty() {
                     state.status = Status::Scheduled;
                     true
                 } else {
+                    state.status = Status::None;
                     false
                 }
             };
