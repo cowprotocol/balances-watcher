@@ -7,7 +7,7 @@ use crate::services::watcher::{Watcher, WatcherContext};
 use alloy::primitives::Address;
 use alloy::providers::DynProvider;
 use alloy::transports::http::reqwest::StatusCode;
-use axum::response::sse::Event;
+use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
 use axum::Json;
 use futures::Stream;
@@ -300,7 +300,7 @@ impl SessionManager {
         let cleanup_stream =
             cleanup_stream::CleanupStream::new(sse_stream, manager_for_cleanup, session);
 
-        Ok(Sse::new(cleanup_stream))
+        Ok(Sse::new(cleanup_stream).keep_alive(KeepAlive::default()))
     }
 
     fn map_subscription_error(sub_error: SubscriptionError) -> SessionError {
