@@ -1,3 +1,4 @@
+use crate::config::constants::CALL_QUEUE_DELAY;
 use crate::domain::Session;
 use crate::services::errors::ServiceError;
 use crate::services::fetch_balances_via_multicall::{
@@ -8,7 +9,6 @@ use alloy::primitives::{Address, BlockNumber};
 use alloy::providers::DynProvider;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::sleep;
 
@@ -53,24 +53,28 @@ impl CallsQueue {
         }
     }
 
+    // upsert tokens to the queue with block_number for a delayed call
     pub async fn upsert_delayed_call(
         self: Arc<Self>,
-        token: Address,
+        tokens: &[Address],
         block_number: Option<BlockNumber>,
     ) {
         let should_schedule = {
             let mut state = self.state.write().await;
 
-            // put zero if there is no block_number
+            // put zero if there is no block_number (if its zero - it means we should request them with "Latest" block id)
+            // otherwise we always use latest block_number
             let block_number = block_number.unwrap_or(0);
 
-            state
-                .pending
-                .entry(token)
-                .and_modify(|curr_block| {
-                    *curr_block = std::cmp::max(*curr_block, block_number);
-                })
-                .or_insert(block_number);
+            for token in tokens {
+                state
+                    .pending
+                    .entry(*token)
+                    .and_modify(|curr_block| {
+                        *curr_block = std::cmp::max(*curr_block, block_number);
+                    })
+                    .or_insert(block_number);
+            }
 
             match state.status {
                 Status::None => {
@@ -100,9 +104,10 @@ impl CallsQueue {
         }
     }
 
+    // request balances for tokens in queue (per session) with delay
     async fn flush(self: Arc<Self>) -> Result<(), ServiceError> {
         loop {
-            sleep(Duration::from_millis(300)).await;
+            sleep(CALL_QUEUE_DELAY).await;
             let tokens = {
                 let mut state = self.state.write().await;
 

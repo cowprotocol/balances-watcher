@@ -434,9 +434,12 @@ impl Watcher {
             _ => None,
         };
 
-        calls_queue
-            .upsert_delayed_call(session.network.weth9_address(), block_number)
-            .await;
+        // always put native address into queue to keep it synced
+        let tokens = vec![
+            session.network.weth9_address(),
+            session.network.native_token_address(),
+        ];
+        calls_queue.upsert_delayed_call(&tokens, block_number).await;
     }
 
     // parse WETH logs, search DEPOSIT/WITHDRAWAL events
@@ -586,8 +589,11 @@ impl Watcher {
             }
         };
 
-        calls_queue
-            .upsert_delayed_call(decoded_log.address(), block_number)
-            .await;
+        // always put native address into queue to keep it synced
+        let tokens = vec![
+            decoded_log.address(),
+            ctx.session.network.native_token_address(),
+        ];
+        calls_queue.upsert_delayed_call(&tokens, block_number).await;
     }
 }
