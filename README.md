@@ -122,7 +122,7 @@ All error responses follow this structure:
 
 ## Usage Flow
 
-1. **Create session** with token lists URLs
+1. **Create session** with token lists URLs and/or custom tokens
 2. **Connect to SSE** to receive real-time updates
 3. **(Optional)** Update session to add more tokens dynamically
 
@@ -149,6 +149,107 @@ sequenceDiagram
 
     Client->>Server: PUT /1/sessions/0x... (add tokens)
     Server-->>Client: 200 OK
+```
+
+## Architecture Diagram
+
+```mermaid
+flowchart TB
+    subgraph Client
+        FE[Frontend App]
+    end
+
+    subgraph API["API Layer (Axum)"]
+        CS["POST /{chain_id}/sessions/{owner}<br/>Create Session"]
+        US["PUT /{chain_id}/sessions/{owner}<br/>Update Session"]
+        SSE["GET /sse/{chain_id}/balances/{owner}<br/>SSE Stream"]
+    end
+
+    subgraph SessionMgr["Session Manager"]
+        SM[SessionManager]
+        TLF[TokenListFetcher<br/>HTTP fetch + 5h cache]
+        SubMgr[SubscriptionManager<br/>session registry + cleanup]
+    end
+
+    subgraph Session["Per-Session State (Subscription)"]
+        Snap["BalanceSnapshot<br/>HashMap&lt;Address, Balance&gt;<br/>block-guarded updates"]
+        BC["broadcast::channel<br/>fan-out to SSE clients"]
+        Tokens["Watched Tokens<br/>HashSet&lt;Address&gt;"]
+        CT["CancellationToken"]
+    end
+
+    subgraph Watcher["Watcher (4 background tasks per session)"]
+        T1["Task 1: Snapshot Updater<br/>periodic timer + sync_notify"]
+        T2a["Task 2a: ERC20 Transfer Listener<br/>topic: from = owner"]
+        T2b["Task 2b: ERC20 Transfer Listener<br/>topic: to = owner"]
+        T3["Task 3: WETH9 Listener<br/>Deposit / Withdrawal"]
+        T4["Task 4: Queue Result Receiver<br/>reads batched results"]
+    end
+
+    subgraph Queue["CallsQueue (300ms debounce)"]
+        CQ["Pending tokens map<br/>upsert_delayed_call()"]
+        FL["flush() → process_batch()"]
+    end
+
+    subgraph Blockchain["Blockchain (via Alchemy)"]
+        WS["WebSocket Provider<br/>log subscriptions"]
+        HTTP["HTTP Provider<br/>multicall reads"]
+        MC["Multicall3<br/>tryBlockAndAggregate"]
+    end
+
+    %% Client → API
+    FE -->|"POST (token lists + custom tokens)"| CS
+    FE -->|"PUT (add tokens)"| US
+    FE <-->|"SSE connection"| SSE
+
+    %% API → Session Manager
+    CS --> SM
+    US --> SM
+    SSE --> SubMgr
+
+    %% Session Manager internals
+    SM --> TLF
+    SM --> SubMgr
+    TLF -->|"fetch token lists"| HTTP
+
+    %% Session Manager → Session
+    SubMgr -->|"create / update"| Session
+    SM -->|"spawn once"| Watcher
+
+    %% Watcher → WS subscriptions
+    T2a -->|"subscribe_logs"| WS
+    T2b -->|"subscribe_logs"| WS
+    T3 -->|"subscribe_logs"| WS
+
+    %% WS events → Queue
+    T2a -->|"upsert_delayed_call"| CQ
+    T2b -->|"upsert_delayed_call"| CQ
+    T3 -->|"upsert_delayed_call"| CQ
+
+    %% Queue → Multicall
+    CQ -->|"300ms debounce"| FL
+    FL -->|"fetch_balances_via_multicall"| MC
+    MC --> HTTP
+
+    %% Queue results → Watcher → Snapshot → Broadcast
+    FL -->|"QueueMessage"| T4
+    T4 -->|"update_balances_and_take_diff"| Snap
+    T4 -->|"broadcast diff"| BC
+
+    %% Snapshot updater → Multicall → Snapshot → Broadcast
+    T1 -->|"fetch all balances"| MC
+    T1 -->|"update_balances_and_take_diff"| Snap
+    T1 -->|"broadcast diff"| BC
+
+    %% Broadcast → SSE
+    BC -->|"BalanceEvent"| SSE
+
+    %% Cleanup
+    SubMgr -->|"idle > 5s, 0 clients"| CT
+    CT -->|"cancel"| Watcher
+
+    %% SSE disconnect
+    SSE -->|"stream dropped → unsubscribe"| SubMgr
 ```
 
 ## Environment Variables
