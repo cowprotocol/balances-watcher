@@ -21,6 +21,7 @@ const CACHE_TTL: Duration = Duration::from_secs(3600 * 5); // 5 hours
 
 struct CachedTokenList {
     fetched_at: Instant,
+    // a list can have tokens from multiple chains, so we need to map them
     list: HashMap<u64, HashSet<Address>>,
 }
 

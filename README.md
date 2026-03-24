@@ -15,7 +15,8 @@ Real-time ERC20 token balance tracking service with SSE (Server-Sent Events) sup
 - Shared subscriptions for multiple clients watching the same wallet
 - Token list caching with TTL (5 hours)
 - Token limit per session (max 1000 tokens)
-- Diff-based updates (only sends changed balances)
+- Diff-based updates (first SSE event is full snapshot, all subsequent events are diffs only)
+- Event batching via calls queue (300ms delay combines rapid events into a single multicall)
 
 ## API Endpoints
 
@@ -84,7 +85,7 @@ curl -N http://localhost:8080/sse/1/balances/0xd8dA6BF26964aF9D7eEd9e03E53415D37
 
 | Event | Description |
 |-------|-------------|
-| `balance_update` | Balance update (full snapshot on connect/interval, or diff on Transfer/WETH events) |
+| `balance_update` | First event is the full snapshot of all watched token balances. Every subsequent event is a **diff only** — it contains only the balances that changed since the last update. This applies to both on-chain event triggers and periodic snapshot refreshes. |
 | `error` | Error message |
 
 **Response format:**
@@ -138,12 +139,12 @@ sequenceDiagram
     Server-->>Client: SSE: balance_update (full snapshot)
 
     loop On ERC20 Transfer / WETH Deposit/Withdrawal
-        Blockchain-->>Server: Event detected
+        Blockchain-->>Server: Event detected (batched via queue, 300ms delay)
         Server-->>Client: SSE: balance_update (diff only)
     end
 
     loop Every snapshot interval
-        Server-->>Client: SSE: balance_update (full snapshot)
+        Server-->>Client: SSE: balance_update (diff only)
     end
 
     Client->>Server: PUT /1/sessions/0x... (add tokens)
@@ -238,6 +239,7 @@ src/
 ├── services/            # Business logic
 │   ├── subscription_manager.rs  # Shared subscriptions
 │   ├── watcher.rs       # Balance watchers
+│   ├── calls_queue.rs   # Batched balance fetch queue (300ms debounce)
 │   ├── balances.rs      # Multicall service
 │   └── token_list_fetcher.rs # Token list fetcher
 ├── infra/               # Infrastructure (providers)
@@ -256,7 +258,7 @@ src/
 ### Medium Priority
 - [x] **WebSocket reconnection** - Auto-reconnect and resubscribe on WS disconnect
 - [ ] **Sync state after reconnect** - Re-fetch all balances after WS reconnect to recover events missed during disconnect
-- [ ] **Event batching** - Debounce rapid events (e.g. multiple transfers in the same block) and combine balance requests into a single multicall to reduce RPC usage
+- [x] **Event batching** - Debounce rapid events via `CallsQueue` (300ms delay) and combine balance requests into a single multicall to reduce RPC usage
 - [ ] **Token list validation** - HTTPS only, domain blocklist, schema validation
 - [ ] **Token list fetch retry** - Exponential backoff on failures
 - [ ] **SSE heartbeat** - Periodic `:ping` to prevent proxy timeouts
