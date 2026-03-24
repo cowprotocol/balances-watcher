@@ -38,7 +38,7 @@ Content-Type: application/json
 | Status | Description |
 |--------|-------------|
 | `200 OK` | Session created successfully |
-| `400 Bad Request` | `tokensListsUrls` is empty or token limit exceeded |
+| `400 Bad Request` | Both `tokensListsUrls` and `customTokens` are empty, or token limit exceeded |
 
 **Example:**
 ```bash
@@ -116,7 +116,7 @@ All error responses follow this structure:
 ```json
 {
   "code": 400,
-  "message": "Bad request: tokensListsUrls should not be empty"
+  "message": "Bad request: tokens_lists_urls && custom_tokens are empty"
 }
 ```
 

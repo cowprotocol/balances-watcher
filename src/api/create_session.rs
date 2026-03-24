@@ -29,9 +29,9 @@ pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<(), AppError> {
-    if body.tokens_lists_urls.is_empty() {
+    if body.tokens_lists_urls.is_empty() && body.custom_tokens.is_empty() {
         return Err(AppError::BadRequest(
-            "tokens_lists_urls should not be empty".into(),
+            "tokens_lists_urls or custom_tokens should not be empty both".into(),
         ));
     }
 
