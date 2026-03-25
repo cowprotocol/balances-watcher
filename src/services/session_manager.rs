@@ -4,6 +4,7 @@ use crate::services::errors::{FetcherError, SubscriptionError};
 use crate::services::subscription_manager::SubscriptionManager;
 use crate::services::token_list_fetcher::TokenListFetcher;
 use crate::services::watcher::{Watcher, WatcherContext};
+use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::primitives::Address;
 use alloy::providers::DynProvider;
 use alloy::transports::http::reqwest::StatusCode;
@@ -23,7 +24,7 @@ use tokio_stream::wrappers::BroadcastStream;
 pub struct SessionManager {
     sub_manager: Arc<SubscriptionManager>,
     providers: Arc<HashMap<EvmNetwork, DynProvider>>,
-    ws_providers: Arc<HashMap<EvmNetwork, DynProvider>>,
+    ws_providers_pool: Arc<HashMap<EvmNetwork, Arc<WsConnectionPool>>>,
     fetcher: Arc<TokenListFetcher>,
     snapshot_interval: usize,
     token_limit: usize,
@@ -88,7 +89,7 @@ pub enum SessionError {
 impl SessionManager {
     pub fn new(
         providers: HashMap<EvmNetwork, DynProvider>,
-        ws_providers: HashMap<EvmNetwork, DynProvider>,
+        ws_providers_pool: HashMap<EvmNetwork, Arc<WsConnectionPool>>,
         snapshot_interval: usize,
         token_limit: usize,
     ) -> Self {
@@ -100,7 +101,7 @@ impl SessionManager {
         Self {
             sub_manager: Arc::clone(&sub_manager),
             providers: Arc::new(providers),
-            ws_providers: Arc::new(ws_providers),
+            ws_providers_pool: Arc::new(ws_providers_pool),
             fetcher: Arc::new(token_list_fetcher),
             snapshot_interval,
             token_limit,
@@ -115,11 +116,11 @@ impl SessionManager {
             None => return Err(SessionError::ProviderIsNotDefined),
         };
 
-        let ws_provider = match self.ws_providers.get(&session.network) {
+        let ws_pool = match self.ws_providers_pool.get(&session.network) {
             None => {
                 return Err(SessionError::WsProviderIsNotDefined);
             }
-            Some(ws_provider) => ws_provider.clone(),
+            Some(ws_pool) => Arc::clone(ws_pool),
         };
 
         let tokens = self
@@ -163,18 +164,14 @@ impl SessionManager {
         let should_spawn_watchers = sub.try_mark_watchers_spawned();
 
         if should_spawn_watchers {
-            let ctx = WatcherContext {
-                session,
-                provider,
-                ws_provider,
-            };
+            let ctx = WatcherContext { session, provider };
 
             tracing::info!(
                 session = %session,
                 "create first sse subscription and spawn watchers"
             );
 
-            Watcher::new(ctx, Arc::clone(&sub))
+            Watcher::new(ctx, Arc::clone(&sub), ws_pool)
                 .spawn_watchers(self.snapshot_interval)
                 .await
         }

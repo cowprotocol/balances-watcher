@@ -21,3 +21,4 @@ metrics = "0.24"
 metrics-exporter-prometheus = "0.16"
 rustls = { version = "0.23", features = ["ring"], default-features = false }
 backon = "1"
+uuid = { version = "1.22.0", features = ["v4"] }

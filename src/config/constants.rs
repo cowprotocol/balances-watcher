@@ -12,3 +12,5 @@ pub const DEFAULT_SNAPSHOT_INTERVAL_SECS: usize = 60;
 pub const DEFAULT_MAX_WATCHED_TOKENS_LIMIT: usize = 1500;
 
 pub const CALL_QUEUE_DELAY: Duration = Duration::from_millis(300);
+
+pub const MAX_CLIENTS_PER_WS_CONNECTION: usize = 200;

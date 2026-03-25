@@ -19,6 +19,7 @@ use crate::domain::Session;
 use crate::services::calls_queue::{CallsQueue, QueueMessage};
 use crate::services::fetch_balances_via_multicall::{BalanceCallCtx, BalancesWithBlock};
 use crate::services::subscription::Subscription;
+use crate::services::ws_connection_pool::WsConnectionPool;
 use crate::{
     domain::{BalanceEvent, EvmNetwork},
     evm::wrapped::WrappedToken,
@@ -51,7 +52,6 @@ pub enum ParseWeb3LogsError {
 pub struct WatcherContext {
     pub session: Session,
     pub provider: DynProvider,
-    pub ws_provider: DynProvider,
 }
 
 type Receiver = tokio::sync::mpsc::Receiver<QueueMessage>;
@@ -59,13 +59,18 @@ type Receiver = tokio::sync::mpsc::Receiver<QueueMessage>;
 pub struct Watcher {
     ctx: Arc<WatcherContext>,
     sub: Arc<Subscription>,
+    ws_connection_pool: Arc<WsConnectionPool>,
     calls_queue: Arc<CallsQueue>,
     // accepts data from calls_queue
     rx: Receiver,
 }
 
 impl Watcher {
-    pub fn new(ctx: WatcherContext, subscription: Arc<Subscription>) -> Self {
+    pub fn new(
+        ctx: WatcherContext,
+        subscription: Arc<Subscription>,
+        ws_connection_pool: Arc<WsConnectionPool>,
+    ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let calls_queue = CallsQueue::new(ctx.session, Arc::new(ctx.provider.clone()), tx);
 
@@ -73,6 +78,7 @@ impl Watcher {
             ctx: Arc::new(ctx),
             calls_queue: Arc::new(calls_queue),
             sub: subscription,
+            ws_connection_pool,
             rx,
         }
     }
@@ -283,15 +289,15 @@ impl Watcher {
             Arc::new(ctx)
         };
 
-        let ws_provider = self.ctx.ws_provider.clone();
         let calls_queue = Arc::clone(&self.calls_queue);
+        let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
 
         tokio::spawn(async move {
             let sub = Arc::clone(&sub);
             let calls_queue = Arc::clone(&calls_queue);
 
-            Self::run_log_subscription_loop(
-                ws_provider,
+            let _ = Self::run_log_subscription_loop(
+                ws_connection_pool,
                 filter,
                 sub.cancellable(),
                 move |log: Log| {
@@ -335,12 +341,24 @@ impl Watcher {
     // if log is received - call on_log callback
     // if ws provider disconnects - reconnect and continue listening
     async fn run_log_subscription_loop(
-        ws_provider: DynProvider,
+        connection_pool: Arc<WsConnectionPool>,
         filter: Filter,
         cancel: tokio_util::sync::CancellationToken,
         mut on_log: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
         mut on_drop: impl FnMut() + Send + 'static,
     ) {
+        let pool_guard = match connection_pool.acquire().await {
+            Ok(pool_guard) => pool_guard,
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to acquire connection pool guard, cancel watchers"
+                );
+                cancel.cancel();
+                return;
+            }
+        };
+
         'ws_connection_loop: loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -348,7 +366,7 @@ impl Watcher {
                     break 'ws_connection_loop;
                 },
                 _ = async {
-                    match Self::ws_sub_with_retries(ws_provider.clone(), filter.clone()).await {
+                    match Self::ws_sub_with_retries(&pool_guard.provider, filter.clone()).await {
                         Ok(sub) => {
                             tracing::info!("subscribed to logs");
 
@@ -392,11 +410,11 @@ impl Watcher {
 
     // subscribe to events with backoff
     async fn ws_sub_with_retries(
-        ws_provider: DynProvider,
+        provider: &DynProvider,
         filter: Filter,
     ) -> Result<alloy::pubsub::Subscription<Log>, WatcherError> {
         let backoff = Self::create_ws_sub_backoff();
-        (|| async { ws_provider.subscribe_logs(&filter).await })
+        (|| async { provider.subscribe_logs(&filter).await })
             .retry(backoff)
             .notify(|err, duration| {
                 tracing::error!(
@@ -529,12 +547,12 @@ impl Watcher {
             Arc::new(ctx)
         };
 
-        let ws_provider = self.ctx.ws_provider.clone();
+        let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
 
         tokio::spawn(async move {
             let sub_for_session = Arc::clone(&sub);
-            Self::run_log_subscription_loop(
-                ws_provider,
+            let _ = Self::run_log_subscription_loop(
+                ws_connection_pool,
                 filter,
                 sub_for_session.cancellable(),
                 move |log: Log| {
