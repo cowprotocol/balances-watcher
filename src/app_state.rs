@@ -1,8 +1,10 @@
+use crate::config::constants::MAX_CLIENTS_PER_WS_CONNECTION;
 use crate::config::network_config::NetworkConfig;
 use crate::domain::EvmNetwork;
 use crate::services::session_manager::SessionManager;
+use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::network::Ethereum;
-use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
+use alloy::providers::{DynProvider, Provider, ProviderBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,11 +16,11 @@ pub struct AppState {
 impl AppState {
     pub async fn build(network_config: NetworkConfig) -> Arc<Self> {
         let providers = Self::build_rpc_roviders_map(&network_config).await;
-        let ws_providers = Self::build_ws_rpc_providers(&network_config).await;
+        let ws_connection_pools = Self::build_ws_rpc_providers(&network_config).await;
 
         let session_manager = Arc::new(SessionManager::new(
             providers,
-            ws_providers,
+            ws_connection_pools,
             network_config.snapshot_interval,
             network_config.max_watched_tokens_limit,
         ));
@@ -47,24 +49,19 @@ impl AppState {
         providers
     }
 
-    async fn build_ws_rpc_providers(cfg: &NetworkConfig) -> HashMap<EvmNetwork, DynProvider> {
-        let mut providers: HashMap<EvmNetwork, DynProvider> = HashMap::new();
+    async fn build_ws_rpc_providers(
+        cfg: &NetworkConfig,
+    ) -> HashMap<EvmNetwork, Arc<WsConnectionPool>> {
+        let mut pool: HashMap<EvmNetwork, Arc<WsConnectionPool>> = HashMap::new();
 
         for network in EvmNetwork::ALL {
             let rpc = cfg.alchemy_ws_url(network);
-            let wc = WsConnect::new(rpc);
-            match ProviderBuilder::new().connect_ws(wc).await {
-                Ok(provider) => {
-                    providers.insert(network, provider.erased());
-                }
-                Err(e) => {
-                    tracing::error!("Error to init ws rpc connection {:?}", e);
-                }
-            }
+            let ws_connection_pool = WsConnectionPool::new(rpc, MAX_CLIENTS_PER_WS_CONNECTION);
+            pool.insert(network, Arc::new(ws_connection_pool));
 
             tracing::info!("WS provider for network {} is registered", network);
         }
 
-        providers
+        pool
     }
 }

@@ -7,6 +7,9 @@ pub enum ServiceError {
 
     #[error("Error to send data via tx: {0}")]
     ErrorToSend(String),
+
+    #[error("Error when init the ws provider: {0}")]
+    ErrorInitWsProvider(String),
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
