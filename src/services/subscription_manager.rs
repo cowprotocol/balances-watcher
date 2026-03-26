@@ -2,11 +2,12 @@ use crate::domain::{BalanceEvent, Session};
 use crate::services::errors::SubscriptionError;
 use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, U256};
+use dashmap::DashMap;
 use metrics::{counter, gauge};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 
 struct SubWithCounter {
     pub clients: u32,
@@ -23,7 +24,7 @@ pub struct Balance {
 pub type BalanceSnapshot = HashMap<Address, Balance>;
 
 pub struct SubscriptionManager {
-    subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
+    subscriptions: DashMap<Session, SubWithCounter>,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
@@ -31,16 +32,15 @@ const SESSION_TTL: Duration = Duration::from_secs(5);
 impl SubscriptionManager {
     pub fn new() -> Self {
         Self {
-            subscriptions: RwLock::new(HashMap::new()),
+            subscriptions: DashMap::new(),
         }
     }
 
     // create or update subscriptions clients count and watched token list
     pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
-        let mut subs = self.subscriptions.write().await;
         let new_tokens_len = tokens.len();
 
-        if let Some(existing) = subs.get_mut(&session) {
+        if let Some(existing) = self.subscriptions.get_mut(&session) {
             let watched_tokens_len = existing.subscription.extend_tokens(tokens).await;
 
             counter!("sessions_updated_total").increment(1);
@@ -68,7 +68,7 @@ impl SubscriptionManager {
             idle_since: Some(Instant::now()),
         };
 
-        subs.insert(session, sub_with_counter);
+        self.subscriptions.insert(session, sub_with_counter);
 
         counter!("sessions_created_total").increment(1);
         gauge!("active_sessions").increment(1);
@@ -82,17 +82,16 @@ impl SubscriptionManager {
     }
 
     pub async fn get_subscription(&self, session: Session) -> Option<Arc<Subscription>> {
-        let subs = self.subscriptions.read().await;
-        subs.get(&session).map(|sub| Arc::clone(&sub.subscription))
+        self.subscriptions
+            .get(&session)
+            .map(|sub| Arc::clone(&sub.subscription))
     }
 
     pub async fn subscribe(
         &self,
         session: Session,
     ) -> Result<(broadcast::Receiver<BalanceEvent>, Arc<Subscription>), SubscriptionError> {
-        let mut subs = self.subscriptions.write().await;
-
-        if let Some(existing) = subs.get_mut(&session) {
+        if let Some(mut existing) = self.subscriptions.get_mut(&session) {
             existing.clients = existing
                 .clients
                 .checked_add(1)
@@ -115,9 +114,7 @@ impl SubscriptionManager {
 
     // true - if it was the last client
     pub async fn unsubscribe(&self, session: &Session) -> Result<bool, SubscriptionError> {
-        let mut subs = self.subscriptions.write().await;
-
-        if let Some(existing) = subs.get_mut(session) {
+        if let Some(mut existing) = self.subscriptions.get_mut(session) {
             existing.clients = existing
                 .clients
                 .checked_sub(1)
@@ -159,11 +156,9 @@ impl SubscriptionManager {
     }
 
     async fn cleanup_subs(&self) {
-        let mut subs = self.subscriptions.write().await;
-
         let now = Instant::now();
 
-        subs.retain(|session, sub| {
+        self.subscriptions.retain(|session, sub| {
             let should_remove = if sub.clients == 0 {
                 match sub.idle_since {
                     Some(idle_since) => now.duration_since(idle_since) > SESSION_TTL,
