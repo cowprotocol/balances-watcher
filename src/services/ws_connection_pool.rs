@@ -9,6 +9,7 @@ struct Connection {
     clients: usize,
 }
 
+// guard to handle drop to release the provider
 pub struct PoolGuard {
     pub provider: DynProvider,
     id: uuid::Uuid,

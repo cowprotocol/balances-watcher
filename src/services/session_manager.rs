@@ -11,6 +11,7 @@ use alloy::transports::http::reqwest::StatusCode;
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
 use axum::Json;
+use futures::stream;
 use futures::Stream;
 use futures::StreamExt;
 use metrics::counter;
@@ -240,35 +241,41 @@ impl SessionManager {
 
         let balance_snapshot = subscription.current_snapshot().await;
 
-        // if it's a first sse connection, the watcher should send updates when it fetches balances
-        // otherwise, send balance snapshot
-        let event = if balance_snapshot.is_empty() {
+        // Build an initial stream that delivers the snapshot directly to this client only,
+        // avoiding a broadcast that would redundantly push to all existing subscribers.
+        let initial_stream = if balance_snapshot.is_empty() {
             tracing::info!(
                 session = %session,
                 "balance snapshot is empty"
             );
-            None
+            stream::iter(vec![])
         } else {
-            let balance_snapshot: HashMap<Address, String> = balance_snapshot
-                .clone()
-                .into_iter()
-                .map(|(address, balance)| (address, balance.amount.to_string()))
-                .collect();
-            Some(BalanceEvent::BalanceUpdate(balance_snapshot))
-        };
-
-        if let Some(event) = event {
             tracing::info!(
                 session = %session,
                 "sending first balance snapshot to new sse connection (full)"
             );
 
-            subscription.send_event(event, session);
-        }
+            let balance_snapshot: HashMap<Address, String> = balance_snapshot
+                .into_iter()
+                .map(|(address, balance)| (address, balance.amount.to_string()))
+                .collect();
+            let event = BalanceEvent::BalanceUpdate(balance_snapshot);
+
+            match Self::balance_event_to_sse(event) {
+                Ok(sse_event) => stream::iter(vec![Ok(sse_event)]),
+                Err(err) => {
+                    tracing::error!(
+                        error = %err,
+                        "error when converting initial snapshot to sse event",
+                    );
+                    stream::iter(vec![])
+                }
+            }
+        };
 
         let manager_for_cleanup = Arc::clone(&self.sub_manager);
 
-        let sse_stream = BroadcastStream::new(rx).filter_map(|result| async move {
+        let broadcast_stream = BroadcastStream::new(rx).filter_map(|result| async move {
             match result {
                 Ok(event) => {
                     let sse_event = match Self::balance_event_to_sse(event) {
@@ -293,6 +300,8 @@ impl SessionManager {
                 }
             }
         });
+
+        let sse_stream = initial_stream.chain(broadcast_stream);
 
         let cleanup_stream =
             cleanup_stream::CleanupStream::new(sse_stream, manager_for_cleanup, session);
