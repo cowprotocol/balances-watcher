@@ -1,12 +1,12 @@
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
+use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::cleanup_stream;
 use crate::services::errors::{FetcherError, SubscriptionError};
 use crate::services::subscription_manager::SubscriptionManager;
 use crate::services::token_list_fetcher::TokenListFetcher;
-use crate::services::watcher::{Watcher, WatcherContext};
+use crate::services::watcher::Watcher;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::primitives::Address;
-use alloy::providers::DynProvider;
 use alloy::transports::http::reqwest::StatusCode;
 use axum::response::sse::{Event, KeepAlive};
 use axum::response::{IntoResponse, Response, Sse};
@@ -24,7 +24,7 @@ use tokio_stream::wrappers::BroadcastStream;
 // handle subscriptions: fetch token lists, spawn watchers, update watched tokens
 pub struct SessionManager {
     sub_manager: Arc<SubscriptionManager>,
-    providers: Arc<HashMap<EvmNetwork, DynProvider>>,
+    multicall_fetchers: Arc<HashMap<EvmNetwork, Arc<BalanceFetcher>>>,
     ws_providers_pool: Arc<HashMap<EvmNetwork, Arc<WsConnectionPool>>>,
     fetcher: Arc<TokenListFetcher>,
     snapshot_interval: usize,
@@ -89,7 +89,7 @@ pub enum SessionError {
 // TODO create own error type
 impl SessionManager {
     pub fn new(
-        providers: HashMap<EvmNetwork, DynProvider>,
+        multicall_fetchers: HashMap<EvmNetwork, Arc<BalanceFetcher>>,
         ws_providers_pool: HashMap<EvmNetwork, Arc<WsConnectionPool>>,
         snapshot_interval: usize,
         token_limit: usize,
@@ -101,9 +101,9 @@ impl SessionManager {
 
         Self {
             sub_manager: Arc::clone(&sub_manager),
-            providers: Arc::new(providers),
             ws_providers_pool: Arc::new(ws_providers_pool),
             fetcher: Arc::new(token_list_fetcher),
+            multicall_fetchers: Arc::new(multicall_fetchers),
             snapshot_interval,
             token_limit,
         }
@@ -112,7 +112,7 @@ impl SessionManager {
     pub async fn upsert(&self, ctx: SessionContext) -> Result<(), SessionError> {
         let session = ctx.session;
 
-        let provider = match self.providers.get(&session.network) {
+        let provider = match self.multicall_fetchers.get(&session.network) {
             Some(provider) => provider.clone(),
             None => return Err(SessionError::ProviderIsNotDefined),
         };
@@ -165,14 +165,12 @@ impl SessionManager {
         let should_spawn_watchers = sub.try_mark_watchers_spawned();
 
         if should_spawn_watchers {
-            let ctx = WatcherContext { session, provider };
-
             tracing::info!(
                 session = %session,
                 "create first sse subscription and spawn watchers"
             );
 
-            Watcher::new(ctx, Arc::clone(&sub), ws_pool)
+            Watcher::new(session, provider, Arc::clone(&sub), ws_pool)
                 .spawn_watchers(self.snapshot_interval)
                 .await
         }

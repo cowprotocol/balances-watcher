@@ -16,14 +16,13 @@ use thiserror::Error;
 use tokio::time::interval;
 
 use crate::domain::Session;
+use crate::services::balance_fetcher::{BalanceFetcher, BalancesWithBlock};
 use crate::services::calls_queue::{CallsQueue, QueueMessage};
-use crate::services::fetch_balances_via_multicall::{BalanceCallCtx, BalancesWithBlock};
 use crate::services::subscription::Subscription;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use crate::{
     domain::{BalanceEvent, EvmNetwork},
     evm::wrapped::WrappedToken,
-    services::fetch_balances_via_multicall,
 };
 
 enum WethEvents {
@@ -49,35 +48,33 @@ pub enum ParseWeb3LogsError {
     UnexpectedHashSignature,
 }
 
-pub struct WatcherContext {
-    pub session: Session,
-    pub provider: DynProvider,
-}
-
 type Receiver = tokio::sync::mpsc::Receiver<QueueMessage>;
 
 pub struct Watcher {
-    ctx: Arc<WatcherContext>,
+    session: Session,
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
     calls_queue: Arc<CallsQueue>,
+    multicall_fetcher: Arc<BalanceFetcher>,
     // accepts data from calls_queue
     rx: Receiver,
 }
 
 impl Watcher {
     pub fn new(
-        ctx: WatcherContext,
+        session: Session,
+        multicall_fetcher: Arc<BalanceFetcher>,
         subscription: Arc<Subscription>,
         ws_connection_pool: Arc<WsConnectionPool>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let calls_queue = CallsQueue::new(ctx.session, Arc::new(ctx.provider.clone()), tx);
+        let calls_queue = CallsQueue::new(session, Arc::clone(&multicall_fetcher), tx);
 
         Self {
-            ctx: Arc::new(ctx),
+            session,
             calls_queue: Arc::new(calls_queue),
             sub: subscription,
+            multicall_fetcher,
             ws_connection_pool,
             rx,
         }
@@ -90,7 +87,7 @@ impl Watcher {
     pub async fn spawn_watchers(self, interval_secs: usize) {
         self.spawn_snapshot_updater(interval_secs).await;
         self.spawn_erc20_transfer_listeners().await;
-        Self::spawn_queue_result_receiver(Arc::clone(&self.sub), self.rx, self.ctx.session).await;
+        Self::spawn_queue_result_receiver(Arc::clone(&self.sub), self.rx, self.session).await;
     }
 
     // watcher to request balances via multicall every interval_secs to have an actual state
@@ -98,22 +95,13 @@ impl Watcher {
     // could be removed if we check more ws subscriptions for updates
     async fn spawn_snapshot_updater(&self, interval_secs: usize) {
         let sub = Arc::clone(&self.sub);
-        let ctx = Arc::clone(&self.ctx);
         let cancel = sub.cancellable();
         let notifier = sub.take_sync_notifier();
-
-        let balance_call_ctx = {
-            let balance_call_ctx = BalanceCallCtx {
-                session: ctx.session,
-                provider: Arc::new(ctx.provider.clone()),
-            };
-
-            Arc::new(balance_call_ctx)
-        };
+        let session = self.session;
+        let fetcher = Arc::clone(&self.multicall_fetcher);
 
         tokio::spawn(async move {
             let mut interval = interval(Duration::from_secs(interval_secs as u64));
-            let session = ctx.session;
 
             loop {
                 tokio::select! {
@@ -127,7 +115,7 @@ impl Watcher {
                     _ = interval.tick() => {
                         // every n secs we make a multicall to sync all token balances
                         counter!("snapshot_updater_runs_total").increment(1);
-                        Self::fetch_balances_and_broadcast(Arc::clone(&balance_call_ctx), Arc::clone(&sub)).await;
+                        Self::fetch_balances_and_broadcast(Arc::clone(&fetcher), session, Arc::clone(&sub)).await;
                     }
                     _ = notifier.notified() => {
                         // if there are new tokens that were added to a subscription, we should immediately update a snapshot to not
@@ -137,7 +125,7 @@ impl Watcher {
                             "watched tokens were updated - force sync and reset interval"
                         );
                         counter!("snapshot_updater_runs_total").increment(1);
-                        Self::fetch_balances_and_broadcast(Arc::clone(&balance_call_ctx), Arc::clone(&sub)).await;
+                        Self::fetch_balances_and_broadcast(Arc::clone(&fetcher), session, Arc::clone(&sub)).await;
                         interval.reset();
                     }
                 }
@@ -213,16 +201,19 @@ impl Watcher {
     }
 
     // request all balances for a list of watched tokens via multicall and broadcast them to clients
-    async fn fetch_balances_and_broadcast(ctx: Arc<BalanceCallCtx>, sub: Arc<Subscription>) {
-        let owner = ctx.session.owner;
-        let network = ctx.session.network;
-        let session = ctx.session;
+    async fn fetch_balances_and_broadcast(
+        fetcher: Arc<BalanceFetcher>,
+        session: Session,
+        sub: Arc<Subscription>,
+    ) {
         let tokens = { sub.watched_tokens().await.into_iter().collect::<Vec<_>>() };
         tracing::info!(
             tokens_count = tokens.len(),
             "snapshot updater fetching balances"
         );
-        let result = Self::get_tokens_balance(ctx, &tokens, BlockId::latest()).await;
+        let result =
+            Self::get_tokens_balance(Arc::clone(&fetcher), session, &tokens, BlockId::latest())
+                .await;
 
         match result {
             Ok(balances) => {
@@ -230,7 +221,7 @@ impl Watcher {
             }
             Err(e) => {
                 tracing::error!(
-                    owner = %owner,
+                    session = %session,
                     error = %e,
                     "failed to get balances"
                 );
@@ -239,24 +230,28 @@ impl Watcher {
                     code: 500,
                     message: "Error when make multicall3 request".to_string(),
                 });
-                Self::send_balance_update_event(event, Arc::clone(&sub), Session { owner, network })
+                Self::send_balance_update_event(event, Arc::clone(&sub), session)
             }
         };
     }
 
     // request balances via multicall for a list of tokens and map error
     async fn get_tokens_balance(
-        ctx: Arc<BalanceCallCtx>,
+        fetcher: Arc<BalanceFetcher>,
+        session: Session,
         tokens: &[Address],
         block_id: BlockId,
     ) -> Result<BalancesWithBlock, WatcherError> {
-        let owner = ctx.session.owner;
-        let network = ctx.session.network;
-        fetch_balances_via_multicall::fetch_balances_via_multicall(ctx, tokens, block_id)
+        fetcher
+            .fetch_balances_via_multicall(session.owner, tokens, block_id)
             .await
             .map_err(|e| {
-                tracing::error!("Failed to get balances for {}: {}", owner, e);
-                WatcherError::GettingBalance(owner, network, e.to_string())
+                tracing::error!(
+                    error = %e,
+                    session = %session,
+                    "Failed to fetch balance"
+                );
+                WatcherError::GettingBalance(session.owner, session.network, e.to_string())
             })
     }
 
@@ -266,8 +261,8 @@ impl Watcher {
      * Need to sync wrap/unwrap txs to handle wrapped token balance
      */
     async fn spawn_weth9_events_listener(&self) {
-        let ctx = Arc::clone(&self.ctx);
-        let weth9_address = ctx.session.network.weth9_address();
+        let session = self.session;
+        let weth9_address = session.network.weth9_address();
 
         let event_signatures = vec![
             WrappedToken::Deposit::SIGNATURE_HASH,
@@ -276,18 +271,9 @@ impl Watcher {
         let filter = Filter::new()
             .address(weth9_address)
             .event_signature(event_signatures)
-            .topic1(Topic::from(ctx.session.owner));
+            .topic1(Topic::from(session.owner));
 
         let sub: Arc<Subscription> = Arc::clone(&self.sub);
-
-        let balance_call_ctx = {
-            let ctx = BalanceCallCtx {
-                session: ctx.session,
-                provider: Arc::new(self.ctx.provider.clone()),
-            };
-
-            Arc::new(ctx)
-        };
 
         let calls_queue = Arc::clone(&self.calls_queue);
         let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
@@ -301,14 +287,12 @@ impl Watcher {
                 filter,
                 sub.cancellable(),
                 move |log: Log| {
-                    let ctx = Arc::clone(&balance_call_ctx);
                     let calls_queue = Arc::clone(&calls_queue);
 
                     Box::pin(async move {
                         counter!("weth9_events_received_total").increment(1);
 
-                        Self::parse_weth9_logs_and_fetch_balance(ctx.session, &log, calls_queue)
-                            .await;
+                        Self::parse_weth9_logs_and_fetch_balance(session, &log, calls_queue).await;
                     })
                 },
                 move || {
@@ -317,7 +301,7 @@ impl Watcher {
                         code: 503,
                         message: "WebSocket connection lost permanently".to_string(),
                     });
-                    Self::send_balance_update_event(event, sub, ctx.session);
+                    Self::send_balance_update_event(event, sub, session);
                 },
             )
             .await;
@@ -521,10 +505,10 @@ impl Watcher {
     }
 
     async fn spawn_erc20_transfer_listeners(&self) {
-        let ctx = Arc::clone(&self.ctx);
+        let session = self.session;
         let base = Filter::new().event_signature(ERC20::Transfer::SIGNATURE_HASH);
-        let from = base.clone().topic1(Topic::from(ctx.session.owner));
-        let to = base.clone().topic2(Topic::from(ctx.session.owner));
+        let from = base.clone().topic1(Topic::from(session.owner));
+        let to = base.clone().topic2(Topic::from(session.owner));
 
         self.spawn_erc20_transfer_listener_with_filter(from).await;
         self.spawn_erc20_transfer_listener_with_filter(to).await;
@@ -534,18 +518,9 @@ impl Watcher {
     // listent to erc20 transfer events for owner (in/out)
     // if an event is received - get balance for token(+ eth balance) and send it to clients
     async fn spawn_erc20_transfer_listener_with_filter(&self, filter: Filter) {
-        let ctx = Arc::clone(&self.ctx);
+        let session = self.session;
         let sub = Arc::clone(&self.sub);
         let calls_queue = Arc::clone(&self.calls_queue);
-
-        let balance_call_ctx = {
-            let ctx = BalanceCallCtx {
-                session: ctx.session,
-                provider: Arc::new(ctx.provider.clone()),
-            };
-
-            Arc::new(ctx)
-        };
 
         let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
 
@@ -557,7 +532,6 @@ impl Watcher {
                 sub_for_session.cancellable(),
                 move |log: Log| {
                     let call_queue = Arc::clone(&calls_queue);
-                    let ctx = Arc::clone(&balance_call_ctx);
 
                     tracing::info!("received erc20 transfer event: {:#?}", log);
                     counter!("erc20_event_received_total").increment(1);
@@ -565,7 +539,7 @@ impl Watcher {
                     Box::pin(async move {
                         // parse event and send it to calls_queue to update balance
                         Self::parse_transfer_event_and_fetch_balance(
-                            Arc::clone(&ctx),
+                            session,
                             Arc::clone(&call_queue),
                             &log,
                         )
@@ -578,7 +552,7 @@ impl Watcher {
                             code: 503,
                             message: "WebSocket connection lost permanently".to_string(),
                         },
-                        ctx.session,
+                        session,
                     );
                 },
             )
@@ -587,7 +561,7 @@ impl Watcher {
     }
 
     async fn parse_transfer_event_and_fetch_balance(
-        ctx: Arc<BalanceCallCtx>,
+        session: Session,
         calls_queue: Arc<CallsQueue>,
         log: &Log,
     ) {
@@ -599,8 +573,8 @@ impl Watcher {
                 counter!("parse_erc20_log_errors_total").increment(1);
                 tracing::error!(
                     error = %err,
-                    netowrk = %ctx.session.network,
-                    owner = %ctx.session.owner,
+                    netowrk = %session.network,
+                    owner = %session.owner,
                     "error when parse log",
                 );
                 return;
@@ -610,8 +584,9 @@ impl Watcher {
         // always put native address into queue to keep it synced
         let tokens = vec![
             decoded_log.address(),
-            ctx.session.network.native_token_address(),
+            session.network.native_token_address(),
         ];
+
         calls_queue.upsert_delayed_call(&tokens, block_number).await;
     }
 }

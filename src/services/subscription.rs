@@ -1,6 +1,6 @@
 use crate::config::constants::BROADCAST_CHANNEL_CAPACITY;
 use crate::domain::{BalanceEvent, Session};
-use crate::services::fetch_balances_via_multicall::BalancesWithBlock;
+use crate::services::balance_fetcher::BalancesWithBlock;
 use crate::services::subscription_manager::{Balance, BalanceSnapshot};
 use alloy::primitives::Address;
 use metrics::counter;
