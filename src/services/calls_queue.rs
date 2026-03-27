@@ -1,12 +1,9 @@
 use crate::config::constants::CALL_QUEUE_DELAY;
 use crate::domain::Session;
+use crate::services::balance_fetcher::{BalanceFetcher, BalancesWithBlock};
 use crate::services::errors::ServiceError;
-use crate::services::fetch_balances_via_multicall::{
-    fetch_balances_via_multicall, BalanceCallCtx, BalancesWithBlock,
-};
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, BlockNumber};
-use alloy::providers::DynProvider;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
@@ -35,16 +32,16 @@ struct QueueState {
 
 pub struct CallsQueue {
     session: Session,
-    http_provider: Arc<DynProvider>,
+    multicall_fetcher: Arc<BalanceFetcher>,
     state: RwLock<QueueState>,
     tx: Arc<Sender>,
 }
 
 impl CallsQueue {
-    pub fn new(session: Session, provider: Arc<DynProvider>, tx: Sender) -> Self {
+    pub fn new(session: Session, multicall_fetcher: Arc<BalanceFetcher>, tx: Sender) -> Self {
         Self {
             session,
-            http_provider: provider,
+            multicall_fetcher,
             state: RwLock::new(QueueState {
                 pending: HashMap::new(),
                 status: Status::None,
@@ -155,12 +152,10 @@ impl CallsQueue {
             BlockId::from(latest_block)
         };
 
-        let call_ctx = Arc::new(BalanceCallCtx {
-            session: self.session,
-            provider: Arc::clone(&self.http_provider),
-        });
-
-        let result = fetch_balances_via_multicall(call_ctx, &tokens, block_id).await;
+        let result = self
+            .multicall_fetcher
+            .fetch_balances_via_multicall(self.session.owner, &tokens, block_id)
+            .await;
         let msg = match result {
             Ok(response) => QueueMessage::Success(response),
             Err(err) => {

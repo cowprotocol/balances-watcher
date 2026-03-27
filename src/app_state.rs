@@ -1,10 +1,10 @@
 use crate::config::constants::MAX_CLIENTS_PER_WS_CONNECTION;
 use crate::config::network_config::NetworkConfig;
 use crate::domain::EvmNetwork;
+use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::session_manager::SessionManager;
 use crate::services::ws_connection_pool::WsConnectionPool;
-use alloy::network::Ethereum;
-use alloy::providers::{DynProvider, Provider, ProviderBuilder};
+use alloy::providers::{Provider, ProviderBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ pub struct AppState {
 
 impl AppState {
     pub async fn build(network_config: NetworkConfig) -> Arc<Self> {
-        let providers = Self::build_rpc_roviders_map(&network_config).await;
+        let providers = Self::build_rpc_fetchers_map(&network_config).await;
         let ws_connection_pools = Self::build_ws_rpc_providers(&network_config).await;
 
         let session_manager = Arc::new(SessionManager::new(
@@ -28,16 +28,17 @@ impl AppState {
         Arc::new(Self { session_manager })
     }
 
-    async fn build_rpc_roviders_map(
+    async fn build_rpc_fetchers_map(
         cfg: &NetworkConfig,
-    ) -> HashMap<EvmNetwork, DynProvider<Ethereum>> {
-        let mut providers: HashMap<EvmNetwork, DynProvider<Ethereum>> = HashMap::new();
+    ) -> HashMap<EvmNetwork, Arc<BalanceFetcher>> {
+        let mut fetchers: HashMap<EvmNetwork, Arc<BalanceFetcher>> = HashMap::new();
 
         for network in EvmNetwork::ALL {
             let rpc = &cfg.alchemy_http_url(network);
             match ProviderBuilder::new().connect(rpc).await {
                 Ok(provider) => {
-                    providers.insert(network, provider.erased());
+                    let fetcher = BalanceFetcher::new(Arc::new(provider.erased()), network);
+                    fetchers.insert(network, Arc::new(fetcher));
                     tracing::info!("Provider for network {} is registered", network);
                 }
                 Err(e) => {
@@ -46,7 +47,7 @@ impl AppState {
             };
         }
 
-        providers
+        fetchers
     }
 
     async fn build_ws_rpc_providers(

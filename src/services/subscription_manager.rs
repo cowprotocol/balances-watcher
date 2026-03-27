@@ -39,7 +39,10 @@ impl SubscriptionManager {
     // create or update subscriptions clients count and watched token list
     pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
         let new_tokens_len = tokens.len();
-        let maybe_sub = self.subscriptions.get(&session).and_then(|sub| Some(Arc::clone(&sub.subscription)));
+        let maybe_sub = self
+            .subscriptions
+            .get(&session)
+            .map(|sub| Arc::clone(&sub.subscription));
         if let Some(sub) = maybe_sub {
             let watched_tokens_len = sub.extend_tokens(tokens).await;
 
@@ -78,7 +81,7 @@ impl SubscriptionManager {
             "session is created"
         );
 
-        Arc::clone(&subscription)
+        subscription
     }
 
     pub async fn get_subscription(&self, session: Session) -> Option<Arc<Subscription>> {
