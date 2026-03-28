@@ -75,7 +75,7 @@ impl BalanceFetcher {
         counter!("multicall_total").increment(1);
 
         let call_result = {
-            let _ = self.request_semaphore.acquire().await;
+            let _permit = self.request_semaphore.acquire().await;
             Self::multicall_with_backoff(&multicall3, &calls, block_id)
                 .await
                 .inspect(move |_| {
