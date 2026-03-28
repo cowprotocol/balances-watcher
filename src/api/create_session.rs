@@ -3,8 +3,10 @@ use axum::{
     extract::{Path, State},
     Json,
 };
+use metrics::histogram;
 use serde::Deserialize;
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::services::session_manager::SessionContext;
 use crate::{
@@ -35,15 +37,24 @@ pub async fn create_session(
         ));
     }
 
+    let session = Session { network, owner };
+    let t0 = Instant::now();
+    tracing::info!(session = %session, "handler: create_session START");
+
     let ctx = SessionContext {
-        session: Session { network, owner },
+        session,
         tokens_lists_urls: body.tokens_lists_urls,
         custom_tokens: body.custom_tokens,
     };
 
-    state
+    let result = state
         .session_manager
         .upsert(ctx)
         .await
-        .map_err(AppError::from)
+        .map_err(AppError::from);
+
+    let elapsed = t0.elapsed().as_millis() as f64;
+    histogram!("create_session_duration_ms").record(elapsed);
+    tracing::info!(session = %session, time_ms = elapsed, success = result.is_ok(), "handler: create_session END");
+    result
 }

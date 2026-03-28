@@ -66,6 +66,8 @@ impl TokenListFetcher {
 
     async fn fetch_with_locks(&self, normalized_urls: &[String]) -> Result<(), FetcherError> {
         // create locks per each url if needed and gather them
+        let t0 = Instant::now();
+        tracing::info!("fetch_with_locks: acquiring url lock map");
         let arcs: Vec<_> = {
             let mut locks = self.locks.lock().await;
             normalized_urls
@@ -78,12 +80,26 @@ impl TokenListFetcher {
                 })
                 .collect()
         };
+        let elapsed = t0.elapsed().as_millis() as f64;
+        histogram!("token_fetch_lock_map_ms").record(elapsed);
+        tracing::info!(time_ms = elapsed, "fetch_with_locks: url lock map acquired");
 
+        let t0 = Instant::now();
+        tracing::info!(
+            count = arcs.len(),
+            "fetch_with_locks: acquiring per-url locks"
+        );
         let mut guards = Vec::with_capacity(arcs.len());
         for arc in arcs {
             // lock url
             guards.push(arc.lock_owned().await);
         }
+        let elapsed = t0.elapsed().as_millis() as f64;
+        histogram!("token_fetch_per_url_locks_ms").record(elapsed);
+        tracing::info!(
+            time_ms = elapsed,
+            "fetch_with_locks: per-url locks acquired"
+        );
 
         let uncached: Vec<String> = {
             let cache = self.cache.read().await;
@@ -100,7 +116,20 @@ impl TokenListFetcher {
         };
 
         if !uncached.is_empty() {
+            let t0 = Instant::now();
+            tracing::info!(
+                count = uncached.len(),
+                "fetch_with_locks: fetching uncached lists"
+            );
             self.fetch_and_cache(&uncached).await?;
+            let elapsed = t0.elapsed().as_millis() as f64;
+            histogram!("token_fetch_uncached_ms").record(elapsed);
+            tracing::info!(
+                time_ms = elapsed,
+                "fetch_with_locks: uncached lists fetched"
+            );
+        } else {
+            tracing::info!("fetch_with_locks: all lists cached");
         }
 
         Ok(())
