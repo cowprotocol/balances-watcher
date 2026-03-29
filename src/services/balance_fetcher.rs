@@ -83,7 +83,6 @@ impl BalanceFetcher {
                 })
                 .map_err(|e| {
                     counter!("provider_exhausted_with_retires_total", "network" => self.network.to_string()).increment(1);
-                    histogram!("multicall_duration_ms").record(t0.elapsed().as_millis() as f64);
                     ServiceError::BalancesMultiCallError(e.to_string())
                 })?
         };
