@@ -1,7 +1,8 @@
 use crate::services::errors::ServiceError;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
-use dashmap::DashMap;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 struct Connection {
     provider: DynProvider,
@@ -28,7 +29,7 @@ impl Drop for PoolGuard {
 // handle active connections per a provider instance
 pub struct WsConnectionPool {
     ws_url: String,
-    connections: DashMap<uuid::Uuid, Connection>,
+    connections: RwLock<HashMap<uuid::Uuid, Connection>>,
     max_clients_per_connection: usize,
 }
 
@@ -36,7 +37,7 @@ impl WsConnectionPool {
     pub fn new(ws_url: String, max_connections: usize) -> WsConnectionPool {
         Self {
             ws_url,
-            connections: DashMap::new(),
+            connections: RwLock::new(HashMap::new()),
             max_clients_per_connection: max_connections,
         }
     }
@@ -45,18 +46,18 @@ impl WsConnectionPool {
     // and return the cloned provider, otherwise - creates a new provider instance
     pub async fn acquire(self: &Arc<Self>) -> Result<PoolGuard, ServiceError> {
         {
-            let maybe_entry = self
-                .connections
+            let mut conns = self.connections.write().await;
+            let maybe_entry = conns
                 .iter_mut()
-                .find(|entry| entry.value().clients < self.max_clients_per_connection);
+                .find(|(_, conn)| conn.clients < self.max_clients_per_connection);
 
-            if let Some(mut entry) = maybe_entry {
-                // we have con.clients < self.max_connections above this check, so it's safe
-                entry.clients += 1;
+            if let Some((id, conn)) = maybe_entry {
+                conn.clients += 1;
+                let id = *id;
                 return Ok(PoolGuard {
                     pool: Arc::clone(self),
-                    provider: entry.provider.clone(),
-                    id: *entry.key(),
+                    provider: conn.provider.clone(),
+                    id,
                 });
             }
         }
@@ -73,7 +74,7 @@ impl WsConnectionPool {
         };
 
         let id = uuid::Uuid::new_v4();
-        self.connections.insert(id, new_con);
+        self.connections.write().await.insert(id, new_con);
         Ok(PoolGuard {
             pool: Arc::clone(self),
             provider,
@@ -82,13 +83,17 @@ impl WsConnectionPool {
     }
 
     pub async fn release(&self, id: uuid::Uuid) {
-        if let Some(mut con) = self.connections.get_mut(&id) {
+        let mut connections = self.connections.write().await;
+        let should_remove = if let Some(con) = connections.get_mut(&id) {
             con.clients = con.clients.saturating_sub(1);
-            if con.clients == 0 {
-                self.connections.remove(&id);
-            }
+            con.clients == 0
         } else {
             tracing::warn!(id = %id, "connection pool is already dropped");
+            false
+        };
+
+        if should_remove {
+            connections.remove(&id);
         }
     }
 }
