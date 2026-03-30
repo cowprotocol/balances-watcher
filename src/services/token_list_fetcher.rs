@@ -19,6 +19,7 @@ use crate::{
 
 const CACHE_TTL: Duration = Duration::from_secs(3600 * 5); // 5 hours
 
+// need to load token lists and save them to cache
 struct CachedTokenList {
     fetched_at: Instant,
     // a list can have tokens from multiple chains, so we need to map them

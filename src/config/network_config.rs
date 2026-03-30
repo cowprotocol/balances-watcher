@@ -52,6 +52,9 @@ impl NetworkConfig {
             EvmNetwork::Eth => "eth-mainnet",
             EvmNetwork::Arbitrum => "arb-mainnet",
             EvmNetwork::Sepolia => "eth-sepolia",
+            EvmNetwork::Bnb => "bnb-mainnet",
+            EvmNetwork::Poligon => "poligon-mainnet",
+            EvmNetwork::Gnosis => "gnosis-mainnet",
         }
     }
 

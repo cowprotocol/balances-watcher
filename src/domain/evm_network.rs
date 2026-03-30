@@ -12,10 +12,20 @@ pub enum EvmNetwork {
     Eth = 1,
     Arbitrum = 42161,
     Sepolia = 11155111,
+    Bnb = 56,
+    Gnosis = 100,
+    Poligon = 137,
 }
 
 impl EvmNetwork {
-    pub const ALL: [EvmNetwork; 3] = [EvmNetwork::Eth, EvmNetwork::Arbitrum, EvmNetwork::Sepolia];
+    pub const ALL: [EvmNetwork; 6] = [
+        EvmNetwork::Eth,
+        EvmNetwork::Arbitrum,
+        EvmNetwork::Sepolia,
+        EvmNetwork::Bnb,
+        EvmNetwork::Gnosis,
+        EvmNetwork::Poligon,
+    ];
 
     pub fn chain_id(self) -> u64 {
         self as u64
@@ -34,6 +44,9 @@ impl EvmNetwork {
             EvmNetwork::Eth => address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
             EvmNetwork::Sepolia => address!("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"),
             EvmNetwork::Arbitrum => address!("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+            EvmNetwork::Gnosis => address!("0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"),
+            EvmNetwork::Bnb => address!("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
+            EvmNetwork::Poligon => address!("0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"),
         }
     }
 }
