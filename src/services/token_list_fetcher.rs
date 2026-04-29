@@ -17,7 +17,7 @@ use crate::{
     services::errors::FetcherError,
 };
 
-const CACHE_TTL: Duration = Duration::from_secs(3600 * 5); // 5 hours
+const CACHE_TTL: Duration = Duration::from_hours(5);
 
 // need to load token lists and save them to cache
 struct CachedTokenList {
