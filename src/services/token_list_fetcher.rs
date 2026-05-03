@@ -98,9 +98,9 @@ impl TokenListFetcher {
 
         urls.iter()
             .filter(|url| {
-                !cache
+                cache
                     .get(*url)
-                    .is_some_and(|cached| cached.fetched_at.elapsed() > self.ttl)
+                    .is_none_or(|cached| cached.fetched_at.elapsed() > self.ttl)
             })
             .collect()
     }
@@ -211,10 +211,13 @@ impl TokenListFetcher {
     }
 }
 
-#[cfg(test)] mod token_list_fetcher_tests {
+#[cfg(test)]
+mod token_list_fetcher_tests {
+    use std::thread::sleep;
+
     use super::*;
-    use wiremock::{MockServer, Mock, ResponseTemplate};                                                                                                                                                                                     
-    use wiremock::matchers::method; 
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn make_token_list_json(tokens: Vec<(u64, Address)>) -> serde_json::Value {
         serde_json::json!({
@@ -225,9 +228,11 @@ impl TokenListFetcher {
     }
 
     fn make_token_list(chain_ids: Vec<u64>, len: usize) -> Vec<(u64, Address)> {
-        chain_ids.into_iter().map(|chain_id| {
-            (0..len).map(move |_| (chain_id, Address::random()))
-        }).flatten().collect()
+        chain_ids
+            .into_iter()
+            .map(|chain_id| (0..len).map(move |_| (chain_id, Address::random())))
+            .flatten()
+            .collect()
     }
 
     #[tokio::test]
@@ -238,22 +243,43 @@ impl TokenListFetcher {
         let expected_list_by_chain: HashSet<_> = token_list
             .clone()
             .into_iter()
-            .filter_map(|(chain_id, address)| if chain_id == network.chain_id() { Some(address) } else { None })
+            .filter_map(|(chain_id, address)| {
+                if chain_id == network.chain_id() {
+                    Some(address)
+                } else {
+                    None
+                }
+            })
             .collect();
 
-        let resp_template = ResponseTemplate::new(200)
-            .set_body_json(
-                make_token_list_json(token_list.clone())
-            );
+        let resp_template =
+            ResponseTemplate::new(200).set_body_json(make_token_list_json(token_list.clone()));
         Mock::given(method("GET"))
             .respond_with(resp_template)
-            .expect(1)
+            .expect(2)
             .mount(&server)
             .await;
 
         let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
-        let tokens = fetcher
-            .get_tokens(&vec![server.uri()],network)
+        let _ = Arc::clone(&fetcher)
+            .get_tokens(&vec![server.uri()], EvmNetwork::Gnosis)
+            .await;
+
+        // cache is still valid
+        sleep(Duration::from_millis(100));
+
+        let tokens = Arc::clone(&fetcher)
+            .get_tokens(&vec![server.uri()], network)
+            .await
+            .unwrap();
+
+        assert_eq!(expected_list_by_chain, tokens);
+
+        // invalidate cache
+        sleep(Duration::from_millis(200));
+
+        let tokens = Arc::clone(&fetcher)
+            .get_tokens(&vec![server.uri()], network)
             .await
             .unwrap();
 
