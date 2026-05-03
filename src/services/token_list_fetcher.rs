@@ -1,9 +1,10 @@
-use alloy::transports::http::reqwest::Response;
+
 use alloy::transports::BoxFuture;
-use alloy::{primitives::Address, transports::http::Client};
+use alloy::{primitives::Address};
 use backon::{ExponentialBuilder, Retryable};
 use futures::future::{try_join_all, FutureExt, Shared};
 use metrics::{counter, histogram};
+use reqwest::{Client, Response};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::{
@@ -16,6 +17,8 @@ use crate::{
     domain::{EvmNetwork, Token},
     services::errors::FetcherError,
 };
+
+const BACK_OFFS: usize = 3;
 
 type SharedFetchTask = Shared<BoxFuture<'static, Result<(), FetcherError>>>;
 
@@ -191,7 +194,9 @@ impl TokenListFetcher {
 
     async fn fetch_with_backoff(client: &Client, url: &String) -> Result<Response, FetcherError> {
         let backoff = Self::get_backoff();
-        let resp = (|| async { client.get(url).send().await })
+        let resp = (|| async {
+            client.get(url).send().await?.error_for_status()
+        })
             .retry(backoff)
             .await
             .map_err(|err| {
@@ -206,7 +211,7 @@ impl TokenListFetcher {
         ExponentialBuilder::default()
             .with_min_delay(Duration::from_secs(1))
             .with_max_delay(Duration::from_secs(3))
-            .with_max_times(3)
+            .with_max_times(BACK_OFFS)
             .with_jitter()
     }
 }
@@ -233,6 +238,33 @@ mod token_list_fetcher_tests {
             .map(|chain_id| (0..len).map(move |_| (chain_id, Address::random())))
             .flatten()
             .collect()
+    }
+
+    fn make_error() -> serde_json::Value {
+        serde_json::json!({
+            "message": "unavailable"
+        })
+    }
+
+    #[tokio::test]
+    async fn test_fail_backoffs() {
+        let server = MockServer::start().await;
+
+        let resp_template =
+            ResponseTemplate::new(500).set_body_json(make_error());
+        let retries = BACK_OFFS as u64 + 1;
+        Mock::given(method("GET"))
+            .respond_with(resp_template)
+            .expect(retries)
+            .mount(&server)
+            .await;
+
+        let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+        let result = Arc::clone(&fetcher)
+            .get_tokens(&vec![server.uri()], EvmNetwork::Eth)
+            .await;
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
