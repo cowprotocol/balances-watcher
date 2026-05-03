@@ -261,6 +261,7 @@ mod token_list_fetcher_tests {
             .await;
 
         let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+        // warm up cache
         let _ = Arc::clone(&fetcher)
             .get_tokens(&vec![server.uri()], EvmNetwork::Gnosis)
             .await;
