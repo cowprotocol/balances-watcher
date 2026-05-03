@@ -1,6 +1,5 @@
-
+use alloy::primitives::Address;
 use alloy::transports::BoxFuture;
-use alloy::{primitives::Address};
 use backon::{ExponentialBuilder, Retryable};
 use futures::future::{try_join_all, FutureExt, Shared};
 use metrics::{counter, histogram};
@@ -194,9 +193,7 @@ impl TokenListFetcher {
 
     async fn fetch_with_backoff(client: &Client, url: &String) -> Result<Response, FetcherError> {
         let backoff = Self::get_backoff();
-        let resp = (|| async {
-            client.get(url).send().await?.error_for_status()
-        })
+        let resp = (|| async { client.get(url).send().await?.error_for_status() })
             .retry(backoff)
             .await
             .map_err(|err| {
@@ -250,8 +247,7 @@ mod token_list_fetcher_tests {
     async fn test_fail_backoffs() {
         let server = MockServer::start().await;
 
-        let resp_template =
-            ResponseTemplate::new(500).set_body_json(make_error());
+        let resp_template = ResponseTemplate::new(500).set_body_json(make_error());
         let retries = BACK_OFFS as u64 + 1;
         Mock::given(method("GET"))
             .respond_with(resp_template)
