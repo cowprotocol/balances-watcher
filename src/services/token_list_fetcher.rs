@@ -328,7 +328,8 @@ mod token_list_fetcher_tests {
         // warm up cache
         let _ = Arc::clone(&fetcher)
             .get_tokens(&vec![server.uri()], EvmNetwork::Gnosis)
-            .await;
+            .await
+            .unwrap();
 
         // cache is still valid
         sleep(Duration::from_millis(100));
@@ -349,5 +350,35 @@ mod token_list_fetcher_tests {
             .unwrap();
 
         assert_eq!(expected_list_by_chain, tokens);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_request_deduplication() {
+        let server = MockServer::start().await;
+        let token_list = make_token_list(vec![1, 2, 100], 3);
+        let network = EvmNetwork::Eth;
+        
+        let resp_template =
+            ResponseTemplate::new(200).set_body_json(make_token_list_json(token_list.clone()));
+        Mock::given(method("GET"))
+            .respond_with(resp_template)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+
+        let handlers: Vec<_> = (0..10).map(|_| {
+            let urls = vec![server.uri()];
+            let fetcher = Arc::clone(&fetcher);
+            tokio::spawn(async move {
+                fetcher.get_tokens(&urls, network).await
+            })
+        }).collect();
+
+        for handler in handlers {
+            let result = handler.await;
+            assert!(result.is_ok());
+        }
     }
 }
