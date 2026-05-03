@@ -19,8 +19,10 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
+
+const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
 // handle subscriptions: fetch token lists, spawn watchers, update watched tokens
 pub struct SessionManager {
@@ -95,7 +97,7 @@ impl SessionManager {
         snapshot_interval: usize,
         token_limit: usize,
     ) -> Self {
-        let token_list_fetcher = TokenListFetcher::new();
+        let token_list_fetcher = TokenListFetcher::new(TOKEN_LIST_CACHE_TTL);
 
         let sub_manager = Arc::new(SubscriptionManager::new());
         Arc::clone(&sub_manager).spawn_cleanup();
