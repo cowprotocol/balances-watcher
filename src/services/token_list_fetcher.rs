@@ -264,6 +264,42 @@ mod token_list_fetcher_tests {
     }
 
     #[tokio::test]
+    async fn test_fail_and_success_after() {
+        let server = MockServer::start().await;
+
+        // fail case
+        let resp_template = ResponseTemplate::new(500).set_body_json(make_error());
+        let retries = BACK_OFFS as u64 + 1;
+        Mock::given(method("GET"))
+            .respond_with(resp_template)
+            .up_to_n_times(retries)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+
+        let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+        let result = Arc::clone(&fetcher)
+            .get_tokens(&vec![server.uri()], EvmNetwork::Eth)
+            .await;
+
+        assert!(result.is_err());
+
+        // success after if there is a new client
+        let resp_template = ResponseTemplate::new(200).set_body_json(make_token_list_json(vec![]));
+        Mock::given(method("GET"))
+            .respond_with(resp_template)
+            .with_priority(2)
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let response = Arc::clone(&fetcher)
+            .get_tokens(&vec![server.uri()], EvmNetwork::Eth)
+            .await;
+        assert!(response.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_cache() {
         let server = MockServer::start().await;
         let token_list = make_token_list(vec![1, 2, 100], 3);
