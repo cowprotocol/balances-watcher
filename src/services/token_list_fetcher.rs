@@ -17,8 +17,6 @@ use crate::{
     services::errors::FetcherError,
 };
 
-const BACK_OFFS: usize = 3;
-
 type SharedFetchTask = Shared<BoxFuture<'static, Result<(), FetcherError>>>;
 
 type ListUrl = String;
@@ -175,7 +173,11 @@ impl TokenListFetcher {
         self.cache.write().await.insert(url, cached);
     }
 
-    async fn fetch_list(self: Arc<Self>, client: &Client, url: &String) -> Result<ApiResponse, FetcherError> {
+    async fn fetch_list(
+        self: Arc<Self>,
+        client: &Client,
+        url: &String,
+    ) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
 
         self.fetch_with_backoff(client, url)
@@ -194,7 +196,11 @@ impl TokenListFetcher {
             .map_err(|err| FetcherError::UnableToLoadList(url.clone(), err.to_string()))
     }
 
-    async fn fetch_with_backoff(&self, client: &Client, url: &String) -> Result<Response, FetcherError> {
+    async fn fetch_with_backoff(
+        &self,
+        client: &Client,
+        url: &String,
+    ) -> Result<Response, FetcherError> {
         let resp = (|| async { client.get(url).send().await?.error_for_status() })
             .retry(self.backoff_cfg)
             .await
@@ -205,14 +211,6 @@ impl TokenListFetcher {
 
         Ok(resp)
     }
-
-    fn get_backoff() -> ExponentialBuilder {
-        ExponentialBuilder::default()
-            .with_min_delay(Duration::from_secs(1))
-            .with_max_delay(Duration::from_secs(3))
-            .with_max_times(BACK_OFFS)
-            .with_jitter()
-    }
 }
 
 #[cfg(test)]
@@ -222,6 +220,8 @@ mod token_list_fetcher_tests {
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const BACK_OFFS: u64 = 3;
 
     fn make_token_list_resp_template(tokens: Vec<(u64, Address)>) -> ResponseTemplate {
         let token_list = serde_json::json!({
@@ -252,7 +252,7 @@ mod token_list_fetcher_tests {
         let back_off = ExponentialBuilder::default()
             .with_min_delay(Duration::from_millis(1))
             .with_max_delay(Duration::from_millis(20))
-            .with_max_times(BACK_OFFS)
+            .with_max_times(BACK_OFFS as usize)
             .with_jitter();
 
         Arc::new(TokenListFetcher::new(Duration::from_millis(300), back_off))
@@ -263,7 +263,7 @@ mod token_list_fetcher_tests {
         let server = MockServer::start().await;
 
         let resp_template = make_error_resp_template();
-        let retries = BACK_OFFS as u64 + 1;
+        let retries = BACK_OFFS + 1;
         Mock::given(method("GET"))
             .respond_with(resp_template)
             .expect(retries)
@@ -284,7 +284,7 @@ mod token_list_fetcher_tests {
 
         // fail case
         let resp_template = make_error_resp_template();
-        let retries = BACK_OFFS as u64 + 1;
+        let retries = BACK_OFFS + 1;
         Mock::given(method("GET"))
             .respond_with(resp_template)
             .up_to_n_times(retries)

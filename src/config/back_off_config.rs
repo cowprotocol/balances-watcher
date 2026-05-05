@@ -1,5 +1,5 @@
-use std::time::Duration;
 use backon::ExponentialBuilder;
+use std::time::Duration;
 
 const TOKEN_LIST_FETCHER_BACKOFFS: usize = 3;
 

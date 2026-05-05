@@ -98,10 +98,8 @@ impl SessionManager {
         snapshot_interval: usize,
         token_limit: usize,
     ) -> Self {
-        let token_list_fetcher = TokenListFetcher::new(
-            TOKEN_LIST_CACHE_TTL,
-            get_token_list_fetcher_backoff(),
-        );
+        let token_list_fetcher =
+            TokenListFetcher::new(TOKEN_LIST_CACHE_TTL, get_token_list_fetcher_backoff());
 
         let sub_manager = Arc::new(SubscriptionManager::new());
         Arc::clone(&sub_manager).spawn_cleanup();
