@@ -40,6 +40,8 @@ pub struct TokenListFetcher {
     client: Client,
     // cache duration
     ttl: Duration,
+    // backoff configuration
+    backoff_cfg: ExponentialBuilder,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,12 +50,13 @@ struct ApiResponse {
 }
 
 impl TokenListFetcher {
-    pub fn new(cache_ttl: Duration) -> Self {
+    pub fn new(cache_ttl: Duration, backoff_cfg: ExponentialBuilder) -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
             client: Client::new(),
             ttl: cache_ttl,
             fetch_tasks: Mutex::new(HashMap::new()),
+            backoff_cfg,
         }
     }
 
@@ -122,7 +125,7 @@ impl TokenListFetcher {
 
                 let new_future = async move {
                     // fetch data and update cache
-                    let response = Self::fetch_list(&client, &url_cloned).await?;
+                    let response = Arc::clone(&this).fetch_list(&client, &url_cloned).await?;
 
                     this.store_response_in_cache(url_cloned, response).await;
 
@@ -172,10 +175,10 @@ impl TokenListFetcher {
         self.cache.write().await.insert(url, cached);
     }
 
-    async fn fetch_list(client: &Client, url: &String) -> Result<ApiResponse, FetcherError> {
+    async fn fetch_list(self: Arc<Self>, client: &Client, url: &String) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
 
-        Self::fetch_with_backoff(client, url)
+        self.fetch_with_backoff(client, url)
             .await
             .inspect(move |_| {
                 counter!("token_list_loaded_total").increment(1);
@@ -191,10 +194,9 @@ impl TokenListFetcher {
             .map_err(|err| FetcherError::UnableToLoadList(url.clone(), err.to_string()))
     }
 
-    async fn fetch_with_backoff(client: &Client, url: &String) -> Result<Response, FetcherError> {
-        let backoff = Self::get_backoff();
+    async fn fetch_with_backoff(&self, client: &Client, url: &String) -> Result<Response, FetcherError> {
         let resp = (|| async { client.get(url).send().await?.error_for_status() })
-            .retry(backoff)
+            .retry(self.backoff_cfg)
             .await
             .map_err(|err| {
                 counter!("token_list_load_failed_total").increment(1);
@@ -246,6 +248,16 @@ mod token_list_fetcher_tests {
         ResponseTemplate::new(500).set_body_json(error)
     }
 
+    fn make_fetcher() -> Arc<TokenListFetcher> {
+        let back_off = ExponentialBuilder::default()
+            .with_min_delay(Duration::from_millis(1))
+            .with_max_delay(Duration::from_millis(20))
+            .with_max_times(BACK_OFFS)
+            .with_jitter();
+
+        Arc::new(TokenListFetcher::new(Duration::from_millis(300), back_off))
+    }
+
     #[tokio::test]
     async fn test_fail_backoffs() {
         let server = MockServer::start().await;
@@ -258,7 +270,7 @@ mod token_list_fetcher_tests {
             .mount(&server)
             .await;
 
-        let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+        let fetcher = make_fetcher();
         let result = Arc::clone(&fetcher)
             .get_tokens(&[server.uri()], EvmNetwork::Eth)
             .await;
@@ -280,7 +292,7 @@ mod token_list_fetcher_tests {
             .mount(&server)
             .await;
 
-        let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+        let fetcher = make_fetcher();
         let result = Arc::clone(&fetcher)
             .get_tokens(&[server.uri()], EvmNetwork::Eth)
             .await;
@@ -326,7 +338,7 @@ mod token_list_fetcher_tests {
             .mount(&server)
             .await;
 
-        let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+        let fetcher = make_fetcher();
         // warm up cache
         let _ = Arc::clone(&fetcher)
             .get_tokens(&[server.uri()], EvmNetwork::Gnosis)
@@ -367,7 +379,7 @@ mod token_list_fetcher_tests {
             .mount(&server)
             .await;
 
-        let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
+        let fetcher = make_fetcher();
 
         let handlers: Vec<_> = (0..10)
             .map(|_| {

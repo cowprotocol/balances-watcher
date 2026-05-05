@@ -1,3 +1,4 @@
+use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::cleanup_stream;
@@ -97,7 +98,10 @@ impl SessionManager {
         snapshot_interval: usize,
         token_limit: usize,
     ) -> Self {
-        let token_list_fetcher = TokenListFetcher::new(TOKEN_LIST_CACHE_TTL);
+        let token_list_fetcher = TokenListFetcher::new(
+            TOKEN_LIST_CACHE_TTL,
+            get_token_list_fetcher_backoff(),
+        );
 
         let sub_manager = Arc::new(SubscriptionManager::new());
         Arc::clone(&sub_manager).spawn_cleanup();
