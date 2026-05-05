@@ -5,7 +5,5 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "camelCase")]
 pub struct Token {
     pub address: Address,
-    pub name: String,
-    pub decimals: u8,
     pub chain_id: u64,
 }
