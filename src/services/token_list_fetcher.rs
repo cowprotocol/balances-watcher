@@ -221,33 +221,36 @@ mod token_list_fetcher_tests {
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn make_token_list_json(tokens: Vec<(u64, Address)>) -> serde_json::Value {
-        serde_json::json!({
+    fn make_token_list_resp_template(tokens: Vec<(u64, Address)>) -> ResponseTemplate {
+        let token_list = serde_json::json!({
             "tokens": tokens.iter().map(|(chain_id, address)| {
                 serde_json::json!({ "chainId": chain_id, "address": address })
             }).collect::<Vec<_>>()
-        })
+        });
+
+        ResponseTemplate::new(200).set_body_json(token_list)
     }
 
     fn make_token_list(chain_ids: Vec<u64>, len: usize) -> Vec<(u64, Address)> {
         chain_ids
             .into_iter()
-            .map(|chain_id| (0..len).map(move |_| (chain_id, Address::random())))
-            .flatten()
+            .flat_map(|chain_id| (0..len).map(move |_| (chain_id, Address::random())))
             .collect()
     }
 
-    fn make_error() -> serde_json::Value {
-        serde_json::json!({
+    fn make_error_resp_template() -> ResponseTemplate {
+        let error = serde_json::json!({
             "message": "unavailable"
-        })
+        });
+
+        ResponseTemplate::new(500).set_body_json(error)
     }
 
     #[tokio::test]
     async fn test_fail_backoffs() {
         let server = MockServer::start().await;
 
-        let resp_template = ResponseTemplate::new(500).set_body_json(make_error());
+        let resp_template = make_error_resp_template();
         let retries = BACK_OFFS as u64 + 1;
         Mock::given(method("GET"))
             .respond_with(resp_template)
@@ -257,7 +260,7 @@ mod token_list_fetcher_tests {
 
         let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
         let result = Arc::clone(&fetcher)
-            .get_tokens(&vec![server.uri()], EvmNetwork::Eth)
+            .get_tokens(&[server.uri()], EvmNetwork::Eth)
             .await;
 
         assert!(result.is_err());
@@ -268,7 +271,7 @@ mod token_list_fetcher_tests {
         let server = MockServer::start().await;
 
         // fail case
-        let resp_template = ResponseTemplate::new(500).set_body_json(make_error());
+        let resp_template = make_error_resp_template();
         let retries = BACK_OFFS as u64 + 1;
         Mock::given(method("GET"))
             .respond_with(resp_template)
@@ -279,13 +282,13 @@ mod token_list_fetcher_tests {
 
         let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
         let result = Arc::clone(&fetcher)
-            .get_tokens(&vec![server.uri()], EvmNetwork::Eth)
+            .get_tokens(&[server.uri()], EvmNetwork::Eth)
             .await;
 
         assert!(result.is_err());
 
         // success after if there is a new client
-        let resp_template = ResponseTemplate::new(200).set_body_json(make_token_list_json(vec![]));
+        let resp_template = make_token_list_resp_template(vec![]);
         Mock::given(method("GET"))
             .respond_with(resp_template)
             .with_priority(2)
@@ -294,7 +297,7 @@ mod token_list_fetcher_tests {
             .await;
 
         let response = Arc::clone(&fetcher)
-            .get_tokens(&vec![server.uri()], EvmNetwork::Eth)
+            .get_tokens(&[server.uri()], EvmNetwork::Eth)
             .await;
         assert!(response.is_ok());
     }
@@ -316,8 +319,7 @@ mod token_list_fetcher_tests {
             })
             .collect();
 
-        let resp_template =
-            ResponseTemplate::new(200).set_body_json(make_token_list_json(token_list.clone()));
+        let resp_template = make_token_list_resp_template(token_list.clone());
         Mock::given(method("GET"))
             .respond_with(resp_template)
             .expect(2)
@@ -327,7 +329,7 @@ mod token_list_fetcher_tests {
         let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
         // warm up cache
         let _ = Arc::clone(&fetcher)
-            .get_tokens(&vec![server.uri()], EvmNetwork::Gnosis)
+            .get_tokens(&[server.uri()], EvmNetwork::Gnosis)
             .await
             .unwrap();
 
@@ -335,7 +337,7 @@ mod token_list_fetcher_tests {
         sleep(Duration::from_millis(100));
 
         let tokens = Arc::clone(&fetcher)
-            .get_tokens(&vec![server.uri()], network)
+            .get_tokens(&[server.uri()], network)
             .await
             .unwrap();
 
@@ -345,7 +347,7 @@ mod token_list_fetcher_tests {
         sleep(Duration::from_millis(200));
 
         let tokens = Arc::clone(&fetcher)
-            .get_tokens(&vec![server.uri()], network)
+            .get_tokens(&[server.uri()], network)
             .await
             .unwrap();
 
@@ -357,9 +359,8 @@ mod token_list_fetcher_tests {
         let server = MockServer::start().await;
         let token_list = make_token_list(vec![1, 2, 100], 3);
         let network = EvmNetwork::Eth;
-        
-        let resp_template =
-            ResponseTemplate::new(200).set_body_json(make_token_list_json(token_list.clone()));
+
+        let resp_template = make_token_list_resp_template(token_list.clone());
         Mock::given(method("GET"))
             .respond_with(resp_template)
             .expect(1)
@@ -368,13 +369,13 @@ mod token_list_fetcher_tests {
 
         let fetcher = Arc::new(TokenListFetcher::new(Duration::from_millis(300)));
 
-        let handlers: Vec<_> = (0..10).map(|_| {
-            let urls = vec![server.uri()];
-            let fetcher = Arc::clone(&fetcher);
-            tokio::spawn(async move {
-                fetcher.get_tokens(&urls, network).await
+        let handlers: Vec<_> = (0..10)
+            .map(|_| {
+                let urls = [server.uri()];
+                let fetcher = Arc::clone(&fetcher);
+                tokio::spawn(async move { fetcher.get_tokens(&urls, network).await })
             })
-        }).collect();
+            .collect();
 
         for handler in handlers {
             let result = handler.await;
