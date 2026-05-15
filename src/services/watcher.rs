@@ -206,7 +206,7 @@ impl Watcher {
         session: Session,
         sub: Arc<Subscription>,
     ) {
-        let tokens = { sub.watched_tokens().await.into_iter().collect::<Vec<_>>() };
+        let tokens = { sub.clone_watched_tokens().await.into_iter().collect::<Vec<_>>() };
         tracing::info!(
             tokens_count = tokens.len(),
             "snapshot updater fetching balances"
@@ -525,29 +525,32 @@ impl Watcher {
         let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
 
         tokio::spawn(async move {
-            let sub_for_session = Arc::clone(&sub);
+            let sub_for_log_handler = Arc::clone(&sub);
             let _ = Self::run_log_subscription_loop(
                 ws_connection_pool,
                 filter,
-                sub_for_session.cancellable(),
+                sub_for_log_handler.cancellable(),
                 move |log: Log| {
                     let call_queue = Arc::clone(&calls_queue);
 
                     tracing::info!("received erc20 transfer event: {:#?}", log);
                     counter!("erc20_event_received_total").increment(1);
 
+                    let sub_for_parsing_tokens = Arc::clone(&sub_for_log_handler);
+
                     Box::pin(async move {
                         // parse event and send it to calls_queue to update balance
                         Self::parse_transfer_event_and_fetch_balance(
                             session,
                             Arc::clone(&call_queue),
+                            Arc::clone(&sub_for_parsing_tokens),
                             &log,
                         )
                         .await;
                     })
                 },
                 move || {
-                    sub_for_session.send_event(
+                    sub.send_event(
                         BalanceEvent::Error {
                             code: 503,
                             message: "WebSocket connection lost permanently".to_string(),
@@ -563,6 +566,7 @@ impl Watcher {
     async fn parse_transfer_event_and_fetch_balance(
         session: Session,
         calls_queue: Arc<CallsQueue>,
+        sub: Arc<Subscription>,
         log: &Log,
     ) {
         let block_number = log.block_number;
@@ -581,9 +585,20 @@ impl Watcher {
             }
         };
 
+        // service listens to all trasnfers events
+        // skip all tokens that not in the watched token list
+        let token_address = decoded_log.address();
+        if sub.is_watched(&token_address).await {
+            tracing::info!(
+                token_address = %token_address,
+                "token is not watched, skip"
+            );
+            return;
+        }
+
         // always put native address into queue to keep it synced
         let tokens = vec![
-            decoded_log.address(),
+            token_address,
             session.network.native_token_address(),
         ];
 

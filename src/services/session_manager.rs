@@ -145,7 +145,7 @@ impl SessionManager {
         let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
         let (updated_tokens, new_uniq_tokens) = if let Some(sub) = subscription {
-            let mut watched_tokens = sub.watched_tokens().await;
+            let mut watched_tokens = sub.clone_watched_tokens().await;
 
             let new_tokens = tokens
                 .iter()

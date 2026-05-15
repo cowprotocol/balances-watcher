@@ -58,7 +58,7 @@ impl Subscription {
             .is_ok()
     }
 
-    pub async fn watched_tokens(&self) -> HashSet<Address> {
+    pub async fn clone_watched_tokens(&self) -> HashSet<Address> {
         self.tokens.read().await.clone()
     }
 
@@ -67,6 +67,10 @@ impl Subscription {
         let mut watched_tokens = self.tokens.write().await;
         watched_tokens.extend(tokens);
         watched_tokens.len()
+    }
+
+    pub async fn is_watched(&self, token: &Address) -> bool {
+        self.tokens.read().await.contains(token)
     }
 
     pub fn send_event(&self, event: BalanceEvent, session: Session) {
