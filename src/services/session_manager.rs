@@ -1,3 +1,4 @@
+use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::cleanup_stream;
@@ -19,8 +20,10 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
+
+const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
 // handle subscriptions: fetch token lists, spawn watchers, update watched tokens
 pub struct SessionManager {
@@ -95,7 +98,8 @@ impl SessionManager {
         snapshot_interval: usize,
         token_limit: usize,
     ) -> Self {
-        let token_list_fetcher = TokenListFetcher::new();
+        let token_list_fetcher =
+            TokenListFetcher::new(TOKEN_LIST_CACHE_TTL, get_token_list_fetcher_backoff());
 
         let sub_manager = Arc::new(SubscriptionManager::new());
         Arc::clone(&sub_manager).spawn_cleanup();

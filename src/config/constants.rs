@@ -1,8 +1,5 @@
 use std::time::Duration;
 
-/// Maximum number of concurrent HTTP requests when fetching token lists
-pub const TOKEN_FETCH_CONCURRENCY: usize = 5;
-
 /// Capacity of the broadcast channel for balance events per subscription
 pub const BROADCAST_CHANNEL_CAPACITY: usize = 256;
 
