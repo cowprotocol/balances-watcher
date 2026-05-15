@@ -17,3 +17,5 @@ README*
 .env
 .env.local
 CLAUDE.md
+/.claude
+rustfmt.toml
