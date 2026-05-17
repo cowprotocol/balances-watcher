@@ -162,8 +162,13 @@ impl SubscriptionManager {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(SESSION_TTL);
             loop {
-                interval.tick().await;
-                self.cleanup_subs().await;
+                tokio::select! {
+                    _ = self.shutdown_token.cancelled() => {
+                        tracing::info!("shutdown subscription cleanup task");
+                        break;
+                    },
+                    _ = interval.tick() => self.cleanup_subs().await
+                }
             }
         });
     }

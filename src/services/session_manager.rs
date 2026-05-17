@@ -120,7 +120,7 @@ impl SessionManager {
         let session = ctx.session;
         let upsert_start = Instant::now();
 
-        tracing::info!(session = %session, "upsert: resolving providers");
+        tracing::debug!(session = %session, "upsert: resolving providers");
         let provider = match self.multicall_fetchers.get(&session.network) {
             Some(provider) => provider.clone(),
             None => return Err(SessionError::ProviderIsNotDefined),
@@ -134,16 +134,16 @@ impl SessionManager {
         };
 
         let t0 = Instant::now();
-        tracing::info!(session = %session, "upsert: fetching tokens");
+        tracing::debug!(session = %session, "upsert: fetching tokens");
         let tokens = self
             .fetch_and_enriched_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
         let elapsed = t0.elapsed().as_millis() as f64;
         histogram!("upsert_fetch_tokens_ms").record(elapsed);
-        tracing::info!(session = %session, tokens_len = tokens.len(), time_ms = elapsed, "upsert: tokens fetched");
+        tracing::debug!(session = %session, tokens_len = tokens.len(), time_ms = elapsed, "upsert: tokens fetched");
 
         let t0 = Instant::now();
-        tracing::info!(session = %session, "upsert: get_subscription");
+        tracing::debug!(session = %session, "upsert: get_subscription");
         let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
         let (updated_tokens, new_uniq_tokens) = if let Some(sub) = subscription {
@@ -177,7 +177,7 @@ impl SessionManager {
         }
 
         let t0 = Instant::now();
-        tracing::info!(session = %session, "upsert: sub_manager.upsert");
+        tracing::debug!(session = %session, "upsert: sub_manager.upsert");
         let new_tokens = new_uniq_tokens.unwrap_or(updated_tokens);
         let sub = self.sub_manager.upsert(session, new_tokens).await;
         let elapsed = t0.elapsed().as_millis() as f64;
@@ -208,7 +208,7 @@ impl SessionManager {
 
         let elapsed = upsert_start.elapsed().as_millis() as f64;
         histogram!("upsert_total_ms").record(elapsed);
-        tracing::info!(
+        tracing::debug!(
             session = %session,
             time_ms = elapsed,
             "upsert: done",
