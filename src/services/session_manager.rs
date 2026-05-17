@@ -17,6 +17,7 @@ use futures::Stream;
 use futures::StreamExt;
 use metrics::{counter, histogram};
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -97,11 +98,12 @@ impl SessionManager {
         ws_providers_pool: HashMap<EvmNetwork, Arc<WsConnectionPool>>,
         snapshot_interval: usize,
         token_limit: usize,
+        shutdown_token: CancellationToken,
     ) -> Self {
         let token_list_fetcher =
             TokenListFetcher::new(TOKEN_LIST_CACHE_TTL, get_token_list_fetcher_backoff());
 
-        let sub_manager = Arc::new(SubscriptionManager::new());
+        let sub_manager = Arc::new(SubscriptionManager::new(shutdown_token));
         Arc::clone(&sub_manager).spawn_cleanup();
 
         Self {

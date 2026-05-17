@@ -3,6 +3,7 @@ use crate::services::errors::SubscriptionError;
 use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, U256};
 use metrics::{counter, gauge};
+use tokio_util::sync::CancellationToken;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,14 +25,16 @@ pub type BalanceSnapshot = HashMap<Address, Balance>;
 
 pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
+    shutdown_token: CancellationToken,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
-    pub fn new() -> Self {
+    pub fn new(shutdown_token: CancellationToken) -> Self {
         Self {
             subscriptions: RwLock::new(HashMap::new()),
+            shutdown_token,
         }
     }
 
@@ -63,7 +66,8 @@ impl SubscriptionManager {
         }
 
         let tokens_len = tokens.len();
-        let subscription = Arc::new(Subscription::new(tokens));
+        let shutdown_token = self.shutdown_token.clone();
+        let subscription = Arc::new(Subscription::new(tokens, shutdown_token.child_token()));
 
         let sub_with_counter = SubWithCounter {
             clients: 0,

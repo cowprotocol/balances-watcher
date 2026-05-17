@@ -5,6 +5,7 @@ use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::session_manager::SessionManager;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::providers::{Provider, ProviderBuilder};
+use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,7 +15,10 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub async fn build(network_config: NetworkConfig) -> Arc<Self> {
+    pub async fn build(
+        network_config: NetworkConfig,
+        shutdown_token: CancellationToken,
+    ) -> Arc<Self> {
         let providers = Self::build_rpc_fetchers_map(&network_config).await;
         let ws_connection_pools = Self::build_ws_rpc_providers(&network_config).await;
 
@@ -23,6 +27,7 @@ impl AppState {
             ws_connection_pools,
             network_config.snapshot_interval,
             network_config.max_watched_tokens_limit,
+            shutdown_token,
         ));
 
         Arc::new(Self { session_manager })

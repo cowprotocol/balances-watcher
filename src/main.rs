@@ -8,6 +8,7 @@ mod evm;
 mod routes;
 mod services;
 mod tracing;
+mod graceful_shutdown;
 
 use crate::args::Args;
 use crate::routes::create_router::create_router;
@@ -36,7 +37,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_handler = PrometheusBuilder::new().install_recorder()?;
 
     let allowed_origins = network_cfg.allowed_origins.clone();
-    let app_state = AppState::build(network_cfg).await;
+    let shutdown_token = graceful_shutdown::get_token();
+    let app_state = AppState::build(network_cfg, shutdown_token).await;
+
     let app = create_router(app_state, metrics_handler, allowed_origins);
 
     let address: SocketAddr = cfg.bind.parse()?;
