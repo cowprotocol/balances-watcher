@@ -5,10 +5,10 @@ mod args;
 mod config;
 mod domain;
 mod evm;
+mod graceful_shutdown;
 mod routes;
 mod services;
 mod tracing;
-mod graceful_shutdown;
 
 use crate::args::Args;
 use crate::routes::create_router::create_router;
@@ -47,9 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ::tracing::info!("Listening to http://{}", address);
 
     let listener = TcpListener::bind(address).await?;
-    axum::serve(listener, app).with_graceful_shutdown(async move {
-        shutdown_token.cancelled().await
-    }).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
+        .await?;
 
     Ok(())
 }

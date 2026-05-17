@@ -206,7 +206,12 @@ impl Watcher {
         session: Session,
         sub: Arc<Subscription>,
     ) {
-        let tokens = { sub.clone_watched_tokens().await.into_iter().collect::<Vec<_>>() };
+        let tokens = {
+            sub.clone_watched_tokens()
+                .await
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
         tracing::info!(
             tokens_count = tokens.len(),
             "snapshot updater fetching balances"
@@ -597,10 +602,7 @@ impl Watcher {
         }
 
         // always put native address into queue to keep it synced
-        let tokens = vec![
-            token_address,
-            session.network.native_token_address(),
-        ];
+        let tokens = vec![token_address, session.network.native_token_address()];
 
         calls_queue.upsert_delayed_call(&tokens, block_number).await;
     }

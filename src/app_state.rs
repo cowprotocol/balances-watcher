@@ -5,9 +5,9 @@ use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::session_manager::SessionManager;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::providers::{Provider, ProviderBuilder};
-use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Clone)]
 pub struct AppState {

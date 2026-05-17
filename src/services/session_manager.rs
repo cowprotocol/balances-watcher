@@ -17,12 +17,12 @@ use futures::Stream;
 use futures::StreamExt;
 use metrics::{counter, histogram};
 use serde::Serialize;
-use tokio_util::sync::CancellationToken;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_util::sync::CancellationToken;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 

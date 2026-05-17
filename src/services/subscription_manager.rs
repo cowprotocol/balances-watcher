@@ -3,11 +3,11 @@ use crate::services::errors::SubscriptionError;
 use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, U256};
 use metrics::{counter, gauge};
-use tokio_util::sync::CancellationToken;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
+use tokio_util::sync::CancellationToken;
 
 struct SubWithCounter {
     pub clients: u32,
@@ -164,13 +164,28 @@ impl SubscriptionManager {
             loop {
                 tokio::select! {
                     _ = self.shutdown_token.cancelled() => {
-                        tracing::info!("shutdown subscription cleanup task");
+                        tracing::info!("shutdown cleanup_subs");
+                        self.close_sse_connections().await;
                         break;
                     },
                     _ = interval.tick() => self.cleanup_subs().await
                 }
             }
         });
+    }
+
+    async fn close_sse_connections(&self) {
+        let subs = self.subscriptions.read().await;
+        for (session, sub_with_counter) in subs.iter() {
+            let close_event = BalanceEvent::Error {
+                code: 503,
+                message: "server is shutting down".into(),
+            };
+            sub_with_counter
+                .subscription
+                .send_event(close_event, session.to_owned());
+            sub_with_counter.subscription.cancellable().cancel();
+        }
     }
 
     async fn cleanup_subs(&self) {
