@@ -135,9 +135,11 @@ impl SessionManager {
 
         let t0 = Instant::now();
         tracing::debug!(session = %session, "upsert: fetching tokens");
+
         let tokens = self
-            .fetch_and_enriched_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
+            .fetch_and_extend_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
+
         let elapsed = t0.elapsed().as_millis() as f64;
         histogram!("upsert_fetch_tokens_ms").record(elapsed);
         tracing::debug!(session = %session, tokens_len = tokens.len(), time_ms = elapsed, "upsert: tokens fetched");
@@ -218,7 +220,7 @@ impl SessionManager {
     }
 
     // fetch tokens from lists and add eth/weth9 as watched
-    async fn fetch_and_enriched_tokens(
+    async fn fetch_and_extend_tokens(
         &self,
         session: Session,
         token_lists_urls: Vec<String>,
