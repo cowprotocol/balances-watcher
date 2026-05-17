@@ -8,6 +8,7 @@ use alloy::providers::{Provider, ProviderBuilder};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -17,6 +18,7 @@ pub struct AppState {
 impl AppState {
     pub async fn build(
         network_config: NetworkConfig,
+        task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
     ) -> Arc<Self> {
         let providers = Self::build_rpc_fetchers_map(&network_config).await;
@@ -27,6 +29,7 @@ impl AppState {
             ws_connection_pools,
             network_config.snapshot_interval,
             network_config.max_watched_tokens_limit,
+            task_tracker,
             shutdown_token,
         ));
 

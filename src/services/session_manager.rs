@@ -23,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
@@ -98,12 +99,13 @@ impl SessionManager {
         ws_providers_pool: HashMap<EvmNetwork, Arc<WsConnectionPool>>,
         snapshot_interval: usize,
         token_limit: usize,
+        task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
     ) -> Self {
         let token_list_fetcher =
             TokenListFetcher::new(TOKEN_LIST_CACHE_TTL, get_token_list_fetcher_backoff());
 
-        let sub_manager = Arc::new(SubscriptionManager::new(shutdown_token));
+        let sub_manager = Arc::new(SubscriptionManager::new(task_tracker, shutdown_token));
         Arc::clone(&sub_manager).spawn_cleanup();
 
         Self {

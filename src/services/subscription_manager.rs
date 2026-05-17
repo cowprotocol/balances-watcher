@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 struct SubWithCounter {
     pub clients: u32,
@@ -25,15 +26,17 @@ pub type BalanceSnapshot = HashMap<Address, Balance>;
 
 pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
+    task_tracker: TaskTracker,
     shutdown_token: CancellationToken,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
-    pub fn new(shutdown_token: CancellationToken) -> Self {
+    pub fn new(task_tracker: TaskTracker, shutdown_token: CancellationToken) -> Self {
         Self {
             subscriptions: RwLock::new(HashMap::new()),
+            task_tracker,
             shutdown_token,
         }
     }
@@ -159,7 +162,7 @@ impl SubscriptionManager {
     }
 
     pub fn spawn_cleanup(self: Arc<Self>) {
-        tokio::spawn(async move {
+        Arc::clone(&self).task_tracker.spawn(async move {
             let mut interval = tokio::time::interval(SESSION_TTL);
             loop {
                 tokio::select! {

@@ -17,7 +17,9 @@ use app_state::AppState;
 use config::network_config::NetworkConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio_util::task::TaskTracker;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -38,8 +40,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let allowed_origins = network_cfg.allowed_origins.clone();
     let shutdown_token = graceful_shutdown::get_token();
+    let task_tracker = TaskTracker::new();
     let token_for_app_state = shutdown_token.clone();
-    let app_state = AppState::build(network_cfg, token_for_app_state).await;
+    let app_state = AppState::build(network_cfg, task_tracker.clone(), token_for_app_state).await;
 
     let app = create_router(app_state, metrics_handler, allowed_origins);
 
@@ -50,6 +53,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
         .await?;
+
+    task_tracker.close();
+
+    let _ = tokio::time::timeout(Duration::from_secs(10), task_tracker.wait())
+        .await
+        .map_err(|_| {
+            ::tracing::warn!(
+                pending = task_tracker.len(),
+                "graceful shutdown timed out, killing remaining tasks"
+            )
+        });
 
     Ok(())
 }
