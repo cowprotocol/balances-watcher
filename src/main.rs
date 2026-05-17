@@ -38,7 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let allowed_origins = network_cfg.allowed_origins.clone();
     let shutdown_token = graceful_shutdown::get_token();
-    let app_state = AppState::build(network_cfg, shutdown_token).await;
+    let token_for_app_state = shutdown_token.clone();
+    let app_state = AppState::build(network_cfg, token_for_app_state).await;
 
     let app = create_router(app_state, metrics_handler, allowed_origins);
 
@@ -46,7 +47,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     ::tracing::info!("Listening to http://{}", address);
 
     let listener = TcpListener::bind(address).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app).with_graceful_shutdown(async move {
+        shutdown_token.cancelled().await
+    }).await?;
 
     Ok(())
 }
