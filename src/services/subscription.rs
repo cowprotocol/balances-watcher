@@ -74,24 +74,25 @@ impl Subscription {
     }
 
     pub fn send_event(&self, event: BalanceEvent, session: Session) {
-        let _ = self
-            .sender
-            .send(event)
-            .inspect(|receivers| {
+        match self.sender.send(event) {
+            Ok(receivers) => {
                 counter!("balance_updates_sent_total").increment(1);
                 tracing::info!(
                     session = %session,
                     receivers,
                     "balance update sent"
                 );
-            })
-            .inspect_err(|err| {
-                tracing::error!(
+            }
+            Err(err) => {
+                // no need to log it as error because clients could close their connection
+                // before accepting events and it just spam with errors
+                tracing::debug!(
                     error = %err,
                     session = %session,
                     "failed to send balance update event: no receivers"
                 );
-            });
+            }
+        }
     }
 
     // subscribe new client to events

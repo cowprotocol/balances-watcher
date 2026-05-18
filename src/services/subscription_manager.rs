@@ -177,8 +177,9 @@ impl SubscriptionManager {
         });
     }
 
+    // send 503 error to clients and close all sse connections
     async fn close_sse_connections(&self) {
-        let subs = self.subscriptions.read().await;
+        let mut subs = self.subscriptions.write().await;
         for (session, sub_with_counter) in subs.iter() {
             let close_event = BalanceEvent::Error {
                 code: 503,
@@ -187,8 +188,9 @@ impl SubscriptionManager {
             sub_with_counter
                 .subscription
                 .send_event(close_event, session.to_owned());
-            sub_with_counter.subscription.cancellable().cancel();
         }
+        // drain all subscriptions after
+        subs.clear();
     }
 
     async fn cleanup_subs(&self) {

@@ -35,6 +35,7 @@ pub struct SessionManager {
     fetcher: Arc<TokenListFetcher>,
     snapshot_interval: usize,
     token_limit: usize,
+    task_tracker: TaskTracker,
 }
 
 pub struct SessionContext {
@@ -105,7 +106,10 @@ impl SessionManager {
         let token_list_fetcher =
             TokenListFetcher::new(TOKEN_LIST_CACHE_TTL, get_token_list_fetcher_backoff());
 
-        let sub_manager = Arc::new(SubscriptionManager::new(task_tracker, shutdown_token));
+        let sub_manager = Arc::new(SubscriptionManager::new(
+            task_tracker.clone(),
+            shutdown_token,
+        ));
         Arc::clone(&sub_manager).spawn_cleanup();
 
         Self {
@@ -115,6 +119,7 @@ impl SessionManager {
             multicall_fetchers: Arc::new(multicall_fetchers),
             snapshot_interval,
             token_limit,
+            task_tracker,
         }
     }
 
@@ -197,9 +202,15 @@ impl SessionManager {
                 "upsert: spawning watchers"
             );
 
-            Watcher::new(session, provider, Arc::clone(&sub), ws_pool)
-                .spawn_watchers(self.snapshot_interval)
-                .await;
+            Watcher::new(
+                self.task_tracker.clone(),
+                session,
+                provider,
+                Arc::clone(&sub),
+                ws_pool,
+            )
+            .spawn_watchers(self.snapshot_interval)
+            .await;
 
             let elapsed = t0.elapsed().as_millis() as f64;
             histogram!("upsert_spawn_watchers_ms").record(elapsed);
