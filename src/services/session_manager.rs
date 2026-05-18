@@ -33,8 +33,11 @@ pub struct SessionManager {
     multicall_fetchers: Arc<HashMap<EvmNetwork, Arc<BalanceFetcher>>>,
     ws_providers_pool: Arc<HashMap<EvmNetwork, Arc<WsConnectionPool>>>,
     fetcher: Arc<TokenListFetcher>,
+    // interval for multicall for the whole watched token list
     snapshot_interval: usize,
+    // how many tokens we can watch regarding session 
     token_limit: usize,
+    // needed to track spawns for graceful shutdown
     task_tracker: TaskTracker,
 }
 
