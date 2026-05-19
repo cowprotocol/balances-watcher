@@ -15,18 +15,18 @@ pub struct Subscription {
     sender: broadcast::Sender<BalanceEvent>,
     tokens: RwLock<HashSet<Address>>,
     watchers_spawned: AtomicBool,
-    cancel_token: CancellationToken,
+    cancellation_token: CancellationToken,
     sync_notify: Arc<Notify>,
 }
 
 impl Subscription {
-    pub fn new(tokens: HashSet<Address>) -> Self {
+    pub fn new(tokens: HashSet<Address>, cancellation_token: CancellationToken) -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             // snapshot of all watched tokens
             balances_snapshot: RwLock::new(HashMap::new()),
             // signal to cancel all watchers for this sub
-            cancel_token: CancellationToken::new(),
+            cancellation_token,
             // watched tokens
             tokens: RwLock::new(tokens),
             // flag to detect if the watcher was spawned for this subscription
@@ -47,7 +47,7 @@ impl Subscription {
     }
 
     pub fn cancellable(&self) -> CancellationToken {
-        self.cancel_token.clone()
+        self.cancellation_token.clone()
     }
 
     // check the flag that watcher was spawned and switched it if it wasn't
@@ -74,24 +74,25 @@ impl Subscription {
     }
 
     pub fn send_event(&self, event: BalanceEvent, session: Session) {
-        let _ = self
-            .sender
-            .send(event)
-            .inspect(|receivers| {
+        match self.sender.send(event) {
+            Ok(receivers) => {
                 counter!("balance_updates_sent_total").increment(1);
                 tracing::info!(
                     session = %session,
                     receivers,
                     "balance update sent"
                 );
-            })
-            .inspect_err(|err| {
-                tracing::error!(
+            }
+            Err(err) => {
+                // no need to log it as error because clients could close their connection
+                // before accepting events and it just spam with errors
+                tracing::debug!(
                     error = %err,
                     session = %session,
                     "failed to send balance update event: no receivers"
                 );
-            });
+            }
+        }
     }
 
     // subscribe new client to events

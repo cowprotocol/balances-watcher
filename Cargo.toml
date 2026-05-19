@@ -15,7 +15,7 @@ alloy = { version = "2.0.4", features = ["provider-ws", "getrandom"] }
 thiserror = "2.0.18"
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
-tokio-util = { version = "0.7.17" }
+tokio-util = { version = "0.7.17", features = ["rt"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 metrics = "0.24.5"

@@ -14,6 +14,7 @@ use metrics::counter;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::time::interval;
+use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
 use crate::services::balance_fetcher::{BalanceFetcher, BalancesWithBlock};
@@ -51,6 +52,7 @@ pub enum ParseWeb3LogsError {
 type Receiver = tokio::sync::mpsc::Receiver<QueueMessage>;
 
 pub struct Watcher {
+    task_tracker: TaskTracker,
     session: Session,
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
@@ -62,15 +64,22 @@ pub struct Watcher {
 
 impl Watcher {
     pub fn new(
+        task_tracker: TaskTracker,
         session: Session,
         multicall_fetcher: Arc<BalanceFetcher>,
         subscription: Arc<Subscription>,
         ws_connection_pool: Arc<WsConnectionPool>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let calls_queue = CallsQueue::new(session, Arc::clone(&multicall_fetcher), tx);
+        let calls_queue = CallsQueue::new(
+            task_tracker.clone(),
+            session,
+            Arc::clone(&multicall_fetcher),
+            tx,
+        );
 
         Self {
+            task_tracker,
             session,
             calls_queue: Arc::new(calls_queue),
             sub: subscription,
@@ -87,7 +96,14 @@ impl Watcher {
     pub async fn spawn_watchers(self, interval_secs: usize) {
         self.spawn_snapshot_updater(interval_secs).await;
         self.spawn_erc20_transfer_listeners().await;
-        Self::spawn_queue_result_receiver(Arc::clone(&self.sub), self.rx, self.session).await;
+        let task_tracker = self.task_tracker.clone();
+        Self::spawn_queue_result_receiver(
+            Arc::clone(&self.sub),
+            task_tracker,
+            self.rx,
+            self.session,
+        )
+        .await;
     }
 
     // watcher to request balances via multicall every interval_secs to have an actual state
@@ -100,7 +116,7 @@ impl Watcher {
         let session = self.session;
         let fetcher = Arc::clone(&self.multicall_fetcher);
 
-        tokio::spawn(async move {
+        self.task_tracker.spawn(async move {
             let mut interval = interval(Duration::from_secs(interval_secs as u64));
 
             loop {
@@ -135,12 +151,13 @@ impl Watcher {
 
     async fn spawn_queue_result_receiver(
         sub: Arc<Subscription>,
+        task_tracker: TaskTracker,
         mut rx: Receiver,
         session: Session,
     ) {
         let cancel = sub.cancellable();
 
-        tokio::spawn(async move {
+        task_tracker.spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
@@ -151,7 +168,7 @@ impl Watcher {
                         if let Some(msg) = msg {
                             match msg {
                                 QueueMessage::Success(balances) => {
-                                    tracing::info!(
+                                    tracing::debug!(
                                         session = %session,
                                         "balances received from queue, updating snapshot"
                                     );
@@ -206,7 +223,12 @@ impl Watcher {
         session: Session,
         sub: Arc<Subscription>,
     ) {
-        let tokens = { sub.clone_watched_tokens().await.into_iter().collect::<Vec<_>>() };
+        let tokens = {
+            sub.clone_watched_tokens()
+                .await
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
         tracing::info!(
             tokens_count = tokens.len(),
             "snapshot updater fetching balances"
@@ -278,7 +300,7 @@ impl Watcher {
         let calls_queue = Arc::clone(&self.calls_queue);
         let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
 
-        tokio::spawn(async move {
+        self.task_tracker.spawn(async move {
             let sub = Arc::clone(&sub);
             let calls_queue = Arc::clone(&calls_queue);
 
@@ -524,7 +546,7 @@ impl Watcher {
 
         let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
 
-        tokio::spawn(async move {
+        self.task_tracker.spawn(async move {
             let sub_for_log_handler = Arc::clone(&sub);
             let _ = Self::run_log_subscription_loop(
                 ws_connection_pool,
@@ -597,10 +619,7 @@ impl Watcher {
         }
 
         // always put native address into queue to keep it synced
-        let tokens = vec![
-            token_address,
-            session.network.native_token_address(),
-        ];
+        let tokens = vec![token_address, session.network.native_token_address()];
 
         calls_queue.upsert_delayed_call(&tokens, block_number).await;
     }

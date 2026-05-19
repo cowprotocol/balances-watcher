@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::sleep;
+use tokio_util::task::TaskTracker;
 
 type TokenMap = HashMap<Address, BlockNumber>;
 
@@ -31,6 +32,7 @@ struct QueueState {
 }
 
 pub struct CallsQueue {
+    task_tracker: TaskTracker,
     session: Session,
     multicall_fetcher: Arc<BalanceFetcher>,
     state: RwLock<QueueState>,
@@ -38,8 +40,14 @@ pub struct CallsQueue {
 }
 
 impl CallsQueue {
-    pub fn new(session: Session, multicall_fetcher: Arc<BalanceFetcher>, tx: Sender) -> Self {
+    pub fn new(
+        task_tracker: TaskTracker,
+        session: Session,
+        multicall_fetcher: Arc<BalanceFetcher>,
+        tx: Sender,
+    ) -> Self {
         Self {
+            task_tracker,
             session,
             multicall_fetcher,
             state: RwLock::new(QueueState {
@@ -86,7 +94,7 @@ impl CallsQueue {
             let this = Arc::clone(&self);
             let session = self.session;
 
-            let task = tokio::spawn(async move {
+            self.task_tracker.spawn(async move {
                 let _ = this.flush().await.inspect_err(|err| {
                     tracing::error!(
                         error = %err,
@@ -95,9 +103,6 @@ impl CallsQueue {
                     );
                 });
             });
-            // we don't need to wait response from this task
-            // we should fire it and goes further without waiting the delay
-            drop(task);
         }
     }
 

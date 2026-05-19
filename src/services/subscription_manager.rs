@@ -7,6 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 struct SubWithCounter {
     pub clients: u32,
@@ -24,14 +26,18 @@ pub type BalanceSnapshot = HashMap<Address, Balance>;
 
 pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
+    task_tracker: TaskTracker,
+    shutdown_token: CancellationToken,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
-    pub fn new() -> Self {
+    pub fn new(task_tracker: TaskTracker, shutdown_token: CancellationToken) -> Self {
         Self {
             subscriptions: RwLock::new(HashMap::new()),
+            task_tracker,
+            shutdown_token,
         }
     }
 
@@ -63,7 +69,8 @@ impl SubscriptionManager {
         }
 
         let tokens_len = tokens.len();
-        let subscription = Arc::new(Subscription::new(tokens));
+        let shutdown_token = self.shutdown_token.clone();
+        let subscription = Arc::new(Subscription::new(tokens, shutdown_token.child_token()));
 
         let sub_with_counter = SubWithCounter {
             clients: 0,
@@ -155,13 +162,35 @@ impl SubscriptionManager {
     }
 
     pub fn spawn_cleanup(self: Arc<Self>) {
-        tokio::spawn(async move {
+        Arc::clone(&self).task_tracker.spawn(async move {
             let mut interval = tokio::time::interval(SESSION_TTL);
             loop {
-                interval.tick().await;
-                self.cleanup_subs().await;
+                tokio::select! {
+                    _ = self.shutdown_token.cancelled() => {
+                        tracing::info!("shutdown cleanup_subs");
+                        self.close_sse_connections().await;
+                        break;
+                    },
+                    _ = interval.tick() => self.cleanup_subs().await
+                }
             }
         });
+    }
+
+    // send 503 error to clients and close all sse connections
+    async fn close_sse_connections(&self) {
+        let mut subs = self.subscriptions.write().await;
+        for (session, sub_with_counter) in subs.iter() {
+            let close_event = BalanceEvent::Error {
+                code: 503,
+                message: "server is shutting down".into(),
+            };
+            sub_with_counter
+                .subscription
+                .send_event(close_event, session.to_owned());
+        }
+        // drain all subscriptions after
+        subs.clear();
     }
 
     async fn cleanup_subs(&self) {

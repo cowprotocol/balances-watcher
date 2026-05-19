@@ -22,6 +22,8 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio_stream::wrappers::BroadcastStream;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
@@ -31,8 +33,12 @@ pub struct SessionManager {
     multicall_fetchers: Arc<HashMap<EvmNetwork, Arc<BalanceFetcher>>>,
     ws_providers_pool: Arc<HashMap<EvmNetwork, Arc<WsConnectionPool>>>,
     fetcher: Arc<TokenListFetcher>,
+    // interval for multicall for the whole watched token list
     snapshot_interval: usize,
+    // how many tokens we can watch regarding session
     token_limit: usize,
+    // needed to track spawns for graceful shutdown
+    task_tracker: TaskTracker,
 }
 
 pub struct SessionContext {
@@ -97,11 +103,16 @@ impl SessionManager {
         ws_providers_pool: HashMap<EvmNetwork, Arc<WsConnectionPool>>,
         snapshot_interval: usize,
         token_limit: usize,
+        task_tracker: TaskTracker,
+        shutdown_token: CancellationToken,
     ) -> Self {
         let token_list_fetcher =
             TokenListFetcher::new(TOKEN_LIST_CACHE_TTL, get_token_list_fetcher_backoff());
 
-        let sub_manager = Arc::new(SubscriptionManager::new());
+        let sub_manager = Arc::new(SubscriptionManager::new(
+            task_tracker.clone(),
+            shutdown_token,
+        ));
         Arc::clone(&sub_manager).spawn_cleanup();
 
         Self {
@@ -111,6 +122,7 @@ impl SessionManager {
             multicall_fetchers: Arc::new(multicall_fetchers),
             snapshot_interval,
             token_limit,
+            task_tracker,
         }
     }
 
@@ -118,7 +130,7 @@ impl SessionManager {
         let session = ctx.session;
         let upsert_start = Instant::now();
 
-        tracing::info!(session = %session, "upsert: resolving providers");
+        tracing::debug!(session = %session, "upsert: resolving providers");
         let provider = match self.multicall_fetchers.get(&session.network) {
             Some(provider) => provider.clone(),
             None => return Err(SessionError::ProviderIsNotDefined),
@@ -132,16 +144,18 @@ impl SessionManager {
         };
 
         let t0 = Instant::now();
-        tracing::info!(session = %session, "upsert: fetching tokens");
+        tracing::debug!(session = %session, "upsert: fetching tokens");
+
         let tokens = self
-            .fetch_and_enriched_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
+            .fetch_and_extend_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
+
         let elapsed = t0.elapsed().as_millis() as f64;
         histogram!("upsert_fetch_tokens_ms").record(elapsed);
-        tracing::info!(session = %session, tokens_len = tokens.len(), time_ms = elapsed, "upsert: tokens fetched");
+        tracing::debug!(session = %session, tokens_len = tokens.len(), time_ms = elapsed, "upsert: tokens fetched");
 
         let t0 = Instant::now();
-        tracing::info!(session = %session, "upsert: get_subscription");
+        tracing::debug!(session = %session, "upsert: get_subscription");
         let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
         let (updated_tokens, new_uniq_tokens) = if let Some(sub) = subscription {
@@ -175,7 +189,7 @@ impl SessionManager {
         }
 
         let t0 = Instant::now();
-        tracing::info!(session = %session, "upsert: sub_manager.upsert");
+        tracing::debug!(session = %session, "upsert: sub_manager.upsert");
         let new_tokens = new_uniq_tokens.unwrap_or(updated_tokens);
         let sub = self.sub_manager.upsert(session, new_tokens).await;
         let elapsed = t0.elapsed().as_millis() as f64;
@@ -191,9 +205,15 @@ impl SessionManager {
                 "upsert: spawning watchers"
             );
 
-            Watcher::new(session, provider, Arc::clone(&sub), ws_pool)
-                .spawn_watchers(self.snapshot_interval)
-                .await;
+            Watcher::new(
+                self.task_tracker.clone(),
+                session,
+                provider,
+                Arc::clone(&sub),
+                ws_pool,
+            )
+            .spawn_watchers(self.snapshot_interval)
+            .await;
 
             let elapsed = t0.elapsed().as_millis() as f64;
             histogram!("upsert_spawn_watchers_ms").record(elapsed);
@@ -206,7 +226,7 @@ impl SessionManager {
 
         let elapsed = upsert_start.elapsed().as_millis() as f64;
         histogram!("upsert_total_ms").record(elapsed);
-        tracing::info!(
+        tracing::debug!(
             session = %session,
             time_ms = elapsed,
             "upsert: done",
@@ -216,7 +236,7 @@ impl SessionManager {
     }
 
     // fetch tokens from lists and add eth/weth9 as watched
-    async fn fetch_and_enriched_tokens(
+    async fn fetch_and_extend_tokens(
         &self,
         session: Session,
         token_lists_urls: Vec<String>,
