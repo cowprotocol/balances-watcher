@@ -14,7 +14,7 @@ pub enum EvmNetwork {
     Sepolia = 11155111,
     Bnb = 56,
     Gnosis = 100,
-    Poligon = 137,
+    Polygon = 137,
 }
 
 impl EvmNetwork {
@@ -24,7 +24,7 @@ impl EvmNetwork {
         EvmNetwork::Sepolia,
         EvmNetwork::Bnb,
         EvmNetwork::Gnosis,
-        EvmNetwork::Poligon,
+        EvmNetwork::Polygon,
     ];
 
     pub fn chain_id(self) -> u64 {
@@ -46,7 +46,7 @@ impl EvmNetwork {
             EvmNetwork::Arbitrum => address!("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
             EvmNetwork::Gnosis => address!("0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"),
             EvmNetwork::Bnb => address!("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
-            EvmNetwork::Poligon => address!("0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"),
+            EvmNetwork::Polygon => address!("0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"),
         }
     }
 }
@@ -59,6 +59,9 @@ impl TryFrom<u64> for EvmNetwork {
             1 => Ok(EvmNetwork::Eth),
             42161 => Ok(EvmNetwork::Arbitrum),
             11155111 => Ok(EvmNetwork::Sepolia),
+            56 => Ok(EvmNetwork::Bnb),
+            100 => Ok(EvmNetwork::Gnosis),
+            137 => Ok(EvmNetwork::Polygon),
             _ => Err(EvmError::UnsupportedNetwork(id)),
         }
     }

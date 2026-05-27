@@ -607,10 +607,10 @@ impl Watcher {
             }
         };
 
-        // service listens to all trasnfers events
-        // skip all tokens that not in the watched token list
+        // service listens to all transfer events
+        // skip all tokens that are not in the watched token list
         let token_address = decoded_log.address();
-        if sub.is_watched(&token_address).await {
+        if !sub.is_watched(&token_address).await {
             tracing::info!(
                 token_address = %token_address,
                 "token is not watched, skip"
