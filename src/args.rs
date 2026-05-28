@@ -7,6 +7,11 @@ pub struct Args {
     #[arg(long, env = "HTTP_BIND", default_value = "0.0.0.0:8080")]
     pub bind: String,
 
+    /// Target EVM network for this instance (chain id, e.g. `1`, `42161`, `100`).
+    /// One process serves exactly one network — deploy N replicas for N chains.
+    #[arg(long, env = "NETWORK")]
+    pub network: String,
+
     #[arg(long, env = "ALCHEMY_API_KEY", default_value = "")]
     pub alchemy_api_key: String,
 

@@ -31,6 +31,13 @@ pub async fn create_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<(), AppError> {
+    if network != state.network {
+        return Err(AppError::NotFound(format!(
+            "chain_id {network} is not served by this instance (configured: {})",
+            state.network
+        )));
+    }
+
     if body.tokens_lists_urls.is_empty() && body.custom_tokens.is_empty() {
         return Err(AppError::BadRequest(
             "tokens_lists_urls or custom_tokens should not be empty both".into(),

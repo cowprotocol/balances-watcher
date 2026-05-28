@@ -29,6 +29,13 @@ pub async fn update_session(
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateSessionRequest>,
 ) -> Result<(), AppError> {
+    if network != state.network {
+        return Err(AppError::NotFound(format!(
+            "chain_id {network} is not served by this instance (configured: {})",
+            state.network
+        )));
+    }
+
     if body.custom_tokens.is_empty() && body.tokens_lists_urls.is_empty() {
         return Err(AppError::BadRequest(
             "tokens_lists_urls && custom_tokens are empty".to_string(),

@@ -1,18 +1,24 @@
 use super::constants::{DEFAULT_MAX_WATCHED_TOKENS_LIMIT, DEFAULT_SNAPSHOT_INTERVAL_SECS};
 use crate::args::Args;
+use crate::domain::errors::EvmError;
 use crate::domain::EvmNetwork;
 
 #[derive(Debug)]
 pub struct NetworkConfig {
     api_key: String,
+    /// The single EVM network this instance serves. Set via `NETWORK` env (chain id).
+    pub network: EvmNetwork,
     pub snapshot_interval: usize,
     pub max_watched_tokens_limit: usize,
     pub allowed_origins: Vec<String>,
 }
 
 impl NetworkConfig {
-    pub fn init(args: &Args) -> Self {
-        let api_key = args.alchemy_api_key.clone();
+    /// Build a `NetworkConfig` from parsed CLI/env args. Fails fast if `NETWORK`
+    /// is missing or refers to an unsupported chain id — the process should not
+    /// start in a half-configured state.
+    pub fn from_args(args: &Args) -> Result<Self, EvmError> {
+        let network: EvmNetwork = args.network.parse()?;
 
         let snapshot_interval: usize = args
             .snapshot_interval
@@ -37,14 +43,19 @@ impl NetworkConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
-        tracing::info!(origins = %allowed_origins.join(", "), "init origins from env");
+        tracing::info!(
+            network = %network,
+            origins = %allowed_origins.join(", "),
+            "network config initialised",
+        );
 
-        Self {
-            api_key,
+        Ok(Self {
+            api_key: args.alchemy_api_key.clone(),
+            network,
             snapshot_interval,
             max_watched_tokens_limit,
             allowed_origins,
-        }
+        })
     }
 
     fn network_subdomain(network: EvmNetwork) -> &'static str {

@@ -10,9 +10,6 @@ pub enum AppError {
 
     #[error("Bad request: {0}")]
     BadRequest(String),
-
-    #[error("Internal error: {0}")]
-    Internal(String),
 }
 
 #[derive(Serialize)]
@@ -25,8 +22,6 @@ impl From<SessionError> for AppError {
     fn from(e: SessionError) -> Self {
         match e {
             SessionError::SessionIsNotCreated => AppError::NotFound(e.to_string()),
-            SessionError::ProviderIsNotDefined => AppError::Internal(e.to_string()),
-            SessionError::WsProviderIsNotDefined => AppError::Internal(e.to_string()),
             SessionError::TokenLimitExceeded(_, _) => AppError::BadRequest(e.to_string()),
             SessionError::TokenListNotFound(_) => AppError::BadRequest(e.to_string()),
             SessionError::TooManyClients => AppError::BadRequest(e.to_string()),
@@ -39,7 +34,6 @@ impl IntoResponse for AppError {
         let status = match &self {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
-            AppError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
 
         (
