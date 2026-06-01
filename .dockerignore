@@ -1,7 +1,12 @@
+# Build artifacts
 /target
 **/*.rs.bk
+
+# VCS
 .git
 .gitignore
+
+# Editor / OS junk
 .vscode
 .idea
 *.swp
@@ -9,13 +14,34 @@
 *~
 .DS_Store
 Thumbs.db
+
+# Docker / compose (built-in COPY rules already exclude these, but be explicit)
 Dockerfile
 .dockerignore
 docker-compose.yml
+
+# Docs (image doesn't need them)
 *.md
 README*
-.env
-.env.local
+
+# AI agent state
 CLAUDE.md
 /.claude
+
+# Misc tooling
 rustfmt.toml
+
+# ─── Secret-shaped files — never let these into the build context ────────
+# Catches .env, .env.local, .env.production, configs/.env, src/.env, etc.
+**/.env
+**/.env.*
+# Private keys / certs / kubeconfigs
+**/*.key
+**/*.pem
+**/*.p12
+**/*.pfx
+**/id_rsa*
+**/*.kubeconfig
+# Common secret-y dirs
+**/secrets/
+**/credentials/

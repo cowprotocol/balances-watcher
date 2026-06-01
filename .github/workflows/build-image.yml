@@ -46,8 +46,29 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          load: true
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Pick image ref for Trivy
+        id: scan_ref
+        run: |
+          # docker/metadata-action emits a newline-separated list of tags;
+          # any one of them refers to the same image we just built, so take
+          # the first.
+          REF=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n 1)
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Scanning: $REF"
+
+      - name: Scan image for CVEs (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.scan_ref.outputs.ref }}
+          # fail the build only on CRITICAL/HIGH issues that have an available
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
