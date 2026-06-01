@@ -9,8 +9,6 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
-/// Application state for a single-network instance.
-///
 /// The service is intentionally **chain-scoped**: one process serves exactly
 /// one network (set via `NETWORK` env). Multi-network fan-out is achieved by
 /// deploying N replicas (one per chain) behind a path-based ingress.
@@ -40,8 +38,9 @@ impl AppState {
         let network = network_config.network;
 
         let http_url = network_config.alchemy_http_url(network);
-        let provider = ProviderBuilder::new().connect(&http_url).await?;
-        let balance_fetcher = Arc::new(BalanceFetcher::new(Arc::new(provider.erased()), network));
+        let http_provider = ProviderBuilder::new().connect(&http_url).await?.erased();
+
+        let balance_fetcher = Arc::new(BalanceFetcher::new(Arc::new(http_provider), network));
         tracing::info!(%network, "http provider connected");
 
         let ws_url = network_config.alchemy_ws_url(network);

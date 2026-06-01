@@ -27,7 +27,7 @@ pub struct UpdateSessionRequest {
 
 /// `PUT /{chain_id}/sessions/{owner}`
 ///
-/// Adds more tokens to an existing session on `chain_id` for `owner` (token
+/// adds more tokens to an existing session on `chain_id` for `owner` (token
 /// lists and/or custom token addresses). The session must already have been
 /// created via `POST /{chain_id}/sessions/{owner}`.
 ///
