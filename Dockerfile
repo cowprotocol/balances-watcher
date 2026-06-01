@@ -20,10 +20,14 @@ RUN touch src/main.rs && cargo build --release \
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    libssl3 \
-  && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates \
+        libssl3 && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN useradd -m -u 1000 -s /usr/sbin/nologin appuser
 
