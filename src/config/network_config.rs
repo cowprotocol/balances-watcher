@@ -1,6 +1,5 @@
 use super::constants::{DEFAULT_MAX_WATCHED_TOKENS_LIMIT, DEFAULT_SNAPSHOT_INTERVAL_SECS};
 use crate::args::Args;
-use crate::domain::errors::EvmError;
 use crate::domain::EvmNetwork;
 
 #[derive(Debug)]
@@ -14,12 +13,8 @@ pub struct NetworkConfig {
 }
 
 impl NetworkConfig {
-    /// Build a `NetworkConfig` from parsed CLI/env args. Fails fast if `NETWORK`
-    /// is missing or refers to an unsupported chain id — the process should not
-    /// start in a half-configured state.
-    pub fn from_args(args: &Args) -> Result<Self, EvmError> {
-        let network: EvmNetwork = args.network.parse()?;
-
+    /// build a `NetworkConfig` from parsed CLI/env args.
+    pub fn from_args(args: &Args) -> Self {
         let snapshot_interval: usize = args
             .snapshot_interval
             .parse()
@@ -44,18 +39,18 @@ impl NetworkConfig {
             .collect();
 
         tracing::info!(
-            network = %network,
+            network = %args.network,
             origins = %allowed_origins.join(", "),
             "network config initialised",
         );
 
-        Ok(Self {
+        Self {
             api_key: args.alchemy_api_key.clone(),
-            network,
+            network: args.network,
             snapshot_interval,
             max_watched_tokens_limit,
             allowed_origins,
-        })
+        }
     }
 
     fn network_subdomain(network: EvmNetwork) -> &'static str {

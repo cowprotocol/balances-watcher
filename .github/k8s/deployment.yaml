@@ -17,12 +17,19 @@ spec:
         app: balances-watcher
         network: ${NETWORK_NAME}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: app
           image: ghcr.io/limitofzero/balances-watcher:${IMAGE_TAG}
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
           envFrom:
             - secretRef:
                 name: balances-watcher-secrets
@@ -38,3 +45,9 @@ spec:
           resources:
             requests: { memory: "32Mi", cpu: "50m" }
             limits:   { memory: "128Mi", cpu: "500m" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

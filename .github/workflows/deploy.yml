@@ -92,6 +92,11 @@ jobs:
 
             kubectl apply -f /tmp/k8s-manifests/ingress.yaml
 
+            # cleanup legacy single-pod resources 
+            kubectl delete deployment balances-watcher --ignore-not-found=true
+            kubectl delete service    balances-watcher --ignore-not-found=true
+
+            # wait for every per-chain deployment to become Ready
             for dep in /tmp/k8s-manifests/dep-*.yaml; do
               name=$(grep '^  name:' "$dep" | head -1 | awk '{print $2}')
               echo "waiting for deployment/$name"

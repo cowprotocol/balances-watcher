@@ -33,8 +33,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("ALCHEMY_API_KEY is required".into());
     }
 
-    let network_cfg =
-        NetworkConfig::from_args(&cfg).map_err(|e| format!("Invalid NETWORK env: {e}"))?;
+    let network_cfg = NetworkConfig::from_args(&cfg);
 
     ::tracing::info!(
         network = %network_cfg.network,

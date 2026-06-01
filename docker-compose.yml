@@ -8,6 +8,9 @@ services:
     container_name: balances-watcher
     ports:
       - "4000:8080"
+    environment:
+      - NETWORK=${NETWORK:-1}
+      - RUST_LOG=${RUST_LOG:-info}
     env_file:
       - .env
     restart: unless-stopped
