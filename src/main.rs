@@ -6,12 +6,11 @@ mod config;
 mod domain;
 mod evm;
 mod graceful_shutdown;
-mod routes;
 mod services;
 mod tracing;
 
+use crate::api::create_router;
 use crate::args::Args;
-use crate::routes::create_router::create_router;
 use crate::tracing::init_tracing::init_tracing;
 use app_state::AppState;
 use config::network_config::NetworkConfig;

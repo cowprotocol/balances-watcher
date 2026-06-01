@@ -1,16 +1,43 @@
-use crate::api::create_session::create_session;
-use crate::api::create_sse_session::create_sse_connection;
-use crate::api::update_session::update_session;
+//! HTTP boundary layer.
+//!
+//! This file plays two roles, mirroring the layout used by
+//! `cowprotocol/services` (e.g. `crates/orderbook/src/api.rs`):
+//!
+//! 1. **Umbrella module** for the per-endpoint files under `src/api/`
+//!    (declared via `mod` below).
+//! 2. **Router builder** — [`create_router`] wires endpoints, CORS, and the
+//!    metrics scrape endpoint into a single `axum::Router`.
+//!
+//! No business logic lives here; the umbrella exists purely to keep HTTP
+//! plumbing (router, middleware, extractors) co-located with the endpoint
+//! files it composes.
+
+mod create_session;
+mod create_sse_session;
+mod extractors;
+mod update_session;
+
 use crate::app_state::AppState;
-use axum::routing::put;
-use axum::{
-    routing::{get, post},
-    Router,
-};
+use axum::routing::{get, post, put};
+use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+use self::create_session::create_session;
+use self::create_sse_session::create_sse_connection;
+use self::update_session::update_session;
+
+/// Build the application's `Router`.
+///
+/// Routes registered:
+/// - `GET  /metrics`                          — Prometheus scrape endpoint
+/// - `GET  /sse/{chain_id}/balances/{owner}`  — SSE stream of balance diffs
+/// - `POST /{chain_id}/sessions/{owner}`      — create session
+/// - `PUT  /{chain_id}/sessions/{owner}`      — extend session's token set
+///
+/// `chain_id` mismatch against the configured `AppState::network` is rejected
+/// inside the handlers via the `ChainId` extractor (`404 Not Found`).
 pub fn create_router(
     app_state: Arc<AppState>,
     prometheus_handler: PrometheusHandle,

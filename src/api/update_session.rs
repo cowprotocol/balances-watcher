@@ -7,6 +7,7 @@ use axum::{
 };
 use serde::Deserialize;
 
+use crate::api::extractors::ChainId;
 use crate::services::session_manager::SessionContext;
 use crate::{
     app_error::AppError,
@@ -24,18 +25,19 @@ pub struct UpdateSessionRequest {
     custom_tokens: Vec<Address>,
 }
 
+/// `PUT /{chain_id}/sessions/{owner}`
+///
+/// Adds more tokens to an existing session on `chain_id` for `owner` (token
+/// lists and/or custom token addresses). The session must already have been
+/// created via `POST /{chain_id}/sessions/{owner}`.
+///
+/// Chain mismatch is rejected with `404 Not Found` by the `ChainId` extractor.
 pub async fn update_session(
-    Path((network, owner)): Path<(EvmNetwork, Address)>,
+    ChainId(network): ChainId,
+    Path((_, owner)): Path<(EvmNetwork, Address)>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateSessionRequest>,
 ) -> Result<(), AppError> {
-    if network != state.network {
-        return Err(AppError::NotFound(format!(
-            "chain_id {network} is not served by this instance (configured: {})",
-            state.network
-        )));
-    }
-
     if body.custom_tokens.is_empty() && body.tokens_lists_urls.is_empty() {
         return Err(AppError::BadRequest(
             "tokens_lists_urls && custom_tokens are empty".to_string(),
