@@ -7,28 +7,51 @@ on:
     types: [completed]
     branches: ["master"]
 
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: staging
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Substitute env vars in manifests
+      - name: Resolve image tag
+        id: tag
         run: |
+          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
+          echo "tag=sha-${SHA:0:7}" >> "$GITHUB_OUTPUT"
+
+      - name: Render manifests
+        run: |
+          set -e
           mkdir -p ./k8s-output
-          envsubst < .github/k8s/deployment.yaml > ./k8s-output/deployment.yaml
-          envsubst < .github/k8s/service.yaml > ./k8s-output/service.yaml
-          envsubst < .github/k8s/ingress.yaml > ./k8s-output/ingress.yaml
-          cp .github/k8s/cluster-issuer.yaml ./k8s-output/cluster-issuer.yaml
-          cp .github/k8s/service-monitor.yaml ./k8s-output/service-monitor.yaml
+
+          cp .github/k8s/cluster-issuer.yaml   ./k8s-output/
+          cp .github/k8s/ingress.yaml          ./k8s-output/
+          cp .github/k8s/service-monitor.yaml  ./k8s-output/
+
+          # per-chain: one deployment + service each
+          # add / remove chains by editing the list below.
+          # keep .github/k8s/ingress.yaml in sync with this list.
+          # format: "network_name:chain_id"
+          for entry in \
+              "eth:1" \
+              "arb:42161" \
+              "sepolia:11155111"; do
+            export NETWORK_NAME="${entry%%:*}"
+            export NETWORK="${entry##*:}"
+            envsubst < .github/k8s/deployment.yaml > "./k8s-output/dep-${NETWORK_NAME}.yaml"
+            envsubst < .github/k8s/service.yaml    > "./k8s-output/svc-${NETWORK_NAME}.yaml"
+          done
+
+          echo "rendered manifests"
+          ls -la ./k8s-output/
         env:
-          RUST_LOG: ${{ vars.RUST_LOG }}
-          HTTP_BIND: ${{ vars.HTTP_BIND }}
+          IMAGE_TAG:       ${{ steps.tag.outputs.tag }}
+          RUST_LOG:        ${{ vars.RUST_LOG }}
+          HTTP_BIND:       ${{ vars.HTTP_BIND }}
           ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
 
       - name: Copy manifests to server
@@ -41,7 +64,7 @@ jobs:
           target: "/tmp/k8s-manifests"
           strip_components: 1
 
-      - name: Deploy to k8s
+      - name: Apply manifests
         uses: appleboy/ssh-action@v1.0.3
         env:
           ALCHEMY_API_KEY: ${{ secrets.ALCHEMY_API_KEY }}
@@ -51,14 +74,26 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           envs: ALCHEMY_API_KEY
           script: |
+            set -e
             export KUBECONFIG=/home/limitofzero/.kube/config
+
             kubectl create secret generic balances-watcher-secrets \
               --from-literal=ALCHEMY_API_KEY=$ALCHEMY_API_KEY \
               --dry-run=client -o yaml | kubectl apply -f -
+
             kubectl apply -f /tmp/k8s-manifests/cluster-issuer.yaml
-            kubectl apply -f /tmp/k8s-manifests/deployment.yaml
-            kubectl apply -f /tmp/k8s-manifests/service.yaml
-            kubectl apply -f /tmp/k8s-manifests/ingress.yaml
             kubectl apply -f /tmp/k8s-manifests/service-monitor.yaml
-            kubectl rollout restart deployment/balances-watcher
-            kubectl rollout status deployment/balances-watcher
+
+            # per-chain deployments + services
+            for f in /tmp/k8s-manifests/dep-*.yaml /tmp/k8s-manifests/svc-*.yaml; do
+              echo "─── applying $f"
+              kubectl apply -f "$f"
+            done
+
+            kubectl apply -f /tmp/k8s-manifests/ingress.yaml
+
+            for dep in /tmp/k8s-manifests/dep-*.yaml; do
+              name=$(grep '^  name:' "$dep" | head -1 | awk '{print $2}')
+              echo "waiting for deployment/$name"
+              kubectl rollout status "deployment/$name" --timeout=120s
+            done
