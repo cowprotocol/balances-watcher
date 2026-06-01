@@ -1,27 +1,78 @@
 name: deploy
 
 on:
-  workflow_dispatch:
-  workflow_run:
-    workflows: ["build-image"]
-    types: [completed]
+  push:
     branches: ["master"]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     environment: staging
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Resolve image tag
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta (tags/labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Pick image ref for Trivy
+        id: scan_ref
+        run: |
+          REF=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n 1)
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+
+      - name: Scan image for CVEs (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ steps.scan_ref.outputs.ref }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+          format: table
+
+      - name: Resolve image tag for k8s manifests
         id: tag
         run: |
-          SHA="${{ github.event.workflow_run.head_sha || github.sha }}"
-          echo "tag=sha-${SHA:0:7}" >> "$GITHUB_OUTPUT"
+          REF=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n 1)
+          TAG="${REF##*:}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Deploying tag: $TAG"
 
       - name: Render manifests
         run: |
@@ -31,7 +82,6 @@ jobs:
           cp .github/k8s/cluster-issuer.yaml   ./k8s-output/
           cp .github/k8s/ingress.yaml          ./k8s-output/
           cp .github/k8s/service-monitor.yaml  ./k8s-output/
-
           # per-chain: one deployment + service each
           # add / remove chains by editing the list below.
           # keep .github/k8s/ingress.yaml in sync with this list.
@@ -46,7 +96,6 @@ jobs:
             envsubst < .github/k8s/service.yaml    > "./k8s-output/svc-${NETWORK_NAME}.yaml"
           done
 
-          echo "rendered manifests"
           ls -la ./k8s-output/
         env:
           IMAGE_TAG:       ${{ steps.tag.outputs.tag }}
@@ -84,19 +133,16 @@ jobs:
             kubectl apply -f /tmp/k8s-manifests/cluster-issuer.yaml
             kubectl apply -f /tmp/k8s-manifests/service-monitor.yaml
 
-            # per-chain deployments + services
             for f in /tmp/k8s-manifests/dep-*.yaml /tmp/k8s-manifests/svc-*.yaml; do
-              echo "─── applying $f"
+              echo "applying $f"
               kubectl apply -f "$f"
             done
 
             kubectl apply -f /tmp/k8s-manifests/ingress.yaml
 
-            # cleanup legacy single-pod resources 
             kubectl delete deployment balances-watcher --ignore-not-found=true
             kubectl delete service    balances-watcher --ignore-not-found=true
 
-            # wait for every per-chain deployment to become Ready
             for dep in /tmp/k8s-manifests/dep-*.yaml; do
               name=$(grep '^  name:' "$dep" | head -1 | awk '{print $2}')
               echo "waiting for deployment/$name"
