@@ -1,32 +1,53 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: balances-watcher
+  name: balances-watcher-${NETWORK_NAME}
   labels:
     app: balances-watcher
+    network: ${NETWORK_NAME}
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: balances-watcher
+      network: ${NETWORK_NAME}
   template:
     metadata:
       labels:
         app: balances-watcher
+        network: ${NETWORK_NAME}
     spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: app
-          image: ghcr.io/limitofzero/balances-watcher:latest
-          imagePullPolicy: Always
+          image: ghcr.io/limitofzero/balances-watcher:${IMAGE_TAG}
+          imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - name: http
+              containerPort: 8080
           envFrom:
             - secretRef:
                 name: balances-watcher-secrets
           env:
+            - name: NETWORK
+              value: "${NETWORK}"
             - name: RUST_LOG
               value: "${RUST_LOG}"
             - name: HTTP_BIND
               value: "${HTTP_BIND}"
             - name: ALLOWED_ORIGINS
               value: "${ALLOWED_ORIGINS}"
+          resources:
+            requests: { memory: "32Mi", cpu: "50m" }
+            limits:   { memory: "128Mi", cpu: "500m" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

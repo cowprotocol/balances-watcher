@@ -256,6 +256,7 @@ flowchart TB
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `NETWORK` | **Required.** Chain id this instance serves (e.g. `1`, `42161`, `100`). One process per chain. | - |
 | `HTTP_BIND` | Server bind address | `0.0.0.0:8080` |
 | `ALCHEMY_API_KEY` | Alchemy API key (required) | - |
 | `MULTICALL_ADDRESS` | Multicall3 contract address | `0xcA11bde05977b3631167028862bE2a173976CA11` |
@@ -263,13 +264,32 @@ flowchart TB
 | `MAX_WATCHED_TOKENS_LIMIT` | Maximum tokens per session | `1000` |
 | `ALLOWED_ORIGINS` | Comma-separated CORS origins | `*` (all) |
 
+## Deployment model
+
+The service is **chain-scoped**: one process serves exactly one EVM network,
+configured at startup via `NETWORK`. Multi-chain coverage is achieved by
+running N replicas — typically one Deployment per chain behind a path-based
+ingress (Traefik / nginx) that routes `/sse/{chain_id}/...` to the matching
+instance. Benefits over the multi-chain-in-one-process model:
+
+- **Fault isolation** — a Polygon hardfork or Alchemy outage on one chain
+  cannot exhaust resources or fail probes on the others.
+- **Independent rollout** — version one chain at a time.
+- **Per-chain config** — separate API keys / rate-limit tiers, separate
+  resource requests, separate Prometheus pod labels.
+
+API routes still carry `{chain_id}` in the URL for ingress routing; each
+instance rejects requests addressed to a chain other than its configured
+`NETWORK` with `404 Not Found`.
+
 ## Quick Start
 
 ### Local Development
 
 ```bash
-# Set required environment variable
+# Set required environment variables
 export ALCHEMY_API_KEY=your_alchemy_api_key
+export NETWORK=1   # Ethereum mainnet
 
 # Run
 cargo run
@@ -288,12 +308,17 @@ docker-compose up -d
 docker-compose logs -f
 ```
 
-## Chain IDs
+## Supported Chains
+
+Pass the chain id as the `NETWORK` env when starting the process.
 
 | Network | Chain ID |
 |---------|----------|
 | Ethereum Mainnet | 1 |
 | Arbitrum One | 42161 |
+| BNB Smart Chain | 56 |
+| Gnosis Chain | 100 |
+| Polygon | 137 |
 | Sepolia Testnet | 11155111 |
 
 ## Blockchain Events Listened

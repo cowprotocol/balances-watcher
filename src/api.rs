@@ -1,16 +1,27 @@
-use crate::api::create_session::create_session;
-use crate::api::create_sse_session::create_sse_connection;
-use crate::api::update_session::update_session;
+mod create_session;
+mod create_sse_session;
+mod extractors;
+mod update_session;
+
 use crate::app_state::AppState;
-use axum::routing::put;
-use axum::{
-    routing::{get, post},
-    Router,
-};
+use axum::routing::{get, post, put};
+use axum::Router;
 use metrics_exporter_prometheus::PrometheusHandle;
 use std::sync::Arc;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
+use self::create_session::create_session;
+use self::create_sse_session::create_sse_connection;
+use self::update_session::update_session;
+
+/// Build the application's `Router`.
+///
+/// Routes registered:
+/// - `GET  /metrics`                          — Prometheus scrape endpoint
+/// - `GET  /sse/{chain_id}/balances/{owner}`  — SSE stream of balance diffs
+/// - `POST /{chain_id}/sessions/{owner}`      — create session
+/// - `PUT  /{chain_id}/sessions/{owner}`      — extend session's token set
+///
 pub fn create_router(
     app_state: Arc<AppState>,
     prometheus_handler: PrometheusHandle,

@@ -8,6 +8,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::api::extractors::ChainId;
 use crate::services::session_manager::SessionContext;
 use crate::{
     app_error::AppError,
@@ -24,10 +25,16 @@ pub struct CreateSessionRequest {
     custom_tokens: Vec<Address>,
 }
 
-// handler to create a session - this endpoint should be called before sse request
-// it creates necessary web3 listeners and snapshot updaters
+/// `POST /{chain_id}/sessions/{owner}`
+///
+/// creates a new watcher session for `owner` on `chain_id` and spawns the
+/// underlying web3 listeners + snapshot updaters. Must be called before the
+/// SSE stream is opened.
+///
+/// Chain mismatch is rejected with `404 Not Found` by the `ChainId` extractor.
 pub async fn create_session(
-    Path((network, owner)): Path<(EvmNetwork, Address)>,
+    ChainId(network): ChainId,
+    Path((_, owner)): Path<(EvmNetwork, Address)>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<(), AppError> {

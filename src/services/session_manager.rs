@@ -27,11 +27,19 @@ use tokio_util::task::TaskTracker;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
-// handle subscriptions: fetch token lists, spawn watchers, update watched tokens
+/// Per-network session orchestrator.
+///
+/// One `SessionManager` exists per process — the service is single-network, so
+/// the balance fetcher and WS connection pool are owned directly here (no
+/// network → resource lookup map). Responsibilities:
+/// - fetch & cache token lists
+/// - spawn watchers for new sessions
+/// - update watched token sets on session updates
+/// - bridge subscription events to SSE clients
 pub struct SessionManager {
     sub_manager: Arc<SubscriptionManager>,
-    multicall_fetchers: Arc<HashMap<EvmNetwork, Arc<BalanceFetcher>>>,
-    ws_providers_pool: Arc<HashMap<EvmNetwork, Arc<WsConnectionPool>>>,
+    multicall_fetcher: Arc<BalanceFetcher>,
+    ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
     // interval for multicall for the whole watched token list
     snapshot_interval: usize,
@@ -86,21 +94,14 @@ pub enum SessionError {
     #[error("Session is not created")]
     SessionIsNotCreated,
 
-    #[error("Provider is not defined")]
-    ProviderIsNotDefined,
-
-    #[error("Ws provider is not defined")]
-    WsProviderIsNotDefined,
-
     #[error("Too many clients")]
     TooManyClients,
 }
 
-// TODO create own error type
 impl SessionManager {
     pub fn new(
-        multicall_fetchers: HashMap<EvmNetwork, Arc<BalanceFetcher>>,
-        ws_providers_pool: HashMap<EvmNetwork, Arc<WsConnectionPool>>,
+        multicall_fetcher: Arc<BalanceFetcher>,
+        ws_connection_pool: Arc<WsConnectionPool>,
         snapshot_interval: usize,
         token_limit: usize,
         task_tracker: TaskTracker,
@@ -117,9 +118,9 @@ impl SessionManager {
 
         Self {
             sub_manager: Arc::clone(&sub_manager),
-            ws_providers_pool: Arc::new(ws_providers_pool),
+            ws_connection_pool,
             fetcher: Arc::new(token_list_fetcher),
-            multicall_fetchers: Arc::new(multicall_fetchers),
+            multicall_fetcher,
             snapshot_interval,
             token_limit,
             task_tracker,
@@ -130,18 +131,10 @@ impl SessionManager {
         let session = ctx.session;
         let upsert_start = Instant::now();
 
-        tracing::debug!(session = %session, "upsert: resolving providers");
-        let provider = match self.multicall_fetchers.get(&session.network) {
-            Some(provider) => provider.clone(),
-            None => return Err(SessionError::ProviderIsNotDefined),
-        };
-
-        let ws_pool = match self.ws_providers_pool.get(&session.network) {
-            None => {
-                return Err(SessionError::WsProviderIsNotDefined);
-            }
-            Some(ws_pool) => Arc::clone(ws_pool),
-        };
+        // Single-network instance: the fetcher & ws pool are pre-bound. No
+        // session-time lookup, no "provider not defined" branch.
+        let provider = Arc::clone(&self.multicall_fetcher);
+        let ws_pool = Arc::clone(&self.ws_connection_pool);
 
         let t0 = Instant::now();
         tracing::debug!(session = %session, "upsert: fetching tokens");

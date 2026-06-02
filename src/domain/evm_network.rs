@@ -18,15 +18,6 @@ pub enum EvmNetwork {
 }
 
 impl EvmNetwork {
-    pub const ALL: [EvmNetwork; 6] = [
-        EvmNetwork::Eth,
-        EvmNetwork::Arbitrum,
-        EvmNetwork::Sepolia,
-        EvmNetwork::Bnb,
-        EvmNetwork::Gnosis,
-        EvmNetwork::Polygon,
-    ];
-
     pub fn chain_id(self) -> u64 {
         self as u64
     }

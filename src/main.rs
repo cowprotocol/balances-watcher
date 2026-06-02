@@ -6,12 +6,11 @@ mod config;
 mod domain;
 mod evm;
 mod graceful_shutdown;
-mod routes;
 mod services;
 mod tracing;
 
+use crate::api::create_router;
 use crate::args::Args;
-use crate::routes::create_router::create_router;
 use crate::tracing::init_tracing::init_tracing;
 use app_state::AppState;
 use config::network_config::NetworkConfig;
@@ -34,7 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("ALCHEMY_API_KEY is required".into());
     }
 
-    let network_cfg = NetworkConfig::init(&cfg);
+    let network_cfg = NetworkConfig::from_args(&cfg);
+
+    ::tracing::info!(
+        network = %network_cfg.network,
+        bind = %cfg.bind,
+        "starting balances-watcher",
+    );
 
     let metrics_handler = PrometheusBuilder::new().install_recorder()?;
 
@@ -42,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_token = graceful_shutdown::get_token();
     let task_tracker = TaskTracker::new();
     let token_for_app_state = shutdown_token.clone();
-    let app_state = AppState::build(network_cfg, task_tracker.clone(), token_for_app_state).await;
+    let app_state = AppState::build(network_cfg, task_tracker.clone(), token_for_app_state).await?;
 
     let app = create_router(app_state, metrics_handler, allowed_origins);
 

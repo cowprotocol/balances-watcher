@@ -1,12 +1,14 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: balances-watcher
+  name: balances-watcher-${NETWORK_NAME}
   labels:
     app: balances-watcher
+    network: ${NETWORK_NAME}
 spec:
   selector:
     app: balances-watcher
+    network: ${NETWORK_NAME}
   ports:
     - name: http
       port: 80

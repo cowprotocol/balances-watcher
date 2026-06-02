@@ -14,10 +14,62 @@ spec:
     - host: balance-watcher.info
       http:
         paths:
-          - path: /
+          - path: /1/
             pathType: Prefix
             backend:
               service:
-                name: balances-watcher
+                name: balances-watcher-eth
+                port:
+                  number: 80
+          - path: /sse/1/
+            pathType: Prefix
+            backend:
+              service:
+                name: balances-watcher-eth
+                port:
+                  number: 80
+
+          - path: /42161/
+            pathType: Prefix
+            backend:
+              service:
+                name: balances-watcher-arb
+                port:
+                  number: 80
+          - path: /sse/42161/
+            pathType: Prefix
+            backend:
+              service:
+                name: balances-watcher-arb
+                port:
+                  number: 80
+
+          # - path: /100/
+          #   pathType: Prefix
+          #   backend:
+          #     service:
+          #       name: balances-watcher-gnosis
+          #       port:
+          #         number: 80
+          # - path: /sse/100/
+          #   pathType: Prefix
+          #   backend:
+          #     service:
+          #       name: balances-watcher-gnosis
+          #       port:
+          #         number: 80
+
+          - path: /11155111/
+            pathType: Prefix
+            backend:
+              service:
+                name: balances-watcher-sepolia
+                port:
+                  number: 80
+          - path: /sse/11155111/
+            pathType: Prefix
+            backend:
+              service:
+                name: balances-watcher-sepolia
                 port:
                   number: 80

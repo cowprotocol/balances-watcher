@@ -1,3 +1,4 @@
+use crate::domain::EvmNetwork;
 use clap::Parser;
 
 const DEFAULT_TOKEN_LIST_PATH: &str = "configs/tokens_list.json";
@@ -6,6 +7,10 @@ const DEFAULT_TOKEN_LIST_PATH: &str = "configs/tokens_list.json";
 pub struct Args {
     #[arg(long, env = "HTTP_BIND", default_value = "0.0.0.0:8080")]
     pub bind: String,
+
+    /// Target EVM network for this instance (chain id, e.g. `1`, `42161`, `100`).
+    #[arg(long, env = "NETWORK")]
+    pub network: EvmNetwork,
 
     #[arg(long, env = "ALCHEMY_API_KEY", default_value = "")]
     pub alchemy_api_key: String,

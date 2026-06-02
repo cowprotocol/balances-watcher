@@ -1,46 +1,55 @@
-version: '3.8'
+x-balances-watcher: &balances-watcher
+  build:
+    context: .
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  restart: unless-stopped
 
 services:
-  balances-watcher:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: balances-watcher
+  traefik:
+    image: traefik:v2.11
+    container_name: traefik
     ports:
-      - "4000:8080"
-    env_file:
-      - .env
-    restart: unless-stopped
-    networks:
-      - monitoring
-
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: prometheus
-    ports:
-      - "9090:9090"
+      - "4000:80"
+      - "8081:8080"
     volumes:
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
-      - prometheus_data:/prometheus
-    restart: unless-stopped
-    networks:
-      - monitoring
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
 
-  grafana:
-    image: grafana/grafana:latest
-    container_name: grafana
-    ports:
-      - "3000:3000"
-    volumes:
-      - grafana_data:/var/lib/grafana
-    restart: unless-stopped
-    networks:
-      - monitoring
+  balances-watcher-eth:
+    <<: *balances-watcher
+    environment:
+      - NETWORK=1
+      - RUST_LOG=${RUST_LOG:-info}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.eth.rule=PathPrefix(`/1/`) || PathPrefix(`/sse/1/`)"
+      - "traefik.http.routers.eth.entrypoints=web"
+      - "traefik.http.services.eth.loadbalancer.server.port=8080"
 
-networks:
-  monitoring:
-    driver: bridge
+  balances-watcher-arb:
+    <<: *balances-watcher
+    environment:
+      - NETWORK=42161
+      - RUST_LOG=${RUST_LOG:-info}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.arb.rule=PathPrefix(`/42161/`) || PathPrefix(`/sse/42161/`)"
+      - "traefik.http.routers.arb.entrypoints=web"
+      - "traefik.http.services.arb.loadbalancer.server.port=8080"
 
-volumes:
-  prometheus_data:
-  grafana_data:
+  balances-watcher-sepolia:
+    <<: *balances-watcher
+    environment:
+      - NETWORK=11155111
+      - RUST_LOG=${RUST_LOG:-info}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.sepolia.rule=PathPrefix(`/11155111/`) || PathPrefix(`/sse/11155111/`)"
+      - "traefik.http.routers.sepolia.entrypoints=web"
+      - "traefik.http.services.sepolia.loadbalancer.server.port=8080"

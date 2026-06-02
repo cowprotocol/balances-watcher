@@ -5,15 +5,16 @@ use crate::domain::EvmNetwork;
 #[derive(Debug)]
 pub struct NetworkConfig {
     api_key: String,
+    /// The single EVM network this instance serves. Set via `NETWORK` env (chain id).
+    pub network: EvmNetwork,
     pub snapshot_interval: usize,
     pub max_watched_tokens_limit: usize,
     pub allowed_origins: Vec<String>,
 }
 
 impl NetworkConfig {
-    pub fn init(args: &Args) -> Self {
-        let api_key = args.alchemy_api_key.clone();
-
+    /// build a `NetworkConfig` from parsed CLI/env args.
+    pub fn from_args(args: &Args) -> Self {
         let snapshot_interval: usize = args
             .snapshot_interval
             .parse()
@@ -37,10 +38,15 @@ impl NetworkConfig {
             .filter(|s| !s.is_empty())
             .collect();
 
-        tracing::info!(origins = %allowed_origins.join(", "), "init origins from env");
+        tracing::info!(
+            network = %args.network,
+            origins = %allowed_origins.join(", "),
+            "network config initialised",
+        );
 
         Self {
-            api_key,
+            api_key: args.alchemy_api_key.clone(),
+            network: args.network,
             snapshot_interval,
             max_watched_tokens_limit,
             allowed_origins,
