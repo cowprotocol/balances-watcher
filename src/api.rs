@@ -22,8 +22,6 @@ use self::update_session::update_session;
 /// - `POST /{chain_id}/sessions/{owner}`      — create session
 /// - `PUT  /{chain_id}/sessions/{owner}`      — extend session's token set
 ///
-/// `chain_id` mismatch against the configured `AppState::network` is rejected
-/// inside the handlers via the `ChainId` extractor (`404 Not Found`).
 pub fn create_router(
     app_state: Arc<AppState>,
     prometheus_handler: PrometheusHandle,
