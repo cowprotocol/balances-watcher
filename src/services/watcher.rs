@@ -401,7 +401,6 @@ impl Watcher {
                                     item = stream.next() => {
                                         match item {
                                             Some(log) => {
-                                                metrics.events_received_total.increment(1);
                                                 on_log(log).await;
                                             },
                                             None => {

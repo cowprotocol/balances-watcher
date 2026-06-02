@@ -28,8 +28,6 @@ pub struct Metrics {
     /// multicall gave up after backoff exhausted
     pub provider_exhausted_with_retries_total: Counter,
 
-    /// log event received from any ws subscription
-    pub events_received_total: Counter,
     /// erc20 transfer log received
     pub erc20_event_received_total: Counter,
     /// weth9 deposit or withdrawal log received
@@ -61,17 +59,6 @@ pub struct Metrics {
     pub tokens_limit_exceeded_total: Counter,
     /// post sessions handler latency, ms
     pub create_session_duration_ms: Histogram,
-
-    /// full upsert latency, ms
-    pub upsert_total_ms: Histogram,
-    /// upsert phase: fetch token lists, ms
-    pub upsert_fetch_tokens_ms: Histogram,
-    /// upsert phase: resolve existing subscription, ms
-    pub upsert_get_subscription_ms: Histogram,
-    /// upsert phase: sub manager update, ms
-    pub upsert_sub_manager_upsert_ms: Histogram,
-    /// upsert phase: spawn watchers, ms
-    pub upsert_spawn_watchers_ms: Histogram,
 }
 
 impl Metrics {
@@ -94,7 +81,6 @@ impl Metrics {
                 "provider_exhausted_with_retries_total"
             ),
 
-            events_received_total: counter!("events_received_total"),
             erc20_event_received_total: counter!("erc20_event_received_total"),
             weth9_events_received_total: counter!("weth9_events_received_total"),
             parse_erc20_log_errors_total: counter!("parse_erc20_log_errors_total"),
@@ -112,12 +98,6 @@ impl Metrics {
             snapshot_updater_runs_total: counter!("snapshot_updater_runs_total"),
             tokens_limit_exceeded_total: counter!("tokens_limit_exceeded_total"),
             create_session_duration_ms: histogram!("create_session_duration_ms"),
-
-            upsert_total_ms: histogram!("upsert_total_ms"),
-            upsert_fetch_tokens_ms: histogram!("upsert_fetch_tokens_ms"),
-            upsert_get_subscription_ms: histogram!("upsert_get_subscription_ms"),
-            upsert_sub_manager_upsert_ms: histogram!("upsert_sub_manager_upsert_ms"),
-            upsert_spawn_watchers_ms: histogram!("upsert_spawn_watchers_ms"),
         }
     }
 }

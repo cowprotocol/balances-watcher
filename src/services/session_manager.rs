@@ -20,7 +20,7 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -136,26 +136,16 @@ impl SessionManager {
 
     pub async fn upsert(&self, ctx: SessionContext) -> Result<(), SessionError> {
         let session = ctx.session;
-        let upsert_start = Instant::now();
 
         // Single-network instance: the fetcher & ws pool are pre-bound. No
         // session-time lookup, no "provider not defined" branch.
         let provider = Arc::clone(&self.multicall_fetcher);
         let ws_pool = Arc::clone(&self.ws_connection_pool);
 
-        let t0 = Instant::now();
-        tracing::debug!(session = %session, "upsert: fetching tokens");
-
         let tokens = self
             .fetch_and_extend_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
 
-        let elapsed = t0.elapsed().as_millis() as f64;
-        self.metrics.upsert_fetch_tokens_ms.record(elapsed);
-        tracing::debug!(session = %session, tokens_len = tokens.len(), time_ms = elapsed, "upsert: tokens fetched");
-
-        let t0 = Instant::now();
-        tracing::debug!(session = %session, "upsert: get_subscription");
         let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
         let (updated_tokens, new_uniq_tokens) = if let Some(sub) = subscription {
@@ -173,8 +163,6 @@ impl SessionManager {
         } else {
             (tokens, None)
         };
-        let elapsed = t0.elapsed().as_millis() as f64;
-        self.metrics.upsert_get_subscription_ms.record(elapsed);
 
         if updated_tokens.len() > self.token_limit {
             self.metrics.tokens_limit_exceeded_total.increment(1);
@@ -188,18 +176,13 @@ impl SessionManager {
             ));
         }
 
-        let t0 = Instant::now();
-        tracing::debug!(session = %session, "upsert: sub_manager.upsert");
         let new_tokens = new_uniq_tokens.unwrap_or(updated_tokens);
         let sub = self.sub_manager.upsert(session, new_tokens).await;
-        let elapsed = t0.elapsed().as_millis() as f64;
-        self.metrics.upsert_sub_manager_upsert_ms.record(elapsed);
 
         // if there aren't spawners yet - spawn them and create a first subscription
         let should_spawn_watchers = sub.try_mark_watchers_spawned();
 
         if should_spawn_watchers {
-            let t0 = Instant::now();
             tracing::info!(
                 session = %session,
                 "upsert: spawning watchers"
@@ -216,22 +199,11 @@ impl SessionManager {
             .spawn_watchers(self.snapshot_interval)
             .await;
 
-            let elapsed = t0.elapsed().as_millis() as f64;
-            self.metrics.upsert_spawn_watchers_ms.record(elapsed);
             tracing::info!(
                 session = %session,
-                time_ms = elapsed,
                 "upsert: watchers spawned"
             );
         }
-
-        let elapsed = upsert_start.elapsed().as_millis() as f64;
-        self.metrics.upsert_total_ms.record(elapsed);
-        tracing::debug!(
-            session = %session,
-            time_ms = elapsed,
-            "upsert: done",
-        );
 
         Ok(())
     }
