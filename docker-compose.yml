@@ -5,11 +5,24 @@ x-balances-watcher: &balances-watcher
   env_file:
     - .env
   restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "curl", "-fsS", "http://localhost:8080/health"]
+    interval: 30s
+    timeout: 3s
+    retries: 3
+    start_period: 5s
 
 services:
   traefik:
     image: traefik:v2.11
     container_name: traefik
+    depends_on:
+      balances-watcher-eth:
+        condition: service_healthy
+      balances-watcher-arb:
+        condition: service_healthy
+      balances-watcher-sepolia:
+        condition: service_healthy
     ports:
       - "4000:80"
       - "8081:8080"
