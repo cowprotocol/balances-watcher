@@ -18,8 +18,10 @@ pub type BalancesWithBlock = (HashMap<Address, U256>, U256);
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RpcError {
-    #[error("Provider exhausted: {0}")]
-    ProviderExhausted(String),
+    #[error("RPC call failed: {0}")]
+    Call(String),
+    #[error("Provider exhausted after retries: {0}")]
+    Exhausted(String),
 }
 
 pub struct RpcClient {
@@ -184,7 +186,7 @@ impl RpcClient {
             metrics.multicall_failed_total.increment(1);
         })
         .await
-        .map_err(|err| RpcError::ProviderExhausted(err.to_string()))
+        .map_err(|err| RpcError::Exhausted(err.to_string()))
     }
 
     fn backoff() -> ExponentialBuilder {
@@ -199,6 +201,6 @@ impl RpcClient {
         self.provider
             .get_block_number()
             .await
-            .map_err(|err| RpcError::ProviderExhausted(err.to_string()))
+            .map_err(|err| RpcError::Call(err.to_string()))
     }
 }
