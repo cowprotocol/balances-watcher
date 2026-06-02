@@ -1,6 +1,7 @@
 use crate::config::constants::MAX_CLIENTS_PER_WS_CONNECTION;
 use crate::config::network_config::NetworkConfig;
 use crate::domain::EvmNetwork;
+use crate::metrics::Metrics;
 use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::session_manager::SessionManager;
 use crate::services::ws_connection_pool::WsConnectionPool;
@@ -20,11 +21,13 @@ pub struct AppState {
     /// Network this instance serves. Used by API handlers to reject requests
     /// addressed to a different chain.
     pub network: EvmNetwork,
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
     pub async fn build(
         network_config: NetworkConfig,
+        metrics: Arc<Metrics>,
         task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
@@ -32,7 +35,11 @@ impl AppState {
 
         let http_url = network_config.alchemy_http_url(network);
         let http_provider = ProviderBuilder::new().connect(&http_url).await?.erased();
-        let balance_fetcher = Arc::new(BalanceFetcher::new(Arc::new(http_provider), network));
+        let balance_fetcher = Arc::new(BalanceFetcher::new(
+            Arc::new(http_provider),
+            network,
+            Arc::clone(&metrics),
+        ));
         tracing::info!(%network, "http provider connected");
 
         let ws_url = network_config.alchemy_ws_url(network);
@@ -42,6 +49,7 @@ impl AppState {
         let session_manager = Arc::new(SessionManager::new(
             balance_fetcher,
             ws_pool,
+            Arc::clone(&metrics),
             network_config.snapshot_interval,
             network_config.max_watched_tokens_limit,
             task_tracker,
@@ -51,6 +59,7 @@ impl AppState {
         Ok(Arc::new(Self {
             session_manager,
             network,
+            metrics,
         }))
     }
 }

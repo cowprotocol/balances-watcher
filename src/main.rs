@@ -6,16 +6,19 @@ mod config;
 mod domain;
 mod evm;
 mod graceful_shutdown;
+mod metrics;
 mod services;
 mod tracing;
 
 use crate::api::create_router;
 use crate::args::Args;
+use crate::metrics::Metrics;
 use crate::tracing::init_tracing::init_tracing;
 use app_state::AppState;
 use config::network_config::NetworkConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_util::task::TaskTracker;
@@ -42,12 +45,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let metrics_handler = PrometheusBuilder::new().install_recorder()?;
+    let metrics = Arc::new(Metrics::install());
 
     let allowed_origins = network_cfg.allowed_origins.clone();
     let shutdown_token = graceful_shutdown::get_token();
     let task_tracker = TaskTracker::new();
     let token_for_app_state = shutdown_token.clone();
-    let app_state = AppState::build(network_cfg, task_tracker.clone(), token_for_app_state).await?;
+    let app_state = AppState::build(
+        network_cfg,
+        Arc::clone(&metrics),
+        task_tracker.clone(),
+        token_for_app_state,
+    )
+    .await?;
 
     let app = create_router(app_state, metrics_handler, allowed_origins);
 

@@ -10,13 +10,13 @@ use alloy::{
 use backon::{ExponentialBuilder, Retryable};
 use futures::future::BoxFuture;
 use futures::StreamExt;
-use metrics::counter;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::time::interval;
 use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
+use crate::metrics::Metrics;
 use crate::services::balance_fetcher::{BalanceFetcher, BalancesWithBlock};
 use crate::services::calls_queue::{CallsQueue, QueueMessage};
 use crate::services::subscription::Subscription;
@@ -58,6 +58,7 @@ pub struct Watcher {
     ws_connection_pool: Arc<WsConnectionPool>,
     calls_queue: Arc<CallsQueue>,
     multicall_fetcher: Arc<BalanceFetcher>,
+    metrics: Arc<Metrics>,
     // accepts data from calls_queue
     rx: Receiver,
 }
@@ -69,6 +70,7 @@ impl Watcher {
         multicall_fetcher: Arc<BalanceFetcher>,
         subscription: Arc<Subscription>,
         ws_connection_pool: Arc<WsConnectionPool>,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let calls_queue = CallsQueue::new(
@@ -85,6 +87,7 @@ impl Watcher {
             sub: subscription,
             multicall_fetcher,
             ws_connection_pool,
+            metrics,
             rx,
         }
     }
@@ -115,6 +118,7 @@ impl Watcher {
         let notifier = sub.take_sync_notifier();
         let session = self.session;
         let fetcher = Arc::clone(&self.multicall_fetcher);
+        let metrics = Arc::clone(&self.metrics);
 
         self.task_tracker.spawn(async move {
             let mut interval = interval(Duration::from_secs(interval_secs as u64));
@@ -130,7 +134,7 @@ impl Watcher {
                     }
                     _ = interval.tick() => {
                         // every n secs we make a multicall to sync all token balances
-                        counter!("snapshot_updater_runs_total").increment(1);
+                        metrics.snapshot_updater_runs_total.increment(1);
                         Self::fetch_balances_and_broadcast(Arc::clone(&fetcher), session, Arc::clone(&sub)).await;
                     }
                     _ = notifier.notified() => {
@@ -140,7 +144,7 @@ impl Watcher {
                             session = %session,
                             "watched tokens were updated - force sync and reset interval"
                         );
-                        counter!("snapshot_updater_runs_total").increment(1);
+                        metrics.snapshot_updater_runs_total.increment(1);
                         Self::fetch_balances_and_broadcast(Arc::clone(&fetcher), session, Arc::clone(&sub)).await;
                         interval.reset();
                     }
@@ -299,22 +303,32 @@ impl Watcher {
 
         let calls_queue = Arc::clone(&self.calls_queue);
         let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
+        let metrics = Arc::clone(&self.metrics);
 
         self.task_tracker.spawn(async move {
             let sub = Arc::clone(&sub);
             let calls_queue = Arc::clone(&calls_queue);
+            let metrics_for_log = Arc::clone(&metrics);
 
             let _ = Self::run_log_subscription_loop(
                 ws_connection_pool,
                 filter,
                 sub.cancellable(),
+                Arc::clone(&metrics),
                 move |log: Log| {
                     let calls_queue = Arc::clone(&calls_queue);
+                    let metrics_for_log = Arc::clone(&metrics_for_log);
 
                     Box::pin(async move {
-                        counter!("weth9_events_received_total").increment(1);
+                        metrics_for_log.weth9_events_received_total.increment(1);
 
-                        Self::parse_weth9_logs_and_fetch_balance(session, &log, calls_queue).await;
+                        Self::parse_weth9_logs_and_fetch_balance(
+                            session,
+                            &log,
+                            calls_queue,
+                            metrics_for_log,
+                        )
+                        .await;
                     })
                 },
                 move || {
@@ -350,6 +364,7 @@ impl Watcher {
         connection_pool: Arc<WsConnectionPool>,
         filter: Filter,
         cancel: tokio_util::sync::CancellationToken,
+        metrics: Arc<Metrics>,
         mut on_log: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
         mut on_drop: impl FnMut() + Send + 'static,
     ) {
@@ -372,7 +387,7 @@ impl Watcher {
                     break 'ws_connection_loop;
                 },
                 _ = async {
-                    match Self::ws_sub_with_retries(&pool_guard.provider, filter.clone()).await {
+                    match Self::ws_sub_with_retries(&pool_guard.provider, filter.clone(), Arc::clone(&metrics)).await {
                         Ok(sub) => {
                             tracing::info!("subscribed to logs");
 
@@ -386,11 +401,10 @@ impl Watcher {
                                     item = stream.next() => {
                                         match item {
                                             Some(log) => {
-                                                counter!("events_received_total").increment(1);
                                                 on_log(log).await;
                                             },
                                             None => {
-                                                counter!("ws_provider_disconnected_total").increment(1);
+                                                metrics.ws_provider_disconnected_total.increment(1);
                                                 tracing::warn!("ws stream ended (disconnect). will resubscribe");
                                                 break 'logs_loop;
                                             }
@@ -400,7 +414,7 @@ impl Watcher {
                             }
                         },
                         Err(err) => {
-                            counter!("ws_subscribe_is_down_total").increment(1);
+                            metrics.ws_subscribe_is_down_total.increment(1);
                             tracing::error!(error = %err, "ws subscribe exhausted retries, cancelling");
                             on_drop();
                             cancel.cancel();
@@ -408,7 +422,7 @@ impl Watcher {
                         }
                     }
 
-                    counter!("ws_reconnect_attempts_total").increment(1);
+                    metrics.ws_reconnect_attempts_total.increment(1);
                 } => {}
             }
         }
@@ -418,17 +432,18 @@ impl Watcher {
     async fn ws_sub_with_retries(
         provider: &DynProvider,
         filter: Filter,
+        metrics: Arc<Metrics>,
     ) -> Result<alloy::pubsub::Subscription<Log>, WatcherError> {
         let backoff = Self::create_ws_sub_backoff();
         (|| async { provider.subscribe_logs(&filter).await })
             .retry(backoff)
-            .notify(|err, duration| {
+            .notify(move |err, duration| {
                 tracing::error!(
                     error = %err,
                     duration = ?duration,
                     "failed to subscribe logs"
                 );
-                counter!("ws_subscribe_errors_total").increment(1);
+                metrics.ws_subscribe_errors_total.increment(1);
             })
             .await
             .map_err(|_| WatcherError::WsSubscriptionExhausted)
@@ -445,9 +460,10 @@ impl Watcher {
         session: Session,
         log: &Log,
         calls_queue: Arc<CallsQueue>,
+        metrics: Arc<Metrics>,
     ) {
-        let Ok(parsed_log) = Self::parse_weth9_logs(log).inspect_err(|_| {
-            counter!("parse_weth9_logs_failed_total").increment(1);
+        let Ok(parsed_log) = Self::parse_weth9_logs(log).inspect_err(move |_| {
+            metrics.parse_weth9_logs_failed_total.increment(1);
         }) else {
             return;
         };
@@ -545,18 +561,22 @@ impl Watcher {
         let calls_queue = Arc::clone(&self.calls_queue);
 
         let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
+        let metrics = Arc::clone(&self.metrics);
 
         self.task_tracker.spawn(async move {
             let sub_for_log_handler = Arc::clone(&sub);
+            let metrics_for_log = Arc::clone(&metrics);
             let _ = Self::run_log_subscription_loop(
                 ws_connection_pool,
                 filter,
                 sub_for_log_handler.cancellable(),
+                Arc::clone(&metrics),
                 move |log: Log| {
                     let call_queue = Arc::clone(&calls_queue);
+                    let metrics_for_log = Arc::clone(&metrics_for_log);
 
                     tracing::info!("received erc20 transfer event: {:#?}", log);
-                    counter!("erc20_event_received_total").increment(1);
+                    metrics_for_log.erc20_event_received_total.increment(1);
 
                     let sub_for_parsing_tokens = Arc::clone(&sub_for_log_handler);
 
@@ -567,6 +587,7 @@ impl Watcher {
                             Arc::clone(&call_queue),
                             Arc::clone(&sub_for_parsing_tokens),
                             &log,
+                            metrics_for_log,
                         )
                         .await;
                     })
@@ -590,13 +611,14 @@ impl Watcher {
         calls_queue: Arc<CallsQueue>,
         sub: Arc<Subscription>,
         log: &Log,
+        metrics: Arc<Metrics>,
     ) {
         let block_number = log.block_number;
 
         let decoded_log: Log<ERC20::Transfer> = match log.log_decode() {
             Ok(log) => log,
             Err(err) => {
-                counter!("parse_erc20_log_errors_total").increment(1);
+                metrics.parse_erc20_log_errors_total.increment(1);
                 tracing::error!(
                     error = %err,
                     netowrk = %session.network,

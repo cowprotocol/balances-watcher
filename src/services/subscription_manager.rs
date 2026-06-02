@@ -1,8 +1,8 @@
 use crate::domain::{BalanceEvent, Session};
+use crate::metrics::Metrics;
 use crate::services::errors::SubscriptionError;
 use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, U256};
-use metrics::{counter, gauge};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -28,16 +28,22 @@ pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
     task_tracker: TaskTracker,
     shutdown_token: CancellationToken,
+    metrics: Arc<Metrics>,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
-    pub fn new(task_tracker: TaskTracker, shutdown_token: CancellationToken) -> Self {
+    pub fn new(
+        task_tracker: TaskTracker,
+        shutdown_token: CancellationToken,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             subscriptions: RwLock::new(HashMap::new()),
             task_tracker,
             shutdown_token,
+            metrics,
         }
     }
 
@@ -52,7 +58,7 @@ impl SubscriptionManager {
         if let Some(sub) = maybe_sub {
             let watched_tokens_len = sub.extend_tokens(tokens).await;
 
-            counter!("sessions_updated_total").increment(1);
+            self.metrics.sessions_updated_total.increment(1);
             tracing::info!(
                 session = %session,
                 tokens_len = watched_tokens_len,
@@ -70,7 +76,11 @@ impl SubscriptionManager {
 
         let tokens_len = tokens.len();
         let shutdown_token = self.shutdown_token.clone();
-        let subscription = Arc::new(Subscription::new(tokens, shutdown_token.child_token()));
+        let subscription = Arc::new(Subscription::new(
+            tokens,
+            shutdown_token.child_token(),
+            Arc::clone(&self.metrics),
+        ));
 
         let sub_with_counter = SubWithCounter {
             clients: 0,
@@ -83,8 +93,8 @@ impl SubscriptionManager {
             .await
             .insert(session, sub_with_counter);
 
-        counter!("sessions_created_total").increment(1);
-        gauge!("active_sessions").increment(1);
+        self.metrics.sessions_created_total.increment(1);
+        self.metrics.active_sessions.increment(1);
         tracing::info!(
             tokens_len = %tokens_len,
             session = %session,
@@ -113,8 +123,8 @@ impl SubscriptionManager {
             existing.idle_since = None;
             let receiver = existing.subscription.subscribe();
 
-            counter!("sse_connections_total").increment(1);
-            gauge!("sse_connections_active").increment(1);
+            self.metrics.sse_connections_total.increment(1);
+            self.metrics.sse_connections_active.increment(1);
             tracing::info!(
                 session = %session,
                 "sse connection created"
@@ -139,8 +149,8 @@ impl SubscriptionManager {
             if existing.clients == 0 {
                 existing.idle_since = Some(Instant::now());
 
-                counter!("sessions_expired_total").increment(1);
-                gauge!("sse_connections_active").decrement(1);
+                self.metrics.sessions_expired_total.increment(1);
+                self.metrics.sse_connections_active.decrement(1);
                 tracing::info!(
                     session = %session,
                     "session expired"
@@ -149,7 +159,7 @@ impl SubscriptionManager {
                 return Ok(true);
             }
 
-            gauge!("sse_connections_active").decrement(1);
+            self.metrics.sse_connections_active.decrement(1);
             tracing::info!(
                 session = %session,
                 "sse connection is closed"
@@ -210,8 +220,8 @@ impl SubscriptionManager {
 
             if should_remove {
                 sub.subscription.cancellable().cancel();
-                counter!("sessions_expired_total").increment(1);
-                gauge!("active_sessions").decrement(1);
+                self.metrics.sessions_expired_total.increment(1);
+                self.metrics.active_sessions.decrement(1);
                 tracing::info!(
                     session = %session,
                     "subscription cleanup"

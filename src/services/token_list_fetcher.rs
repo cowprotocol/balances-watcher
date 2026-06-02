@@ -2,7 +2,6 @@ use alloy::primitives::Address;
 use alloy::transports::BoxFuture;
 use backon::{ExponentialBuilder, Retryable};
 use futures::future::{try_join_all, FutureExt, Shared};
-use metrics::{counter, histogram};
 use reqwest::{Client, Response};
 use serde::Deserialize;
 use std::sync::Arc;
@@ -14,6 +13,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     domain::{EvmNetwork, Token},
+    metrics::Metrics,
     services::errors::FetcherError,
 };
 
@@ -40,6 +40,7 @@ pub struct TokenListFetcher {
     ttl: Duration,
     // backoff configuration
     backoff_cfg: ExponentialBuilder,
+    metrics: Arc<Metrics>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -48,13 +49,18 @@ struct ApiResponse {
 }
 
 impl TokenListFetcher {
-    pub fn new(cache_ttl: Duration, backoff_cfg: ExponentialBuilder) -> Self {
+    pub fn new(
+        cache_ttl: Duration,
+        backoff_cfg: ExponentialBuilder,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         Self {
             cache: RwLock::new(HashMap::new()),
             client: Client::new(),
             ttl: cache_ttl,
             fetch_tasks: Mutex::new(HashMap::new()),
             backoff_cfg,
+            metrics,
         }
     }
 
@@ -179,12 +185,15 @@ impl TokenListFetcher {
         url: &String,
     ) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
+        let metrics = Arc::clone(&self.metrics);
 
         self.fetch_with_backoff(client, url)
             .await
             .inspect(move |_| {
-                counter!("token_list_loaded_total").increment(1);
-                histogram!("token_list_loaded_time_in_ms").record(t0.elapsed().as_millis() as f64);
+                metrics.token_list_loaded_total.increment(1);
+                metrics
+                    .token_list_loaded_time_in_ms
+                    .record(t0.elapsed().as_millis() as f64);
                 tracing::info!(
                     time_ms = ?t0.elapsed().as_millis(),
                     url = ?url,
@@ -205,7 +214,7 @@ impl TokenListFetcher {
             .retry(self.backoff_cfg)
             .await
             .map_err(|err| {
-                counter!("token_list_load_failed_total").increment(1);
+                self.metrics.token_list_load_failed_total.increment(1);
                 FetcherError::UnableToLoadList(url.clone(), err.to_string())
             })?;
 
@@ -255,7 +264,11 @@ mod token_list_fetcher_tests {
             .with_max_times(BACK_OFFS as usize)
             .with_jitter();
 
-        Arc::new(TokenListFetcher::new(Duration::from_millis(300), back_off))
+        Arc::new(TokenListFetcher::new(
+            Duration::from_millis(300),
+            back_off,
+            Arc::new(Metrics::install()),
+        ))
     }
 
     #[tokio::test]

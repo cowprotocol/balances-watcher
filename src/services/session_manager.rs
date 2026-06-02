@@ -1,5 +1,6 @@
 use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
+use crate::metrics::Metrics;
 use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::cleanup_stream;
 use crate::services::errors::{FetcherError, SubscriptionError};
@@ -15,12 +16,11 @@ use axum::Json;
 use futures::stream;
 use futures::Stream;
 use futures::StreamExt;
-use metrics::{counter, histogram};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -47,6 +47,7 @@ pub struct SessionManager {
     token_limit: usize,
     // needed to track spawns for graceful shutdown
     task_tracker: TaskTracker,
+    metrics: Arc<Metrics>,
 }
 
 pub struct SessionContext {
@@ -102,17 +103,22 @@ impl SessionManager {
     pub fn new(
         multicall_fetcher: Arc<BalanceFetcher>,
         ws_connection_pool: Arc<WsConnectionPool>,
+        metrics: Arc<Metrics>,
         snapshot_interval: usize,
         token_limit: usize,
         task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
     ) -> Self {
-        let token_list_fetcher =
-            TokenListFetcher::new(TOKEN_LIST_CACHE_TTL, get_token_list_fetcher_backoff());
+        let token_list_fetcher = TokenListFetcher::new(
+            TOKEN_LIST_CACHE_TTL,
+            get_token_list_fetcher_backoff(),
+            Arc::clone(&metrics),
+        );
 
         let sub_manager = Arc::new(SubscriptionManager::new(
             task_tracker.clone(),
             shutdown_token,
+            Arc::clone(&metrics),
         ));
         Arc::clone(&sub_manager).spawn_cleanup();
 
@@ -124,31 +130,22 @@ impl SessionManager {
             snapshot_interval,
             token_limit,
             task_tracker,
+            metrics,
         }
     }
 
     pub async fn upsert(&self, ctx: SessionContext) -> Result<(), SessionError> {
         let session = ctx.session;
-        let upsert_start = Instant::now();
 
         // Single-network instance: the fetcher & ws pool are pre-bound. No
         // session-time lookup, no "provider not defined" branch.
         let provider = Arc::clone(&self.multicall_fetcher);
         let ws_pool = Arc::clone(&self.ws_connection_pool);
 
-        let t0 = Instant::now();
-        tracing::debug!(session = %session, "upsert: fetching tokens");
-
         let tokens = self
             .fetch_and_extend_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
 
-        let elapsed = t0.elapsed().as_millis() as f64;
-        histogram!("upsert_fetch_tokens_ms").record(elapsed);
-        tracing::debug!(session = %session, tokens_len = tokens.len(), time_ms = elapsed, "upsert: tokens fetched");
-
-        let t0 = Instant::now();
-        tracing::debug!(session = %session, "upsert: get_subscription");
         let subscription = self.sub_manager.get_subscription(session).await;
         // if the sub already exists - check if there are new tokens to watch and check limits
         let (updated_tokens, new_uniq_tokens) = if let Some(sub) = subscription {
@@ -166,11 +163,9 @@ impl SessionManager {
         } else {
             (tokens, None)
         };
-        let elapsed = t0.elapsed().as_millis() as f64;
-        histogram!("upsert_get_subscription_ms").record(elapsed);
 
         if updated_tokens.len() > self.token_limit {
-            counter!("tokens_limit_exceeded_total").increment(1);
+            self.metrics.tokens_limit_exceeded_total.increment(1);
             tracing::error!(
                 tokens_len = updated_tokens.len(),
                 "limit of watched tokens was exceeded",
@@ -181,18 +176,13 @@ impl SessionManager {
             ));
         }
 
-        let t0 = Instant::now();
-        tracing::debug!(session = %session, "upsert: sub_manager.upsert");
         let new_tokens = new_uniq_tokens.unwrap_or(updated_tokens);
         let sub = self.sub_manager.upsert(session, new_tokens).await;
-        let elapsed = t0.elapsed().as_millis() as f64;
-        histogram!("upsert_sub_manager_upsert_ms").record(elapsed);
 
         // if there aren't spawners yet - spawn them and create a first subscription
         let should_spawn_watchers = sub.try_mark_watchers_spawned();
 
         if should_spawn_watchers {
-            let t0 = Instant::now();
             tracing::info!(
                 session = %session,
                 "upsert: spawning watchers"
@@ -204,26 +194,16 @@ impl SessionManager {
                 provider,
                 Arc::clone(&sub),
                 ws_pool,
+                Arc::clone(&self.metrics),
             )
             .spawn_watchers(self.snapshot_interval)
             .await;
 
-            let elapsed = t0.elapsed().as_millis() as f64;
-            histogram!("upsert_spawn_watchers_ms").record(elapsed);
             tracing::info!(
                 session = %session,
-                time_ms = elapsed,
                 "upsert: watchers spawned"
             );
         }
-
-        let elapsed = upsert_start.elapsed().as_millis() as f64;
-        histogram!("upsert_total_ms").record(elapsed);
-        tracing::debug!(
-            session = %session,
-            time_ms = elapsed,
-            "upsert: done",
-        );
 
         Ok(())
     }
@@ -317,11 +297,13 @@ impl SessionManager {
         };
 
         let manager_for_cleanup = Arc::clone(&self.sub_manager);
+        let metrics = Arc::clone(&self.metrics);
 
-        let broadcast_stream = BroadcastStream::new(rx).filter_map(|result| async move {
-            match result {
-                Ok(event) => {
-                    let sse_event = match Self::balance_event_to_sse(event) {
+        let broadcast_stream = BroadcastStream::new(rx).filter_map(move |result| {
+            let metrics = Arc::clone(&metrics);
+            async move {
+                match result {
+                    Ok(event) => match Self::balance_event_to_sse(event) {
                         Ok(sse_event) => Some(Ok(sse_event)),
                         Err(err) => {
                             tracing::error!(
@@ -330,16 +312,15 @@ impl SessionManager {
                             );
                             None
                         }
-                    };
-                    sse_event
-                }
-                Err(err) => {
-                    counter!("broadcast_lagged_total").increment(1);
-                    tracing::error!(
-                        error = %err,
-                        "broadcast stream error",
-                    );
-                    None
+                    },
+                    Err(err) => {
+                        metrics.broadcast_lagged_total.increment(1);
+                        tracing::error!(
+                            error = %err,
+                            "broadcast stream error",
+                        );
+                        None
+                    }
                 }
             }
         });
