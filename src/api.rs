@@ -1,17 +1,3 @@
-//! HTTP boundary layer.
-//!
-//! This file plays two roles, mirroring the layout used by
-//! `cowprotocol/services` (e.g. `crates/orderbook/src/api.rs`):
-//!
-//! 1. **Umbrella module** for the per-endpoint files under `src/api/`
-//!    (declared via `mod` below).
-//! 2. **Router builder** — [`create_router`] wires endpoints, CORS, and the
-//!    metrics scrape endpoint into a single `axum::Router`.
-//!
-//! No business logic lives here; the umbrella exists purely to keep HTTP
-//! plumbing (router, middleware, extractors) co-located with the endpoint
-//! files it composes.
-
 mod create_session;
 mod create_sse_session;
 mod extractors;
