@@ -4,7 +4,15 @@ use axum::{extract::State, http::StatusCode};
 
 use crate::app_state::AppState;
 
-// todo implement proper check via rpc call
-pub async fn health_handler(State(_): State<Arc<AppState>>) -> StatusCode {
-    StatusCode::OK
+pub async fn health_handler(State(state): State<Arc<AppState>>) -> StatusCode {
+    match state.session_manager.healthcheck().await {
+        Ok(_) => StatusCode::OK,
+        Err(err) => {
+            tracing::error!(
+                error = %err,
+                "/health failed"
+            );
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+    }
 }

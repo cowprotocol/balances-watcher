@@ -2,7 +2,7 @@ use crate::config::constants::MAX_CLIENTS_PER_WS_CONNECTION;
 use crate::config::network_config::NetworkConfig;
 use crate::domain::EvmNetwork;
 use crate::metrics::Metrics;
-use crate::services::balance_fetcher::BalanceFetcher;
+use crate::services::rpc_client::RpcClient;
 use crate::services::session_manager::SessionManager;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::providers::{Provider, ProviderBuilder};
@@ -35,7 +35,7 @@ impl AppState {
 
         let http_url = network_config.alchemy_http_url(network);
         let http_provider = ProviderBuilder::new().connect(&http_url).await?.erased();
-        let balance_fetcher = Arc::new(BalanceFetcher::new(
+        let balance_fetcher = Arc::new(RpcClient::new(
             Arc::new(http_provider),
             network,
             Arc::clone(&metrics),

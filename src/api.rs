@@ -1,8 +1,8 @@
 mod create_session;
 mod create_sse_session;
 mod extractors;
-mod update_session;
 mod health;
+mod update_session;
 
 use crate::api::health::health_handler;
 use crate::app_state::AppState;

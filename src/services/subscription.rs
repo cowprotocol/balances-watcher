@@ -1,7 +1,7 @@
 use crate::config::constants::BROADCAST_CHANNEL_CAPACITY;
 use crate::domain::{BalanceEvent, Session};
 use crate::metrics::Metrics;
-use crate::services::balance_fetcher::BalancesWithBlock;
+use crate::services::rpc_client::BalancesWithBlock;
 use crate::services::subscription_manager::{Balance, BalanceSnapshot};
 use alloy::primitives::Address;
 use std::collections::{HashMap, HashSet};

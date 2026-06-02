@@ -1,9 +1,9 @@
 use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::metrics::Metrics;
-use crate::services::balance_fetcher::BalanceFetcher;
 use crate::services::cleanup_stream;
 use crate::services::errors::{FetcherError, SubscriptionError};
+use crate::services::rpc_client::{RpcClient, RpcError};
 use crate::services::subscription_manager::SubscriptionManager;
 use crate::services::token_list_fetcher::TokenListFetcher;
 use crate::services::watcher::Watcher;
@@ -38,7 +38,7 @@ const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 /// - bridge subscription events to SSE clients
 pub struct SessionManager {
     sub_manager: Arc<SubscriptionManager>,
-    multicall_fetcher: Arc<BalanceFetcher>,
+    multicall_fetcher: Arc<RpcClient>,
     ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
     // interval for multicall for the whole watched token list
@@ -101,7 +101,7 @@ pub enum SessionError {
 
 impl SessionManager {
     pub fn new(
-        multicall_fetcher: Arc<BalanceFetcher>,
+        multicall_fetcher: Arc<RpcClient>,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         snapshot_interval: usize,
@@ -249,6 +249,13 @@ impl SessionManager {
                 .event("error")
                 .json_data(ErrorEvent { code, message }),
         }
+    }
+
+    pub async fn healthcheck(&self) -> Result<(), RpcError> {
+        self.multicall_fetcher
+            .get_block_number()
+            .await
+            .map(|_| Ok(()))?
     }
 
     pub async fn create_sse_connection(
