@@ -3,13 +3,13 @@ use crate::domain::EvmNetwork;
 use crate::evm::erc20::ERC20;
 use crate::evm::multicall3::Multicall3;
 use crate::evm::multicall3::Multicall3::Multicall3Instance;
+use crate::metrics::Metrics;
 use crate::services::errors::ServiceError;
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, U256};
 use alloy::providers::DynProvider;
 use alloy::sol_types::{SolCall, SolValue};
 use backon::{ExponentialBuilder, Retryable};
-use metrics::{counter, histogram};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -26,14 +26,16 @@ pub struct BalanceFetcher {
     provider: Arc<DynProvider>,
     request_semaphore: tokio::sync::Semaphore,
     network: EvmNetwork,
+    metrics: Arc<Metrics>,
 }
 
 impl BalanceFetcher {
-    pub fn new(provider: Arc<DynProvider>, network: EvmNetwork) -> Self {
+    pub fn new(provider: Arc<DynProvider>, network: EvmNetwork, metrics: Arc<Metrics>) -> Self {
         Self {
             provider,
             request_semaphore: tokio::sync::Semaphore::new(MULTICALL_PERMITS_COUNT),
             network,
+            metrics,
         }
     }
 
@@ -72,17 +74,22 @@ impl BalanceFetcher {
         });
 
         let t0 = Instant::now();
-        counter!("multicall_total").increment(1);
+        self.metrics.multicall_total.increment(1);
 
         let call_result = {
             let _permit = self.request_semaphore.acquire().await;
-            Self::multicall_with_backoff(&multicall3, &calls, block_id)
+            let metrics = Arc::clone(&self.metrics);
+            self.multicall_with_backoff(&multicall3, &calls, block_id)
                 .await
                 .inspect(move |_| {
-                    histogram!("multicall_duration_ms").record(t0.elapsed().as_millis() as f64);
+                    metrics
+                        .multicall_duration_ms
+                        .record(t0.elapsed().as_millis() as f64);
                 })
                 .map_err(|e| {
-                    counter!("provider_exhausted_with_retries_total").increment(1);
+                    self.metrics
+                        .provider_exhausted_with_retries_total
+                        .increment(1);
                     ServiceError::BalancesMultiCallError(e.to_string())
                 })?
         };
@@ -149,11 +156,13 @@ impl BalanceFetcher {
     }
 
     async fn multicall_with_backoff(
+        &self,
         multicall3: &Multicall3Instance<Arc<DynProvider>>,
         calls: &[Multicall3::Call],
         block_id: BlockId,
     ) -> Result<Multicall3::tryBlockAndAggregateReturn, MulticallError> {
         let backoff = Self::backoff();
+        let metrics = Arc::clone(&self.metrics);
         (|| {
             let calls = calls.to_owned();
             let mc = multicall3.clone();
@@ -166,13 +175,13 @@ impl BalanceFetcher {
             }
         })
         .retry(backoff)
-        .notify(|err, duration| {
+        .notify(move |err, duration| {
             tracing::error!(
                 error = %err,
                 duration = ?duration,
                 "failed to execute multicall"
             );
-            counter!("multicall_failed_total").increment(1);
+            metrics.multicall_failed_total.increment(1);
         })
         .await
         .map_err(|_| MulticallError::ProviderExhausted)

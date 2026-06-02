@@ -1,9 +1,9 @@
 use crate::config::constants::BROADCAST_CHANNEL_CAPACITY;
 use crate::domain::{BalanceEvent, Session};
+use crate::metrics::Metrics;
 use crate::services::balance_fetcher::BalancesWithBlock;
 use crate::services::subscription_manager::{Balance, BalanceSnapshot};
 use alloy::primitives::Address;
-use metrics::counter;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -17,10 +17,15 @@ pub struct Subscription {
     watchers_spawned: AtomicBool,
     cancellation_token: CancellationToken,
     sync_notify: Arc<Notify>,
+    metrics: Arc<Metrics>,
 }
 
 impl Subscription {
-    pub fn new(tokens: HashSet<Address>, cancellation_token: CancellationToken) -> Self {
+    pub fn new(
+        tokens: HashSet<Address>,
+        cancellation_token: CancellationToken,
+        metrics: Arc<Metrics>,
+    ) -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
             // snapshot of all watched tokens
@@ -35,6 +40,7 @@ impl Subscription {
             sync_notify: Arc::new(Notify::new()),
             // send events to clients
             sender,
+            metrics,
         }
     }
 
@@ -76,7 +82,7 @@ impl Subscription {
     pub fn send_event(&self, event: BalanceEvent, session: Session) {
         match self.sender.send(event) {
             Ok(receivers) => {
-                counter!("balance_updates_sent_total").increment(1);
+                self.metrics.balance_updates_sent_total.increment(1);
                 tracing::info!(
                     session = %session,
                     receivers,

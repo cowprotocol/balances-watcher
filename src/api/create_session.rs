@@ -3,7 +3,6 @@ use axum::{
     extract::{Path, State},
     Json,
 };
-use metrics::histogram;
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -61,7 +60,7 @@ pub async fn create_session(
         .map_err(AppError::from);
 
     let elapsed = t0.elapsed().as_millis() as f64;
-    histogram!("create_session_duration_ms").record(elapsed);
+    state.metrics.create_session_duration_ms.record(elapsed);
     tracing::info!(session = %session, time_ms = elapsed, success = result.is_ok(), "handler: create_session END");
     result
 }
