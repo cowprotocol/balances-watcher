@@ -1,7 +1,6 @@
 /target
 **/*.rs.bk
 
-# VCS
 .git
 .gitignore
 
