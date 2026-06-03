@@ -1,3 +1,13 @@
+//! Loads ERC20 token lists over HTTP and exposes the set of token addresses
+//! for the active EVM network.
+//!
+//! [`TokenListFetcher`] is single-network: each instance is bound to one
+//! [`EvmNetwork`] and filters every fetched list down to that chain. Results
+//! are cached per URL via [`moka`] with a TTL, and concurrent fetches of the
+//! same URL are coalesced, so multiple subscriptions sharing one fetcher never
+//! trigger duplicate HTTP calls. Retries on transient HTTP failures are handled
+//! with exponential backoff ([`backon`]).
+
 use crate::{
     domain::{EvmNetwork, Token},
     metrics::Metrics,
@@ -28,7 +38,7 @@ pub struct TokenListFetcher {
     // backoff configuration
     backoff_cfg: ExponentialBuilder,
     metrics: Arc<Metrics>,
-    // acitve network, fetcher is single chain, so it should filter chains by active one
+    // active network; the fetcher is single-chain, so it filters lists by this one
     network: EvmNetwork,
 }
 
@@ -56,11 +66,17 @@ impl TokenListFetcher {
         }
     }
 
-    // this function incapsulate fetching and cache logic
-    // if the list was cached and ttl is valid - return cache result per url
-    // otherwise - fetch the token list and filter it by network
-    // if one of the fetching failed - throw err - it's expected, clients should get all requested
-    // tokens otherwise we can't relay on balance
+    /// Fetches the given token lists, filters them down to the fetcher's active
+    /// network and returns the union of all token addresses across the lists.
+    ///
+    /// Caching and in-flight de-duplication are delegated to [`moka`]: per-URL
+    /// results are cached with a TTL, and concurrent requests for the same URL
+    /// are coalesced into a single fetch.
+    ///
+    /// Fails fast: if any list fails to load (after retries), the whole call
+    /// returns an error. This is intentional — clients must receive every
+    /// requested token, otherwise we cannot rely on the reported balances.
+    /// A failed fetch is not cached, so a subsequent call retries it.
     pub async fn get_tokens(&self, urls: &[String]) -> Result<ChainTokens, FetcherError> {
         let token_lists_handlers = urls.iter().map(|url| {
             let url_clone = url.clone();
