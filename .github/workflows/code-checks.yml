@@ -10,8 +10,8 @@ jobs:
         name: Cargo test
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v5
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+            - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
             - run: cargo test --all-features
 
     audit:
@@ -22,8 +22,8 @@ jobs:
           contents: read
 
         steps:
-            - uses: actions/checkout@v5
-            - uses: rustsec/audit-check@v2
+            - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+            - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
               with:
                 token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -32,19 +32,19 @@ jobs:
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v5
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+            - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
               with:
                 components: clippy
             - run: cargo clippy --all-features --all-targets -- -D warnings
-              
+
     check-format:
         name: Rustfmt check
         runs-on: ubuntu-latest
 
         steps:
-            - uses: actions/checkout@v5
-            - uses: actions-rust-lang/setup-rust-toolchain@v1
+            - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+            - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
               with:
                 components: rustfmt
-            - uses: actions-rust-lang/rustfmt@v1
+            - uses: actions-rust-lang/rustfmt@4066006ec54a31931b9b1fddfd38f2fdf2d27143 # v1.1.2
