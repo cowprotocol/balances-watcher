@@ -66,13 +66,12 @@ jobs:
           exit-code: '1'
           format: table
 
-      - name: Resolve image tag for k8s manifests
+      - name: Resolve image ref for k8s manifests
         id: tag
         run: |
           REF=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n 1)
-          TAG="${REF##*:}"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-          echo "Deploying tag: $TAG"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "Deploying image: $REF"
 
       - name: Render manifests
         run: |
@@ -98,7 +97,7 @@ jobs:
 
           ls -la ./k8s-output/
         env:
-          IMAGE_TAG:       ${{ steps.tag.outputs.tag }}
+          IMAGE_REF:       ${{ steps.tag.outputs.ref }}
           RUST_LOG:        ${{ vars.RUST_LOG }}
           HTTP_BIND:       ${{ vars.HTTP_BIND }}
           ALLOWED_ORIGINS: ${{ vars.ALLOWED_ORIGINS }}
