@@ -7,5 +7,6 @@ pub mod subscription_manager;
 pub mod token_list_fetcher;
 pub mod watcher;
 
-pub mod balance_fetcher;
+pub mod rpc_client;
+
 pub mod ws_connection_pool;

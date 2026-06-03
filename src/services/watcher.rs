@@ -17,8 +17,8 @@ use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
 use crate::metrics::Metrics;
-use crate::services::balance_fetcher::{BalanceFetcher, BalancesWithBlock};
 use crate::services::calls_queue::{CallsQueue, QueueMessage};
+use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
 use crate::services::subscription::Subscription;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use crate::{
@@ -57,7 +57,7 @@ pub struct Watcher {
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
     calls_queue: Arc<CallsQueue>,
-    multicall_fetcher: Arc<BalanceFetcher>,
+    multicall_fetcher: Arc<RpcClient>,
     metrics: Arc<Metrics>,
     // accepts data from calls_queue
     rx: Receiver,
@@ -67,7 +67,7 @@ impl Watcher {
     pub fn new(
         task_tracker: TaskTracker,
         session: Session,
-        multicall_fetcher: Arc<BalanceFetcher>,
+        multicall_fetcher: Arc<RpcClient>,
         subscription: Arc<Subscription>,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
@@ -223,7 +223,7 @@ impl Watcher {
 
     // request all balances for a list of watched tokens via multicall and broadcast them to clients
     async fn fetch_balances_and_broadcast(
-        fetcher: Arc<BalanceFetcher>,
+        fetcher: Arc<RpcClient>,
         session: Session,
         sub: Arc<Subscription>,
     ) {
@@ -263,7 +263,7 @@ impl Watcher {
 
     // request balances via multicall for a list of tokens and map error
     async fn get_tokens_balance(
-        fetcher: Arc<BalanceFetcher>,
+        fetcher: Arc<RpcClient>,
         session: Session,
         tokens: &[Address],
         block_id: BlockId,

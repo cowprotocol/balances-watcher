@@ -24,7 +24,8 @@ RUN apt-get update && \
     apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
         ca-certificates \
-        libssl3 && \
+        libssl3 \
+        curl && \
     apt-get autoremove -y && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*

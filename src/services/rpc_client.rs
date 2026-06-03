@@ -6,8 +6,8 @@ use crate::evm::multicall3::Multicall3::Multicall3Instance;
 use crate::metrics::Metrics;
 use crate::services::errors::ServiceError;
 use alloy::eips::BlockId;
-use alloy::primitives::{Address, U256};
-use alloy::providers::DynProvider;
+use alloy::primitives::{Address, BlockNumber, U256};
+use alloy::providers::{DynProvider, Provider};
 use alloy::sol_types::{SolCall, SolValue};
 use backon::{ExponentialBuilder, Retryable};
 use std::collections::HashMap;
@@ -17,19 +17,21 @@ use std::time::{Duration, Instant};
 pub type BalancesWithBlock = (HashMap<Address, U256>, U256);
 
 #[derive(Debug, Clone, thiserror::Error)]
-pub enum MulticallError {
-    #[error("Provider exhausted with retries")]
-    ProviderExhausted,
+pub enum RpcError {
+    #[error("RPC call failed: {0}")]
+    Call(String),
+    #[error("Provider exhausted after retries: {0}")]
+    Exhausted(String),
 }
 
-pub struct BalanceFetcher {
+pub struct RpcClient {
     provider: Arc<DynProvider>,
     request_semaphore: tokio::sync::Semaphore,
     network: EvmNetwork,
     metrics: Arc<Metrics>,
 }
 
-impl BalanceFetcher {
+impl RpcClient {
     pub fn new(provider: Arc<DynProvider>, network: EvmNetwork, metrics: Arc<Metrics>) -> Self {
         Self {
             provider,
@@ -160,7 +162,7 @@ impl BalanceFetcher {
         multicall3: &Multicall3Instance<Arc<DynProvider>>,
         calls: &[Multicall3::Call],
         block_id: BlockId,
-    ) -> Result<Multicall3::tryBlockAndAggregateReturn, MulticallError> {
+    ) -> Result<Multicall3::tryBlockAndAggregateReturn, RpcError> {
         let backoff = Self::backoff();
         let metrics = Arc::clone(&self.metrics);
         (|| {
@@ -184,7 +186,7 @@ impl BalanceFetcher {
             metrics.multicall_failed_total.increment(1);
         })
         .await
-        .map_err(|_| MulticallError::ProviderExhausted)
+        .map_err(|err| RpcError::Exhausted(err.to_string()))
     }
 
     fn backoff() -> ExponentialBuilder {
@@ -193,5 +195,12 @@ impl BalanceFetcher {
             .with_max_delay(Duration::from_secs(10))
             .with_max_times(3)
             .with_jitter()
+    }
+
+    pub async fn get_block_number(&self) -> Result<BlockNumber, RpcError> {
+        self.provider
+            .get_block_number()
+            .await
+            .map_err(|err| RpcError::Call(err.to_string()))
     }
 }

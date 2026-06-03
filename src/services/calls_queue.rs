@@ -1,7 +1,7 @@
 use crate::config::constants::CALL_QUEUE_DELAY;
 use crate::domain::Session;
-use crate::services::balance_fetcher::{BalanceFetcher, BalancesWithBlock};
 use crate::services::errors::ServiceError;
+use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, BlockNumber};
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ struct QueueState {
 pub struct CallsQueue {
     task_tracker: TaskTracker,
     session: Session,
-    multicall_fetcher: Arc<BalanceFetcher>,
+    multicall_fetcher: Arc<RpcClient>,
     state: RwLock<QueueState>,
     tx: Arc<Sender>,
 }
@@ -43,7 +43,7 @@ impl CallsQueue {
     pub fn new(
         task_tracker: TaskTracker,
         session: Session,
-        multicall_fetcher: Arc<BalanceFetcher>,
+        multicall_fetcher: Arc<RpcClient>,
         tx: Sender,
     ) -> Self {
         Self {
