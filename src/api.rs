@@ -1,8 +1,10 @@
 mod create_session;
 mod create_sse_session;
 mod extractors;
+mod health;
 mod update_session;
 
+use crate::api::health::health_handler;
 use crate::app_state::AppState;
 use axum::routing::{get, post, put};
 use axum::Router;
@@ -50,6 +52,7 @@ pub fn create_router(
         .allow_headers(Any);
 
     Router::new()
+        .route("/health", get(health_handler))
         .route(
             "/metrics",
             get(move || async move { prometheus_handler.render() }),
