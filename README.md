@@ -28,16 +28,27 @@ ingress — see [Deployment model](#deployment-model).
 
 ## Supported chains
 
-`NETWORK` is set per instance to one of the chain ids below:
+`NETWORK` is set per instance to one of the chain ids below. The list matches
+the EVM chains supported by the CoW SDK (`@cowprotocol/sdk-config` → `EvmChains`).
 
 | Network | Chain id |
 |---------|----------|
 | Ethereum mainnet | `1` |
-| Arbitrum One | `42161` |
 | BNB Smart Chain | `56` |
 | Gnosis Chain | `100` |
 | Polygon | `137` |
+| Base | `8453` |
+| Plasma | `9745` |
+| Arbitrum One | `42161` |
+| Avalanche | `43114` |
+| Ink | `57073` |
+| Linea | `59144` |
 | Sepolia testnet | `11155111` |
+
+Alchemy is the upstream RPC for all of these (see Alchemy URL builder in
+`src/config/network_config.rs`). The service will eventually be migrated off
+Alchemy onto CoW's internal nodes — at that point the URL builder will switch
+to per-network env-driven endpoints.
 
 ## API
 
@@ -103,10 +114,26 @@ data: {"code":503,"message":"WebSocket connection lost permanently"}
 | `balance_update` | First message = full snapshot. All others = diffs only. Periodic snapshot refreshes also emit diffs. |
 | `error` | Terminal error (RPC exhausted, server shutting down, ...). Client should reconnect. |
 
+### `GET /health` — health probe
+
+Active synthetic probe. Calls `eth_blockNumber` on the HTTP RPC provider; returns
+`200 OK` if the upstream node responds, `503 Service Unavailable` otherwise.
+
+Used by Kubernetes `readinessProbe` + `livenessProbe`. No internal retries —
+transient failures are absorbed by `failureThreshold` at the probe level (see
+`.github/k8s/deployment.yaml`).
+
+```bash
+curl -i http://localhost:8080/health
+```
+
 ### `GET /metrics` — Prometheus
 
 Standard scrape endpoint, exposes counters / gauges / histograms for sessions,
 SSE connections, multicall latency, WS reconnects, broadcast lag, and more.
+All handles are pre-registered at startup via `src/metrics.rs` (typed
+`Counter` / `Gauge` / `Histogram` struct — no string-based macros at call
+sites).
 
 ### Error response shape
 
@@ -337,16 +364,18 @@ before any RPC roundtrip.
 
 ```
 src/
-├── main.rs                 entry point — args, tracing, AppState, axum::serve
-├── args.rs                 clap Args (env → typed)
-├── app_state.rs            owns BalanceFetcher + WsConnectionPool + SessionManager
+├── main.rs                 entry point — args, tracing, Metrics::install, AppState, axum::serve
+├── args.rs                 clap Args (env → typed; NETWORK parsed via EvmNetwork::FromStr)
+├── app_state.rs            owns Arc<SessionManager> + Arc<Metrics> + network
 ├── app_error.rs            HTTP error type (NotFound / BadRequest → JSON body)
+├── metrics.rs              typed Counter / Gauge / Histogram handles, pre-registered at startup
 │
 ├── api.rs                  umbrella: declares the handlers below, builds the Router
 ├── api/
 │   ├── create_session.rs   POST /{chain_id}/sessions/{owner}
 │   ├── update_session.rs   PUT  /{chain_id}/sessions/{owner}
 │   ├── create_sse_session.rs  GET /sse/{chain_id}/balances/{owner}
+│   ├── health.rs           GET /health — active probe via RpcClient::get_block_number
 │   └── extractors.rs       ChainId — validates {chain_id} against AppState::network
 │
 ├── config/
@@ -370,10 +399,10 @@ src/
 │   ├── session_manager.rs  per-network orchestrator: token lists, watchers, SSE bridge
 │   ├── subscription_manager.rs  session registry, shared subs, idle cleanup
 │   ├── subscription.rs     per-session state (snapshot, broadcast, watched set)
-│   ├── watcher.rs          spawns 4 background tasks per session
+│   ├── watcher.rs          spawns 5 background tasks per session (snapshot updater, 2× ERC20 listeners, WETH9, queue receiver)
 │   ├── calls_queue.rs      300 ms debounce + state machine
-│   ├── balance_fetcher.rs  multicall + semaphore + retry/backoff
-│   ├── ws_connection_pool.rs  shared Alchemy WS providers (max 300 subs each)
+│   ├── rpc_client.rs       HTTP RPC client: multicall (semaphore + retry) + healthcheck (get_block_number)
+│   ├── ws_connection_pool.rs  shared WS providers (max 300 subs each)
 │   ├── token_list_fetcher.rs  HTTP + cache + singleflight dedup
 │   ├── cleanup_stream.rs   Drop guard that unsubscribes when SSE stream is dropped
 │   └── errors.rs

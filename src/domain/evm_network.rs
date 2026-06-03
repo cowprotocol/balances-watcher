@@ -10,11 +10,16 @@ use std::{
 #[repr(u64)]
 pub enum EvmNetwork {
     Eth = 1,
-    Arbitrum = 42161,
-    Sepolia = 11155111,
     Bnb = 56,
     Gnosis = 100,
     Polygon = 137,
+    Base = 8453,
+    Plasma = 9745,
+    Arbitrum = 42161,
+    Avalanche = 43114,
+    Ink = 57073,
+    Linea = 59144,
+    Sepolia = 11155111,
 }
 
 impl EvmNetwork {
@@ -33,11 +38,16 @@ impl EvmNetwork {
     pub fn weth9_address(self) -> Address {
         match self {
             EvmNetwork::Eth => address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
-            EvmNetwork::Sepolia => address!("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"),
-            EvmNetwork::Arbitrum => address!("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
-            EvmNetwork::Gnosis => address!("0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"),
             EvmNetwork::Bnb => address!("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
+            EvmNetwork::Gnosis => address!("0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"),
             EvmNetwork::Polygon => address!("0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"),
+            EvmNetwork::Base => address!("0x4200000000000000000000000000000000000006"),
+            EvmNetwork::Plasma => address!("0x6100e367285b01f48d07953803a2d8dca5d19873"),
+            EvmNetwork::Arbitrum => address!("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+            EvmNetwork::Avalanche => address!("0xb31f66aa3c1e785363f0875a1b74e27b85fd66c7"),
+            EvmNetwork::Ink => address!("0x4200000000000000000000000000000000000006"),
+            EvmNetwork::Linea => address!("0xe5d7c2a44ffddf6b295a15c148167daaaf5cf34f"),
+            EvmNetwork::Sepolia => address!("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"),
         }
     }
 }
@@ -48,11 +58,16 @@ impl TryFrom<u64> for EvmNetwork {
     fn try_from(id: u64) -> Result<Self, EvmError> {
         match id {
             1 => Ok(EvmNetwork::Eth),
-            42161 => Ok(EvmNetwork::Arbitrum),
-            11155111 => Ok(EvmNetwork::Sepolia),
             56 => Ok(EvmNetwork::Bnb),
             100 => Ok(EvmNetwork::Gnosis),
             137 => Ok(EvmNetwork::Polygon),
+            8453 => Ok(EvmNetwork::Base),
+            9745 => Ok(EvmNetwork::Plasma),
+            42161 => Ok(EvmNetwork::Arbitrum),
+            43114 => Ok(EvmNetwork::Avalanche),
+            57073 => Ok(EvmNetwork::Ink),
+            59144 => Ok(EvmNetwork::Linea),
+            11155111 => Ok(EvmNetwork::Sepolia),
             _ => Err(EvmError::UnsupportedNetwork(id)),
         }
     }
