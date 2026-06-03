@@ -61,15 +61,16 @@ impl TokenListFetcher {
     // otherwise - fetch the token list and filter it by network
     // if one of the fetching failed - throw err - it's expected, clients should get all requested
     // tokens otherwise we can't relay on balance
-    pub async fn get_tokens(self: Arc<Self>, urls: &[String]) -> Result<ChainTokens, FetcherError> {
+    pub async fn get_tokens(&self, urls: &[String]) -> Result<ChainTokens, FetcherError> {
         let token_lists_handlers = urls.iter().map(|url| {
             let url_clone = url.clone();
-            let this = Arc::clone(&self);
-            let cache = this.cache.clone();
 
             async move {
-                cache
-                    .try_get_with(url.into(), this.fetch_list_and_filter_by_chain(&url_clone))
+                self.cache
+                    .try_get_with(
+                        url_clone.clone(),
+                        self.fetch_list_and_filter_by_chain(&url_clone),
+                    )
                     .await
             }
         });
@@ -82,10 +83,7 @@ impl TokenListFetcher {
         Ok(tokens.collect())
     }
 
-    async fn fetch_list_and_filter_by_chain(
-        self: Arc<Self>,
-        url: &str,
-    ) -> Result<ChainTokens, FetcherError> {
+    async fn fetch_list_and_filter_by_chain(&self, url: &str) -> Result<ChainTokens, FetcherError> {
         let network = self.network;
         let token_set = self
             .fetch_list(url)
@@ -103,7 +101,7 @@ impl TokenListFetcher {
         Ok(token_set.collect())
     }
 
-    async fn fetch_list(self: Arc<Self>, url: &str) -> Result<ApiResponse, FetcherError> {
+    async fn fetch_list(&self, url: &str) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
         let metrics = Arc::clone(&self.metrics);
 
