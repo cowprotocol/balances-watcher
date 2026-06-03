@@ -56,11 +56,16 @@ impl NetworkConfig {
     fn network_subdomain(network: EvmNetwork) -> &'static str {
         match network {
             EvmNetwork::Eth => "eth-mainnet",
-            EvmNetwork::Arbitrum => "arb-mainnet",
-            EvmNetwork::Sepolia => "eth-sepolia",
             EvmNetwork::Bnb => "bnb-mainnet",
-            EvmNetwork::Polygon => "polygon-mainnet",
             EvmNetwork::Gnosis => "gnosis-mainnet",
+            EvmNetwork::Polygon => "polygon-mainnet",
+            EvmNetwork::Base => "base-mainnet",
+            EvmNetwork::Plasma => "plasma-mainnet",
+            EvmNetwork::Arbitrum => "arb-mainnet",
+            EvmNetwork::Avalanche => "avax-mainnet",
+            EvmNetwork::Ink => "ink-mainnet",
+            EvmNetwork::Linea => "linea-mainnet",
+            EvmNetwork::Sepolia => "eth-sepolia",
         }
     }
 
