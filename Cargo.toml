@@ -13,7 +13,7 @@ tokio-stream = "0.1"
 clap = { version = "4.6.1", features = ["env", "derive"] }
 alloy = { version = "2.0.4", features = ["provider-ws", "getrandom"] }
 thiserror = "2.0.18"
-tracing = "0.1.43"
+tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
 tower-http = { version = "0.6", features = ["cors"] }
@@ -21,8 +21,9 @@ tower-http = { version = "0.6", features = ["cors"] }
 metrics = "0.24.5"
 metrics-exporter-prometheus = "0.18.3"
 rustls = { version = "0.23.40", features = ["ring"], default-features = false }
-backon = "1"
+backon = "1.6.0"
 uuid = { version = "1.23.1", features = ["v4"] }
+moka = { version = "0.12.15", features = ["future"] }
 
 [dev-dependencies]
 wiremock = "0.6.5"

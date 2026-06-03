@@ -1,46 +1,35 @@
-use alloy::primitives::Address;
-use alloy::transports::BoxFuture;
-use backon::{ExponentialBuilder, Retryable};
-use futures::future::{try_join_all, FutureExt, Shared};
-use reqwest::{Client, Response};
-use serde::Deserialize;
-use std::sync::Arc;
-use std::{
-    collections::{HashMap, HashSet},
-    time::{Duration, Instant},
-};
-use tokio::sync::{Mutex, RwLock};
-
 use crate::{
     domain::{EvmNetwork, Token},
     metrics::Metrics,
     services::errors::FetcherError,
 };
+use alloy::primitives::Address;
+use backon::{ExponentialBuilder, Retryable};
+use futures::future::try_join_all;
+use moka::future::Cache;
+use reqwest::{Client, Response};
+use serde::Deserialize;
+use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    time::{Duration, Instant},
+};
 
-type SharedFetchTask = Shared<BoxFuture<'static, Result<(), FetcherError>>>;
+const CACHE_CAPACITY: u64 = 256;
 
 type ListUrl = String;
 
-// need to load token lists and save them to cache
-struct CachedTokenList {
-    fetched_at: Instant,
-    // a list can have tokens from multiple chains, so we need to map them
-    list: HashMap<u64, HashSet<Address>>,
-}
+type ChainTokens = HashSet<Address>;
 
 pub struct TokenListFetcher {
-    // store cached lists by url
-    cache: RwLock<HashMap<ListUrl, CachedTokenList>>,
-    // store already fetched futures, need to share them between few requests with the same token lists
-    // to not load them, if they are already in flight
-    fetch_tasks: Mutex<HashMap<ListUrl, SharedFetchTask>>,
+    cache: Cache<ListUrl, ChainTokens>,
     // http client
     client: Client,
-    // cache duration
-    ttl: Duration,
     // backoff configuration
     backoff_cfg: ExponentialBuilder,
     metrics: Arc<Metrics>,
+    // acitve network, fetcher is single chain, so it should filter chains by active one
+    network: EvmNetwork,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,148 +42,79 @@ impl TokenListFetcher {
         cache_ttl: Duration,
         backoff_cfg: ExponentialBuilder,
         metrics: Arc<Metrics>,
+        network: EvmNetwork,
     ) -> Self {
         Self {
-            cache: RwLock::new(HashMap::new()),
+            cache: Cache::builder()
+                .time_to_live(cache_ttl)
+                .max_capacity(CACHE_CAPACITY)
+                .build(),
             client: Client::new(),
-            ttl: cache_ttl,
-            fetch_tasks: Mutex::new(HashMap::new()),
             backoff_cfg,
             metrics,
+            network,
         }
     }
 
     // this function incapsulate fetching and cache logic
     // if the list was cached and ttl is valid - return cache result per url
-    // otherwise - share or create a new future(if it doesnt exist) to fetch the list and share the result
-    pub async fn get_tokens(
-        self: Arc<Self>,
-        urls: &[String],
-        network: EvmNetwork,
-    ) -> Result<HashSet<Address>, FetcherError> {
-        Arc::clone(&self).fetch_uncached(urls).await?;
-        let tokens = self.get_cached(urls, network).await;
-        Ok(tokens)
-    }
-
-    // get cached token lists and filter them by network
-    async fn get_cached(&self, urls: &[String], network: EvmNetwork) -> HashSet<Address> {
-        let cache = self.cache.read().await;
-        urls.iter()
-            .filter_map(|url| cache.get(url))
-            .filter_map(|cached_by_chain_id| cached_by_chain_id.list.get(&network.chain_id()))
-            .flatten()
-            .copied()
-            .collect()
-    }
-
-    async fn fetch_uncached(self: Arc<Self>, urls: &[String]) -> Result<(), FetcherError> {
-        let uncached = self.get_uncached(urls).await;
-
-        let fetch_tasks_iter = uncached.into_iter().map(|url| {
+    // otherwise - fetch the token list and filter it by network
+    // if one of the fetching failed - throw err - it's expected, clients should get all requested
+    // tokens otherwise we can't relay on balance
+    pub async fn get_tokens(self: Arc<Self>, urls: &[String]) -> Result<ChainTokens, FetcherError> {
+        let token_lists_handlers = urls.iter().map(|url| {
+            let url_clone = url.clone();
             let this = Arc::clone(&self);
-            this.fetch_and_update_cache(url)
+            let cache = this.cache.clone();
+
+            async move {
+                cache
+                    .try_get_with(url.into(), this.fetch_list_and_filter_by_chain(&url_clone))
+                    .await
+            }
         });
 
-        try_join_all(fetch_tasks_iter).await?;
-        Ok(())
+        let tokens = try_join_all(token_lists_handlers)
+            .await
+            .map_err(|err| (*err).clone())?
+            .into_iter()
+            .flatten();
+        Ok(tokens.collect())
     }
 
-    // check if urls were already cached
-    // returns a list of uncached urls (if the url is not in the cache or the cache is invalid)
-    async fn get_uncached<'a>(&self, urls: &'a [String]) -> Vec<&'a String> {
-        let cache = self.cache.read().await;
-
-        urls.iter()
-            .filter(|url| {
-                cache
-                    .get(*url)
-                    .is_none_or(|cached| cached.fetched_at.elapsed() > self.ttl)
-            })
-            .collect()
-    }
-
-    // check if the future to fetch token list was already created
-    // if it was - just clone it, otherwise - create a new one
-    // new future fetch data and store it in cache directly to avoid deduplication
-    async fn fetch_and_update_cache(self: Arc<Self>, url: &String) -> Result<(), FetcherError> {
-        let fetch_future = {
-            let mut fetch_guard = self.fetch_tasks.lock().await;
-            if let Some(future) = fetch_guard.get(url) {
-                future.clone()
-            } else {
-                let client = self.client.clone();
-                let url_cloned = url.clone();
-                let this = Arc::clone(&self);
-
-                let new_future = async move {
-                    // fetch data and update cache
-                    let response = Arc::clone(&this).fetch_list(&client, &url_cloned).await?;
-
-                    this.store_response_in_cache(url_cloned, response).await;
-
-                    Ok(())
-                }
-                .boxed()
-                .shared();
-
-                fetch_guard.insert(url.clone(), new_future.clone());
-                new_future
-            }
-        };
-
-        let result = fetch_future.await;
-        self.remove_fetch_task_if_resolved(url).await;
-
-        result
-    }
-
-    // check if the fetch task was already resolved
-    // if it was - removed it, otherwise - does nothing
-    // it's needed to protect removing task from new caller that wasn't resolved yet
-    async fn remove_fetch_task_if_resolved(&self, url: &String) {
-        let mut fetch_tasks_guard = self.fetch_tasks.lock().await;
-        if let Some(task) = fetch_tasks_guard.get(url) {
-            if task.peek().is_some() {
-                fetch_tasks_guard.remove(url);
-            }
-        }
-    }
-
-    // map response into CachedTokenList and save
-    async fn store_response_in_cache(&self, url: String, response: ApiResponse) {
-        let mut mapped_by_chain_id: HashMap<u64, HashSet<Address>> = HashMap::new();
-        for token in response.tokens {
-            mapped_by_chain_id
-                .entry(token.chain_id)
-                .or_default()
-                .insert(token.address);
-        }
-
-        let cached = CachedTokenList {
-            list: mapped_by_chain_id,
-            fetched_at: Instant::now(),
-        };
-
-        self.cache.write().await.insert(url, cached);
-    }
-
-    async fn fetch_list(
+    async fn fetch_list_and_filter_by_chain(
         self: Arc<Self>,
-        client: &Client,
-        url: &String,
-    ) -> Result<ApiResponse, FetcherError> {
+        url: &str,
+    ) -> Result<ChainTokens, FetcherError> {
+        let network = self.network;
+        let token_set = self
+            .fetch_list(url)
+            .await?
+            .tokens
+            .into_iter()
+            .filter_map(|token| {
+                if token.chain_id == network.chain_id() {
+                    Some(token.address)
+                } else {
+                    None
+                }
+            });
+
+        Ok(token_set.collect())
+    }
+
+    async fn fetch_list(self: Arc<Self>, url: &str) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
         let metrics = Arc::clone(&self.metrics);
 
-        self.fetch_with_backoff(client, url)
+        self.fetch_with_backoff(url)
             .await
             .inspect(move |_| {
                 metrics.token_list_loaded_total.increment(1);
                 metrics
                     .token_list_loaded_time_in_ms
                     .record(t0.elapsed().as_millis() as f64);
-                tracing::info!(
+                tracing::debug!(
                     time_ms = ?t0.elapsed().as_millis(),
                     url = ?url,
                     "token list loaded"
@@ -202,20 +122,16 @@ impl TokenListFetcher {
             })?
             .json()
             .await
-            .map_err(|err| FetcherError::UnableToLoadList(url.clone(), err.to_string()))
+            .map_err(|err| FetcherError::UnableToLoadList(url.into(), err.to_string()))
     }
 
-    async fn fetch_with_backoff(
-        &self,
-        client: &Client,
-        url: &String,
-    ) -> Result<Response, FetcherError> {
-        let resp = (|| async { client.get(url).send().await?.error_for_status() })
+    async fn fetch_with_backoff(&self, url: &str) -> Result<Response, FetcherError> {
+        let resp = (|| async { self.client.get(url).send().await?.error_for_status() })
             .retry(self.backoff_cfg)
             .await
             .map_err(|err| {
                 self.metrics.token_list_load_failed_total.increment(1);
-                FetcherError::UnableToLoadList(url.clone(), err.to_string())
+                FetcherError::UnableToLoadList(url.into(), err.to_string())
             })?;
 
         Ok(resp)
@@ -224,8 +140,6 @@ impl TokenListFetcher {
 
 #[cfg(test)]
 mod token_list_fetcher_tests {
-    use std::thread::sleep;
-
     use super::*;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -268,6 +182,7 @@ mod token_list_fetcher_tests {
             Duration::from_millis(300),
             back_off,
             Arc::new(Metrics::install()),
+            EvmNetwork::Eth,
         ))
     }
 
@@ -284,9 +199,7 @@ mod token_list_fetcher_tests {
             .await;
 
         let fetcher = make_fetcher();
-        let result = Arc::clone(&fetcher)
-            .get_tokens(&[server.uri()], EvmNetwork::Eth)
-            .await;
+        let result = Arc::clone(&fetcher).get_tokens(&[server.uri()]).await;
 
         assert!(result.is_err());
     }
@@ -306,9 +219,7 @@ mod token_list_fetcher_tests {
             .await;
 
         let fetcher = make_fetcher();
-        let result = Arc::clone(&fetcher)
-            .get_tokens(&[server.uri()], EvmNetwork::Eth)
-            .await;
+        let result = Arc::clone(&fetcher).get_tokens(&[server.uri()]).await;
 
         assert!(result.is_err());
 
@@ -321,9 +232,7 @@ mod token_list_fetcher_tests {
             .mount(&server)
             .await;
 
-        let response = Arc::clone(&fetcher)
-            .get_tokens(&[server.uri()], EvmNetwork::Eth)
-            .await;
+        let response = Arc::clone(&fetcher).get_tokens(&[server.uri()]).await;
         assert!(response.is_ok());
     }
 
@@ -354,25 +263,25 @@ mod token_list_fetcher_tests {
         let fetcher = make_fetcher();
         // warm up cache
         let _ = Arc::clone(&fetcher)
-            .get_tokens(&[server.uri()], EvmNetwork::Gnosis)
+            .get_tokens(&[server.uri()])
             .await
             .unwrap();
 
         // cache is still valid
-        sleep(Duration::from_millis(100));
+        tokio::time::sleep(Duration::from_millis(100)).await;
 
         let tokens = Arc::clone(&fetcher)
-            .get_tokens(&[server.uri()], network)
+            .get_tokens(&[server.uri()])
             .await
             .unwrap();
 
         assert_eq!(expected_list_by_chain, tokens);
 
         // invalidate cache
-        sleep(Duration::from_millis(200));
+        tokio::time::sleep(Duration::from_millis(200)).await;
 
         let tokens = Arc::clone(&fetcher)
-            .get_tokens(&[server.uri()], network)
+            .get_tokens(&[server.uri()])
             .await
             .unwrap();
 
@@ -383,7 +292,6 @@ mod token_list_fetcher_tests {
     async fn test_concurrent_request_deduplication() {
         let server = MockServer::start().await;
         let token_list = make_token_list(vec![1, 2, 100], 3);
-        let network = EvmNetwork::Eth;
 
         let resp_template = make_token_list_resp_template(token_list.clone());
         Mock::given(method("GET"))
@@ -398,7 +306,7 @@ mod token_list_fetcher_tests {
             .map(|_| {
                 let urls = [server.uri()];
                 let fetcher = Arc::clone(&fetcher);
-                tokio::spawn(async move { fetcher.get_tokens(&urls, network).await })
+                tokio::spawn(async move { fetcher.get_tokens(&urls).await })
             })
             .collect();
 

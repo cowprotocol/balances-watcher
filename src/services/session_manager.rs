@@ -27,6 +27,15 @@ use tokio_util::task::TaskTracker;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
+pub struct SessionConfig {
+    // interval for multicall for the whole watched token list
+    pub snapshot_interval: usize,
+    // how many tokens we watch regarding session
+    pub token_limit: usize,
+    // network that manager handles
+    pub active_network: EvmNetwork,
+}
+
 /// Per-network session orchestrator.
 ///
 /// One `SessionManager` exists per process — the service is single-network, so
@@ -41,13 +50,9 @@ pub struct SessionManager {
     multicall_fetcher: Arc<RpcClient>,
     ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
-    // interval for multicall for the whole watched token list
-    snapshot_interval: usize,
-    // how many tokens we can watch regarding session
-    token_limit: usize,
-    // needed to track spawns for graceful shutdown
     task_tracker: TaskTracker,
     metrics: Arc<Metrics>,
+    config: SessionConfig,
 }
 
 pub struct SessionContext {
@@ -104,15 +109,15 @@ impl SessionManager {
         multicall_fetcher: Arc<RpcClient>,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
-        snapshot_interval: usize,
-        token_limit: usize,
         task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
+        config: SessionConfig,
     ) -> Self {
         let token_list_fetcher = TokenListFetcher::new(
             TOKEN_LIST_CACHE_TTL,
             get_token_list_fetcher_backoff(),
             Arc::clone(&metrics),
+            config.active_network,
         );
 
         let sub_manager = Arc::new(SubscriptionManager::new(
@@ -127,10 +132,9 @@ impl SessionManager {
             ws_connection_pool,
             fetcher: Arc::new(token_list_fetcher),
             multicall_fetcher,
-            snapshot_interval,
-            token_limit,
             task_tracker,
             metrics,
+            config,
         }
     }
 
@@ -164,7 +168,7 @@ impl SessionManager {
             (tokens, None)
         };
 
-        if updated_tokens.len() > self.token_limit {
+        if updated_tokens.len() > self.config.token_limit {
             self.metrics.tokens_limit_exceeded_total.increment(1);
             tracing::error!(
                 tokens_len = updated_tokens.len(),
@@ -172,7 +176,7 @@ impl SessionManager {
             );
             return Err(SessionError::TokenLimitExceeded(
                 updated_tokens.len(),
-                self.token_limit,
+                self.config.token_limit,
             ));
         }
 
@@ -196,7 +200,7 @@ impl SessionManager {
                 ws_pool,
                 Arc::clone(&self.metrics),
             )
-            .spawn_watchers(self.snapshot_interval)
+            .spawn_watchers(self.config.snapshot_interval)
             .await;
 
             tracing::info!(
@@ -218,7 +222,7 @@ impl SessionManager {
         let token_list_fetcher = Arc::clone(&self.fetcher);
 
         let mut tokens = token_list_fetcher
-            .get_tokens(&token_lists_urls, session.network)
+            .get_tokens(&token_lists_urls)
             .await
             .map_err(|err| match err {
                 FetcherError::UnableToLoadList(url, _) => SessionError::TokenListNotFound(url),
