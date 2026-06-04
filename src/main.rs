@@ -32,10 +32,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_tracing();
 
     let cfg = Args::from_env();
-    if cfg.alchemy_api_key.is_empty() {
-        return Err("ALCHEMY_API_KEY is required".into());
-    }
-
     let network_cfg = NetworkConfig::from_args(&cfg);
 
     ::tracing::info!(

@@ -12,8 +12,13 @@ pub struct Args {
     #[arg(long, env = "NETWORK")]
     pub network: EvmNetwork,
 
-    #[arg(long, env = "ALCHEMY_API_KEY", default_value = "")]
-    pub alchemy_api_key: String,
+    /// RPC HTTP endpoint (e.g. `http://mainnet-proxy.rpc-nodes.svc.cluster.local`).
+    #[arg(long, env = "RPC_HTTP_URL")]
+    pub rpc_http_url: String,
+
+    /// RPC WebSocket endpoint (e.g. `ws://mainnet-proxy.rpc-nodes.svc.cluster.local`).
+    #[arg(long, env = "RPC_WS_URL")]
+    pub rpc_ws_url: String,
 
     #[arg(long, env="TOKEN_LIST_PATH", default_value=DEFAULT_TOKEN_LIST_PATH)]
     pub token_list_path: String,

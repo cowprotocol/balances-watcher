@@ -4,9 +4,10 @@ use crate::domain::EvmNetwork;
 
 #[derive(Debug)]
 pub struct NetworkConfig {
-    api_key: String,
     /// The single EVM network this instance serves. Set via `NETWORK` env (chain id).
     pub network: EvmNetwork,
+    pub rpc_http_url: String,
+    pub rpc_ws_url: String,
     pub snapshot_interval: usize,
     pub max_watched_tokens_limit: usize,
     pub allowed_origins: Vec<String>,
@@ -45,37 +46,12 @@ impl NetworkConfig {
         );
 
         Self {
-            api_key: args.alchemy_api_key.clone(),
             network: args.network,
+            rpc_http_url: args.rpc_http_url.clone(),
+            rpc_ws_url: args.rpc_ws_url.clone(),
             snapshot_interval,
             max_watched_tokens_limit,
             allowed_origins,
         }
-    }
-
-    fn network_subdomain(network: EvmNetwork) -> &'static str {
-        match network {
-            EvmNetwork::Eth => "eth-mainnet",
-            EvmNetwork::Bnb => "bnb-mainnet",
-            EvmNetwork::Gnosis => "gnosis-mainnet",
-            EvmNetwork::Polygon => "polygon-mainnet",
-            EvmNetwork::Base => "base-mainnet",
-            EvmNetwork::Plasma => "plasma-mainnet",
-            EvmNetwork::Arbitrum => "arb-mainnet",
-            EvmNetwork::Avalanche => "avax-mainnet",
-            EvmNetwork::Ink => "ink-mainnet",
-            EvmNetwork::Linea => "linea-mainnet",
-            EvmNetwork::Sepolia => "eth-sepolia",
-        }
-    }
-
-    pub fn alchemy_http_url(&self, network: EvmNetwork) -> String {
-        let subdomain = Self::network_subdomain(network);
-        format!("https://{}.g.alchemy.com/v2/{}", subdomain, self.api_key)
-    }
-
-    pub fn alchemy_ws_url(&self, network: EvmNetwork) -> String {
-        let subdomain = Self::network_subdomain(network);
-        format!("wss://{}.g.alchemy.com/v2/{}", subdomain, self.api_key)
     }
 }
