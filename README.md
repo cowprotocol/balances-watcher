@@ -282,6 +282,14 @@ Docker images are built and pushed to GHCR by `.github/workflows/build-image.yml
 on push to `main` or on semver tags (`vX.Y.Z`). Flux picks up new image tags
 from `ghcr.io/cowprotocol/balances-watcher`.
 
+### Releases
+
+Versioning is fully automatic. Every merge to `main` triggers the `release` job
+which bumps the minor version from the latest git tag (`v0.1.0` → `v0.2.0` → …)
+and pushes the new tag. The tag push re-triggers the build pipeline, producing
+a GHCR image tagged with the semver version (`v0.2.0`, `0.2`) alongside `sha-xxx`
+and `latest`.
+
 ### docker-compose (local dev)
 
 `docker-compose.yml` mirrors the production layout: one Traefik service in front
