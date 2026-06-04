@@ -10,7 +10,6 @@ pub struct NetworkConfig {
     pub rpc_ws_url: String,
     pub snapshot_interval: usize,
     pub max_watched_tokens_limit: usize,
-    pub allowed_origins: Vec<String>,
 }
 
 impl NetworkConfig {
@@ -32,16 +31,8 @@ impl NetworkConfig {
             })
             .unwrap_or(DEFAULT_MAX_WATCHED_TOKENS_LIMIT);
 
-        let allowed_origins: Vec<String> = args
-            .allowed_origins
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
         tracing::info!(
             network = %args.network,
-            origins = %allowed_origins.join(", "),
             "network config initialised",
         );
 
@@ -51,7 +42,6 @@ impl NetworkConfig {
             rpc_ws_url: args.rpc_ws_url.clone(),
             snapshot_interval,
             max_watched_tokens_limit,
-            allowed_origins,
         }
     }
 }
