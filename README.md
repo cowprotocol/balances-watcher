@@ -45,10 +45,10 @@ the EVM chains supported by the CoW SDK (`@cowprotocol/sdk-config` → `EvmChain
 | Linea | `59144` |
 | Sepolia testnet | `11155111` |
 
-Alchemy is the upstream RPC for all of these (see Alchemy URL builder in
-`src/config/network_config.rs`). The service will eventually be migrated off
-Alchemy onto CoW's internal nodes — at that point the URL builder will switch
-to per-network env-driven endpoints.
+RPC endpoints are configured per instance via `RPC_HTTP_URL` and `RPC_WS_URL`
+environment variables. In production (CoW infrastructure), these point to
+cluster-local RPC proxies (e.g. `http://mainnet-proxy.rpc-nodes.svc.cluster.local`).
+For local development, any RPC provider (Alchemy, Infura, etc.) can be used.
 
 ## API
 
@@ -211,7 +211,7 @@ flowchart TB
         FL["flush() → process_batch()"]
     end
 
-    subgraph Blockchain["Alchemy"]
+    subgraph Blockchain["RPC Provider"]
         WS["WebSocket provider<br/>log subscriptions<br/>+ pool + auto-reconnect"]
         HTTP["HTTP provider<br/>multicall reads<br/>+ semaphore + backoff"]
         MC["Multicall3<br/>tryBlockAndAggregate"]
@@ -266,10 +266,10 @@ flowchart TB
 Each chain runs as its own process. Benefits over the old multi-chain-in-one-process
 model:
 
-- **Fault isolation** — a Polygon hardfork or Alchemy outage on one chain can't
+- **Fault isolation** — a Polygon hardfork or RPC outage on one chain can't
   exhaust resources or fail readiness on the others.
 - **Independent rollouts** — version one chain at a time.
-- **Per-chain config** — separate Alchemy keys, rate-limit tiers, resource
+- **Per-chain config** — separate RPC endpoints, rate-limit tiers, resource
   requests, Prometheus pod labels.
 
 ### Kubernetes (production)
@@ -292,8 +292,9 @@ of `balances-watcher-eth`, `-arb`, `-sepolia`. All three reachable through a
 single host port (`localhost:4000`) using the same URL shape as production.
 
 ```bash
-# All required env in .env (ALCHEMY_API_KEY=...). NETWORK is set per service in
-# the compose file, no need to export it.
+# RPC URLs are set per service in docker-compose.yml.
+# By default they fall back to Alchemy via ALCHEMY_API_KEY from .env.
+# Override per chain: ETH_RPC_HTTP_URL, ARB_RPC_HTTP_URL, etc.
 docker-compose up -d --build
 
 # Traefik dashboard for routing introspection
@@ -308,7 +309,8 @@ curl -N      http://localhost:4000/sse/1/balances/0xd8dA...
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `NETWORK` | **Required.** Chain id this instance serves. Validated at args-parse time via `EvmNetwork::FromStr`. | — |
-| `ALCHEMY_API_KEY` | **Required.** Alchemy API key (HTTP + WS endpoints derived per chain). | — |
+| `RPC_HTTP_URL` | **Required.** HTTP RPC endpoint (e.g. `https://eth-mainnet.g.alchemy.com/v2/KEY` or `http://mainnet-proxy.rpc-nodes.svc.cluster.local`). | — |
+| `RPC_WS_URL` | **Required.** WebSocket RPC endpoint (e.g. `wss://eth-mainnet.g.alchemy.com/v2/KEY` or `ws://mainnet-proxy.rpc-nodes.svc.cluster.local`). | — |
 | `HTTP_BIND` | Bind address. | `0.0.0.0:8080` |
 | `SNAPSHOT_INTERVAL` | Full multicall refresh interval, seconds. | `60` |
 | `MAX_WATCHED_TOKENS_LIMIT` | Max tokens per session. | `1500` |
@@ -320,8 +322,9 @@ curl -N      http://localhost:4000/sse/1/balances/0xd8dA...
 ### `cargo run`
 
 ```bash
-export ALCHEMY_API_KEY=your_alchemy_key
-export NETWORK=1   # Ethereum mainnet
+export NETWORK=1
+export RPC_HTTP_URL=https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+export RPC_WS_URL=wss://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
 
 cargo run --release
 ```
@@ -329,7 +332,8 @@ cargo run --release
 ### docker-compose
 
 ```bash
-# put ALCHEMY_API_KEY=... in .env
+# put ALCHEMY_API_KEY=... in .env (used as fallback in compose per-chain URLs)
+# or set per-chain vars directly: ETH_RPC_HTTP_URL, ETH_RPC_WS_URL, etc.
 docker-compose up -d --build
 docker-compose logs -f
 ```
@@ -380,7 +384,7 @@ src/
 │
 ├── config/
 │   ├── constants.rs        compile-time tunables
-│   ├── network_config.rs   NetworkConfig::from_args + Alchemy URL builders
+│   ├── network_config.rs   NetworkConfig::from_args (RPC URLs from env)
 │   └── back_off_config.rs  backon::ExponentialBuilder presets
 │
 ├── domain/

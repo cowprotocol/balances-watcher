@@ -33,8 +33,10 @@ impl AppState {
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let network = network_config.network;
 
-        let http_url = network_config.alchemy_http_url(network);
-        let http_provider = ProviderBuilder::new().connect(&http_url).await?.erased();
+        let http_provider = ProviderBuilder::new()
+            .connect(&network_config.rpc_http_url)
+            .await?
+            .erased();
         let balance_fetcher = Arc::new(RpcClient::new(
             Arc::new(http_provider),
             network,
@@ -42,8 +44,10 @@ impl AppState {
         ));
         tracing::info!(%network, "http provider connected");
 
-        let ws_url = network_config.alchemy_ws_url(network);
-        let ws_pool = Arc::new(WsConnectionPool::new(ws_url, MAX_CLIENTS_PER_WS_CONNECTION));
+        let ws_pool = Arc::new(WsConnectionPool::new(
+            network_config.rpc_ws_url.clone(),
+            MAX_CLIENTS_PER_WS_CONNECTION,
+        ));
         tracing::info!(%network, "ws connection pool ready");
 
         let session_manager = Arc::new(SessionManager::new(
