@@ -26,11 +26,8 @@ pub struct Args {
     #[arg(long, env = "SNAPSHOT_INTERVAL", default_value = "60")]
     pub snapshot_interval: String,
 
-    #[arg(long, env = "MAX_WATCHED_TOKENS_LIMIT", default_value = "1000")]
+    #[arg(long, env = "MAX_WATCHED_TOKENS_LIMIT", default_value = "1500")]
     pub max_watched_tokens_limit: String,
-
-    #[arg(long, env = "ALLOWED_ORIGINS", default_value = "")]
-    pub allowed_origins: String,
 }
 
 impl Args {

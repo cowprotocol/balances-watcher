@@ -43,7 +43,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_handler = PrometheusBuilder::new().install_recorder()?;
     let metrics = Arc::new(Metrics::install());
 
-    let allowed_origins = network_cfg.allowed_origins.clone();
     let shutdown_token = graceful_shutdown::get_token();
     let task_tracker = TaskTracker::new();
     let token_for_app_state = shutdown_token.clone();
@@ -55,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
 
-    let app = create_router(app_state, metrics_handler, allowed_origins);
+    let app = create_router(app_state, metrics_handler);
 
     let address: SocketAddr = cfg.bind.parse()?;
     ::tracing::info!("Listening to http://{}", address);

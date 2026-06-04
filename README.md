@@ -311,7 +311,6 @@ curl -N      http://localhost:4000/sse/1/balances/0xd8dA...
 | `HTTP_BIND` | Bind address. | `0.0.0.0:8080` |
 | `SNAPSHOT_INTERVAL` | Full multicall refresh interval, seconds. | `60` |
 | `MAX_WATCHED_TOKENS_LIMIT` | Max tokens per session. | `1500` |
-| `ALLOWED_ORIGINS` | Comma-separated CORS origins. Supports `*` substring matching (e.g. `*.cowswap-dev.vercel.app`). Empty value = allow all. | empty |
 | `RUST_LOG` | Standard `tracing-subscriber` env-filter. | unset |
 
 ## Quick start
