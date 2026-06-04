@@ -3,7 +3,7 @@ use crate::config::network_config::NetworkConfig;
 use crate::domain::EvmNetwork;
 use crate::metrics::Metrics;
 use crate::services::rpc_client::RpcClient;
-use crate::services::session_manager::SessionManager;
+use crate::services::session_manager::{SessionConfig, SessionManager};
 use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::providers::{Provider, ProviderBuilder};
 use std::sync::Arc;
@@ -50,10 +50,13 @@ impl AppState {
             balance_fetcher,
             ws_pool,
             Arc::clone(&metrics),
-            network_config.snapshot_interval,
-            network_config.max_watched_tokens_limit,
             task_tracker,
             shutdown_token,
+            SessionConfig {
+                snapshot_interval: network_config.snapshot_interval,
+                token_limit: network_config.max_watched_tokens_limit,
+                active_network: network,
+            },
         ));
 
         Ok(Arc::new(Self {
