@@ -120,8 +120,7 @@ Active synthetic probe. Calls `eth_blockNumber` on the HTTP RPC provider; return
 `200 OK` if the upstream node responds, `503 Service Unavailable` otherwise.
 
 Used by Kubernetes `readinessProbe` + `livenessProbe`. No internal retries —
-transient failures are absorbed by `failureThreshold` at the probe level (see
-`.github/k8s/deployment.yaml`).
+transient failures are absorbed by `failureThreshold` at the probe level.
 
 ```bash
 curl -i http://localhost:8080/health
@@ -274,16 +273,14 @@ model:
 
 ### Kubernetes (production)
 
-Manifests live in `.github/k8s/` and are rendered per chain by
-`.github/workflows/deploy.yml`. One `Deployment` + `Service` per chain, one
-`Ingress` routes `/<chain_id>/...` and `/sse/<chain_id>/...` to the matching
-service. Adding a chain:
+Deployed via [cowprotocol/infrastructure](https://github.com/cowprotocol/infrastructure)
+using Pulumi (DNS, secrets) + Flux (k8s manifests). One `Deployment` + `Service`
+per chain in the `balances-watcher` namespace, with a shared `Ingress` routing
+`/<chain_id>/...` and `/sse/<chain_id>/...` to the matching service.
 
-1. Add `"NAME:chain_id"` to the `for entry in ...` loop in `.github/workflows/deploy.yml`.
-2. Add two `path:` blocks (`/<chain_id>/` and `/sse/<chain_id>/`) to
-   `.github/k8s/ingress.yaml`.
-3. Make sure the chain is supported by `EvmNetwork::TryFrom<u64>`
-   (`src/domain/evm_network.rs`).
+Docker images are built and pushed to GHCR by `.github/workflows/build-image.yml`
+on push to `main` or on semver tags (`vX.Y.Z`). Flux picks up new image tags
+from `ghcr.io/cowprotocol/balances-watcher`.
 
 ### docker-compose (local dev)
 
