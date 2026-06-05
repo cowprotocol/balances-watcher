@@ -112,7 +112,7 @@ impl Watcher {
                 tokio::select! {
                     _ = cancel.cancelled() => {
                         tracing::info!(
-                            session = %session,
+                            owner = %session.owner,
                             "cancelled watcher"
                         );
                         break;
@@ -131,7 +131,7 @@ impl Watcher {
                         // if there are new tokens that were added to a subscription, we should immediately update a snapshot to not
                         //  wait for the next interval
                         tracing::info!(
-                            session = %session,
+                            owner = %session.owner,
                             "watched tokens were updated - force sync and reset interval"
                         );
                         metrics.snapshot_updater_runs_total.increment(1);
@@ -160,7 +160,7 @@ impl Watcher {
                             match msg {
                                 QueueMessage::Success(balances) => {
                                     tracing::debug!(
-                                        session = %session,
+                                        owner = %session.owner,
                                         "balances received from queue, updating snapshot"
                                     );
 
@@ -168,7 +168,7 @@ impl Watcher {
                                 },
                                 QueueMessage::Error(err) => {
                                     tracing::error!(
-                                        session = %session,
+                                        owner = %session.owner,
                                         error = %err,
                                         "error from watcher: close session"
                                     );
@@ -200,7 +200,7 @@ impl Watcher {
             if !diff.is_empty() {
                 Some(BalanceEvent::BalanceUpdate(diff))
             } else {
-                tracing::info!(session = %session, "diff is empty, skipping broadcast");
+                tracing::info!(owner = %session.owner, "diff is empty, skipping broadcast");
                 None
             }
         };
@@ -234,7 +234,7 @@ impl Watcher {
             }
             Err(e) => {
                 tracing::error!(
-                    session = %session,
+                    owner = %session.owner,
                     error = %e,
                     "failed to get balances"
                 );
@@ -261,7 +261,7 @@ impl Watcher {
             .map_err(|e| {
                 tracing::error!(
                     error = %e,
-                    session = %session,
+                    owner = %session.owner,
                     "Failed to fetch balance"
                 );
                 WatcherError::GettingBalance(session.owner, session.network, e.to_string())
@@ -336,7 +336,7 @@ impl Watcher {
         session: Session,
     ) {
         let Some(event) = event else {
-            tracing::info!(session = %session, "no balance update to send (empty diff)");
+            tracing::info!(owner = %session.owner, "no balance update to send (empty diff)");
             return;
         };
 
@@ -605,7 +605,6 @@ impl Watcher {
                 metrics.parse_erc20_log_errors_total.increment(1);
                 tracing::error!(
                     error = %err,
-                    netowrk = %session.network,
                     owner = %session.owner,
                     "error when parse log",
                 );
