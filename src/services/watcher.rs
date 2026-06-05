@@ -102,7 +102,7 @@ impl Watcher {
         let cancel = sub.cancellable();
         let sync_balance_notifier = sub.take_sync_notifier();
         let session = self.session;
-        let fetcher = Arc::clone(&self.rpc_client);
+        let rpc_client = Arc::clone(&self.rpc_client);
         let metrics = Arc::clone(&self.metrics);
 
         self.task_tracker.spawn(async move {
@@ -120,7 +120,7 @@ impl Watcher {
                     _ = interval.tick() => {
                         // every n secs we make a multicall to sync all token balances
                         metrics.snapshot_updater_runs_total.increment(1);
-                        Self::fetch_balances_and_broadcast(Arc::clone(&fetcher), session, Arc::clone(&sub)).await;
+                        Self::fetch_balances_and_broadcast(Arc::clone(&rpc_client), session, Arc::clone(&sub)).await;
                     }
                     // there are few cases when we need to request balances immediately
                     // 1 - when ws is exhausted for a while, and then we got reconnect - we should get
@@ -135,7 +135,7 @@ impl Watcher {
                             "watched tokens were updated - force sync and reset interval"
                         );
                         metrics.snapshot_updater_runs_total.increment(1);
-                        Self::fetch_balances_and_broadcast(Arc::clone(&fetcher), session, Arc::clone(&sub)).await;
+                        Self::fetch_balances_and_broadcast(Arc::clone(&rpc_client), session, Arc::clone(&sub)).await;
                         interval.reset();
                     }
                 }
@@ -210,7 +210,7 @@ impl Watcher {
 
     // request all balances for a list of watched tokens via multicall and broadcast them to clients
     async fn fetch_balances_and_broadcast(
-        fetcher: Arc<RpcClient>,
+        rpc_client: Arc<RpcClient>,
         session: Session,
         sub: Arc<Subscription>,
     ) {
@@ -225,7 +225,7 @@ impl Watcher {
             "snapshot updater fetching balances"
         );
         let result =
-            Self::get_tokens_balance(Arc::clone(&fetcher), session, &tokens, BlockId::latest())
+            Self::get_tokens_balance(Arc::clone(&rpc_client), session, &tokens, BlockId::latest())
                 .await;
 
         match result {
@@ -250,12 +250,12 @@ impl Watcher {
 
     // request balances via multicall for a list of tokens and map error
     async fn get_tokens_balance(
-        fetcher: Arc<RpcClient>,
+        rpc_client: Arc<RpcClient>,
         session: Session,
         tokens: &[Address],
         block_id: BlockId,
     ) -> Result<BalancesWithBlock, WatcherError> {
-        fetcher
+        rpc_client
             .fetch_balances_via_multicall(session.owner, tokens, block_id)
             .await
             .map_err(|e| {

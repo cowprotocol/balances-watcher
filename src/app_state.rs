@@ -37,7 +37,7 @@ impl AppState {
             .connect(&network_config.rpc_http_url)
             .await?
             .erased();
-        let balance_fetcher = Arc::new(RpcClient::new(
+        let rpc_client = Arc::new(RpcClient::new(
             Arc::new(http_provider),
             network,
             Arc::clone(&metrics),
@@ -51,7 +51,7 @@ impl AppState {
         tracing::info!(%network, "ws connection pool ready");
 
         let session_manager = Arc::new(SessionManager::new(
-            balance_fetcher,
+            rpc_client,
             ws_pool,
             Arc::clone(&metrics),
             task_tracker,

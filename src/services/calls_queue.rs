@@ -34,7 +34,7 @@ struct QueueState {
 pub struct CallsQueue {
     task_tracker: TaskTracker,
     owner: Address,
-    multicall_fetcher: Arc<RpcClient>,
+    rpc_client: Arc<RpcClient>,
     state: RwLock<QueueState>,
     tx: Arc<Sender>,
 }
@@ -43,14 +43,14 @@ impl CallsQueue {
     pub fn new(
         task_tracker: TaskTracker,
         owner: Address,
-        multicall_fetcher: Arc<RpcClient>,
+        rpc_client: Arc<RpcClient>,
     ) -> (Self, Receiver) {
         let (tx, rx) = mpsc::channel(1);
 
         let queue = Self {
             task_tracker,
             owner,
-            multicall_fetcher,
+            rpc_client,
             state: RwLock::new(QueueState {
                 pending: HashMap::new(),
                 status: Status::None,
@@ -161,7 +161,7 @@ impl CallsQueue {
         };
 
         let result = self
-            .multicall_fetcher
+            .rpc_client
             .fetch_balances_via_multicall(self.owner, &tokens, block_id)
             .await;
         let msg = match result {
