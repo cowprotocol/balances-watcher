@@ -349,14 +349,16 @@ impl Watcher {
         };
         let cancel = self.sub.cancellable();
 
+        let this = self.clone();
         'ws_connection_loop: loop {
+            let this = Arc::clone(&this);
             tokio::select! {
                 _ = cancel.cancelled() => {
                     tracing::info!("cancelled log subscription");
                     break 'ws_connection_loop;
                 },
                 _ = async {
-                    match Self::subscribe_with_retries(&pool_guard.provider, filter.clone(), Arc::clone(&self.metrics)).await {
+                    match Arc::clone(&this).subscribe_with_retries(&pool_guard.provider, filter.clone()).await {
                         Ok(sub) => {
                             tracing::info!("subscribed to logs");
 
@@ -373,7 +375,7 @@ impl Watcher {
                                                 on_web3_log_received(log).await;
                                             },
                                             None => {
-                                                self.metrics.ws_provider_disconnected_total.increment(1);
+                                                this.metrics.ws_provider_disconnected_total.increment(1);
                                                 tracing::warn!("ws stream ended (disconnect). will resubscribe");
                                                 break 'logs_loop;
                                             }
@@ -383,7 +385,7 @@ impl Watcher {
                             }
                         },
                         Err(err) => {
-                            self.metrics.ws_subscribe_is_down_total.increment(1);
+                            this.metrics.ws_subscribe_is_down_total.increment(1);
                             tracing::error!(error = %err, "ws subscribe exhausted retries, cancelling");
                             on_drop();
                             cancel.cancel();
@@ -391,7 +393,7 @@ impl Watcher {
                         }
                     }
 
-                    self.metrics.ws_reconnect_attempts_total.increment(1);
+                    this.metrics.ws_reconnect_attempts_total.increment(1);
                 } => {}
             }
         }
@@ -399,9 +401,9 @@ impl Watcher {
 
     // subscribe to events with backoff
     async fn subscribe_with_retries(
+        self: Arc<Self>,
         provider: &DynProvider,
         filter: Filter,
-        metrics: Arc<Metrics>,
     ) -> Result<alloy::pubsub::Subscription<Log>, WatcherError> {
         let backoff = Self::create_ws_sub_backoff();
         (|| async { provider.subscribe_logs(&filter).await })
@@ -412,7 +414,7 @@ impl Watcher {
                     duration = ?duration,
                     "failed to subscribe logs"
                 );
-                metrics.ws_subscribe_errors_total.increment(1);
+                self.metrics.ws_subscribe_errors_total.increment(1);
             })
             .await
             .map_err(|_| WatcherError::WsSubscriptionExhausted)
