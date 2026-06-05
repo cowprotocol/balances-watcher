@@ -49,7 +49,7 @@ pub enum ParseWeb3LogsError {
     UnexpectedHashSignature,
 }
 
-type Receiver = tokio::sync::mpsc::Receiver<QueueMessage>;
+use crate::services::calls_queue::Receiver;
 
 pub struct Watcher {
     task_tracker: TaskTracker,
@@ -57,38 +57,28 @@ pub struct Watcher {
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
     calls_queue: Arc<CallsQueue>,
-    multicall_fetcher: Arc<RpcClient>,
+    rpc_client: Arc<RpcClient>,
     metrics: Arc<Metrics>,
-    // accepts data from calls_queue
-    rx: Receiver,
 }
 
 impl Watcher {
     pub fn new(
         task_tracker: TaskTracker,
-        session: Session,
-        multicall_fetcher: Arc<RpcClient>,
+        rpc_client: Arc<RpcClient>,
         subscription: Arc<Subscription>,
+        calls_queue: CallsQueue,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
+        session: Session,
     ) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        let calls_queue = CallsQueue::new(
-            task_tracker.clone(),
-            session,
-            Arc::clone(&multicall_fetcher),
-            tx,
-        );
-
         Self {
             task_tracker,
             session,
             calls_queue: Arc::new(calls_queue),
             sub: subscription,
-            multicall_fetcher,
+            rpc_client,
             ws_connection_pool,
             metrics,
-            rx,
         }
     }
 
@@ -96,28 +86,23 @@ impl Watcher {
     // spawn_erc20_transfer_listeners - spawn listener for erc20 transfer events
     // spawn_wrapped_events_listener - spawn listener for wrapped token events (deposit/withdrawal)
     // spawn_snapshot_updater - spawn listener for snapshot update (every interval_secs)
-    pub async fn spawn_watchers(self, interval_secs: usize) {
-        self.spawn_snapshot_updater(interval_secs).await;
-        self.spawn_erc20_transfer_listeners().await;
-        let task_tracker = self.task_tracker.clone();
-        Self::spawn_queue_result_receiver(
-            Arc::clone(&self.sub),
-            task_tracker,
-            self.rx,
-            self.session,
-        )
-        .await;
+    pub async fn spawn_watchers(self: Arc<Self>, rx: Receiver, interval_secs: usize) {
+        Arc::clone(&self)
+            .spawn_snapshot_updater(interval_secs)
+            .await;
+        Arc::clone(&self).spawn_erc20_transfer_listeners().await;
+        Arc::clone(&self).spawn_queue_result_receiver(rx).await;
     }
 
     // watcher to request balances via multicall every interval_secs to have an actual state
     // it updates the whole state of balances and then send event to clients
     // could be removed if we check more ws subscriptions for updates
-    async fn spawn_snapshot_updater(&self, interval_secs: usize) {
+    async fn spawn_snapshot_updater(self: Arc<Self>, interval_secs: usize) {
         let sub = Arc::clone(&self.sub);
         let cancel = sub.cancellable();
-        let notifier = sub.take_sync_notifier();
+        let sync_balance_notifier = sub.take_sync_notifier();
         let session = self.session;
-        let fetcher = Arc::clone(&self.multicall_fetcher);
+        let fetcher = Arc::clone(&self.rpc_client);
         let metrics = Arc::clone(&self.metrics);
 
         self.task_tracker.spawn(async move {
@@ -137,7 +122,12 @@ impl Watcher {
                         metrics.snapshot_updater_runs_total.increment(1);
                         Self::fetch_balances_and_broadcast(Arc::clone(&fetcher), session, Arc::clone(&sub)).await;
                     }
-                    _ = notifier.notified() => {
+                    // there are few cases when we need to request balances immediately
+                    // 1 - when ws is exhausted for a while, and then we got reconnect - we should get
+                    // new balance snapshot to be sure we don't lost any events
+                    // 2 - when we got new tokens (client sends new tokens list or new custom tokens)
+                    // todo - it's better to request new tokens in a different multicall without full snapshot
+                    _ = sync_balance_notifier.notified() => {
                         // if there are new tokens that were added to a subscription, we should immediately update a snapshot to not
                         //  wait for the next interval
                         tracing::info!(
@@ -153,15 +143,12 @@ impl Watcher {
         });
     }
 
-    async fn spawn_queue_result_receiver(
-        sub: Arc<Subscription>,
-        task_tracker: TaskTracker,
-        mut rx: Receiver,
-        session: Session,
-    ) {
-        let cancel = sub.cancellable();
+    async fn spawn_queue_result_receiver(self: Arc<Self>, mut rx: Receiver) {
+        let cancel = self.sub.cancellable();
+        let sub = Arc::clone(&self.sub);
 
-        task_tracker.spawn(async move {
+        let session = self.session;
+        self.task_tracker.spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel.cancelled() => {
@@ -286,7 +273,7 @@ impl Watcher {
      *
      * Need to sync wrap/unwrap txs to handle wrapped token balance
      */
-    async fn spawn_weth9_events_listener(&self) {
+    async fn spawn_weth9_events_listener(self: Arc<Self>) {
         let session = self.session;
         let weth9_address = session.network.weth9_address();
 
@@ -302,45 +289,44 @@ impl Watcher {
         let sub: Arc<Subscription> = Arc::clone(&self.sub);
 
         let calls_queue = Arc::clone(&self.calls_queue);
-        let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
         let metrics = Arc::clone(&self.metrics);
 
+        let this = Arc::clone(&self);
         self.task_tracker.spawn(async move {
             let sub = Arc::clone(&sub);
             let calls_queue = Arc::clone(&calls_queue);
             let metrics_for_log = Arc::clone(&metrics);
 
-            let _ = Self::run_log_subscription_loop(
-                ws_connection_pool,
-                filter,
-                sub.cancellable(),
-                Arc::clone(&metrics),
-                move |log: Log| {
-                    let calls_queue = Arc::clone(&calls_queue);
-                    let metrics_for_log = Arc::clone(&metrics_for_log);
+            let _ = this
+                .run_log_subscription_loop(
+                    filter,
+                    sub.cancellable(),
+                    move |log: Log| {
+                        let calls_queue = Arc::clone(&calls_queue);
+                        let metrics_for_log = Arc::clone(&metrics_for_log);
 
-                    Box::pin(async move {
-                        metrics_for_log.weth9_events_received_total.increment(1);
+                        Box::pin(async move {
+                            metrics_for_log.weth9_events_received_total.increment(1);
 
-                        Self::parse_weth9_logs_and_fetch_balance(
-                            session,
-                            &log,
-                            calls_queue,
-                            metrics_for_log,
-                        )
-                        .await;
-                    })
-                },
-                move || {
-                    let sub = Arc::clone(&sub);
-                    let event = Some(BalanceEvent::Error {
-                        code: 503,
-                        message: "WebSocket connection lost permanently".to_string(),
-                    });
-                    Self::send_balance_update_event(event, sub, session);
-                },
-            )
-            .await;
+                            Self::parse_weth9_logs_and_fetch_balance(
+                                session,
+                                &log,
+                                calls_queue,
+                                metrics_for_log,
+                            )
+                            .await;
+                        })
+                    },
+                    move || {
+                        let sub = Arc::clone(&sub);
+                        let event = Some(BalanceEvent::Error {
+                            code: 503,
+                            message: "WebSocket connection lost permanently".to_string(),
+                        });
+                        Self::send_balance_update_event(event, sub, session);
+                    },
+                )
+                .await;
         });
     }
 
@@ -361,14 +347,13 @@ impl Watcher {
     // if log is received - call on_log callback
     // if ws provider disconnects - reconnect and continue listening
     async fn run_log_subscription_loop(
-        connection_pool: Arc<WsConnectionPool>,
+        self: Arc<Self>,
         filter: Filter,
         cancel: tokio_util::sync::CancellationToken,
-        metrics: Arc<Metrics>,
-        mut on_log: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
+        mut on_web3_log_received: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
         mut on_drop: impl FnMut() + Send + 'static,
     ) {
-        let pool_guard = match connection_pool.acquire().await {
+        let pool_guard = match self.ws_connection_pool.acquire().await {
             Ok(pool_guard) => pool_guard,
             Err(err) => {
                 tracing::error!(
@@ -387,7 +372,7 @@ impl Watcher {
                     break 'ws_connection_loop;
                 },
                 _ = async {
-                    match Self::ws_sub_with_retries(&pool_guard.provider, filter.clone(), Arc::clone(&metrics)).await {
+                    match Self::subscribe_with_retries(&pool_guard.provider, filter.clone(), Arc::clone(&self.metrics)).await {
                         Ok(sub) => {
                             tracing::info!("subscribed to logs");
 
@@ -395,16 +380,16 @@ impl Watcher {
                              'logs_loop: loop {
                                 tokio::select! {
                                     _ = cancel.cancelled() => {
-                                        tracing::info!("cancelled log subscription");
+                                        tracing::debug!("cancelled log subscription");
                                         return;
                                     },
                                     item = stream.next() => {
                                         match item {
                                             Some(log) => {
-                                                on_log(log).await;
+                                                on_web3_log_received(log).await;
                                             },
                                             None => {
-                                                metrics.ws_provider_disconnected_total.increment(1);
+                                                self.metrics.ws_provider_disconnected_total.increment(1);
                                                 tracing::warn!("ws stream ended (disconnect). will resubscribe");
                                                 break 'logs_loop;
                                             }
@@ -414,7 +399,7 @@ impl Watcher {
                             }
                         },
                         Err(err) => {
-                            metrics.ws_subscribe_is_down_total.increment(1);
+                            self.metrics.ws_subscribe_is_down_total.increment(1);
                             tracing::error!(error = %err, "ws subscribe exhausted retries, cancelling");
                             on_drop();
                             cancel.cancel();
@@ -422,14 +407,14 @@ impl Watcher {
                         }
                     }
 
-                    metrics.ws_reconnect_attempts_total.increment(1);
+                    self.metrics.ws_reconnect_attempts_total.increment(1);
                 } => {}
             }
         }
     }
 
     // subscribe to events with backoff
-    async fn ws_sub_with_retries(
+    async fn subscribe_with_retries(
         provider: &DynProvider,
         filter: Filter,
         metrics: Arc<Metrics>,
@@ -542,67 +527,66 @@ impl Watcher {
         Err(ParseWeb3LogsError::UnexpectedHashSignature)
     }
 
-    async fn spawn_erc20_transfer_listeners(&self) {
+    async fn spawn_erc20_transfer_listeners(self: Arc<Self>) {
         let session = self.session;
         let base = Filter::new().event_signature(ERC20::Transfer::SIGNATURE_HASH);
         let from = base.clone().topic1(Topic::from(session.owner));
         let to = base.clone().topic2(Topic::from(session.owner));
 
-        self.spawn_erc20_transfer_listener_with_filter(from).await;
-        self.spawn_erc20_transfer_listener_with_filter(to).await;
+        Arc::clone(&self)
+            .spawn_erc20_transfer_listener_with_filter(from)
+            .await;
+        Arc::clone(&self)
+            .spawn_erc20_transfer_listener_with_filter(to)
+            .await;
         self.spawn_weth9_events_listener().await;
     }
 
-    // listent to erc20 transfer events for owner (in/out)
-    // if an event is received - get balance for token(+ eth balance) and send it to clients
-    async fn spawn_erc20_transfer_listener_with_filter(&self, filter: Filter) {
+    async fn spawn_erc20_transfer_listener_with_filter(self: Arc<Self>, filter: Filter) {
         let session = self.session;
         let sub = Arc::clone(&self.sub);
         let calls_queue = Arc::clone(&self.calls_queue);
-
-        let ws_connection_pool = Arc::clone(&self.ws_connection_pool);
         let metrics = Arc::clone(&self.metrics);
 
+        let this = Arc::clone(&self);
         self.task_tracker.spawn(async move {
             let sub_for_log_handler = Arc::clone(&sub);
             let metrics_for_log = Arc::clone(&metrics);
-            let _ = Self::run_log_subscription_loop(
-                ws_connection_pool,
-                filter,
-                sub_for_log_handler.cancellable(),
-                Arc::clone(&metrics),
-                move |log: Log| {
-                    let call_queue = Arc::clone(&calls_queue);
-                    let metrics_for_log = Arc::clone(&metrics_for_log);
 
-                    tracing::info!("received erc20 transfer event: {:#?}", log);
-                    metrics_for_log.erc20_event_received_total.increment(1);
+            let _ = this
+                .run_log_subscription_loop(
+                    filter,
+                    sub_for_log_handler.cancellable(),
+                    move |log: Log| {
+                        let calls_queue = Arc::clone(&calls_queue);
+                        let metrics_for_log = Arc::clone(&metrics_for_log);
+                        let sub_for_parsing_tokens = Arc::clone(&sub_for_log_handler);
 
-                    let sub_for_parsing_tokens = Arc::clone(&sub_for_log_handler);
+                        tracing::info!("received erc20 transfer event: {:#?}", log);
+                        metrics_for_log.erc20_event_received_total.increment(1);
 
-                    Box::pin(async move {
-                        // parse event and send it to calls_queue to update balance
-                        Self::parse_transfer_event_and_fetch_balance(
+                        Box::pin(async move {
+                            Self::parse_transfer_event_and_fetch_balance(
+                                session,
+                                calls_queue,
+                                sub_for_parsing_tokens,
+                                &log,
+                                metrics_for_log,
+                            )
+                            .await;
+                        })
+                    },
+                    move || {
+                        sub.send_event(
+                            BalanceEvent::Error {
+                                code: 503,
+                                message: "WebSocket connection lost permanently".to_string(),
+                            },
                             session,
-                            Arc::clone(&call_queue),
-                            Arc::clone(&sub_for_parsing_tokens),
-                            &log,
-                            metrics_for_log,
-                        )
-                        .await;
-                    })
-                },
-                move || {
-                    sub.send_event(
-                        BalanceEvent::Error {
-                            code: 503,
-                            message: "WebSocket connection lost permanently".to_string(),
-                        },
-                        session,
-                    );
-                },
-            )
-            .await;
+                        );
+                    },
+                )
+                .await;
         });
     }
 

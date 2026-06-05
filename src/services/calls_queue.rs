@@ -1,5 +1,4 @@
 use crate::config::constants::CALL_QUEUE_DELAY;
-use crate::domain::Session;
 use crate::services::errors::ServiceError;
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
 use alloy::eips::BlockId;
@@ -18,6 +17,7 @@ pub enum QueueMessage {
 }
 
 type Sender = mpsc::Sender<QueueMessage>;
+pub type Receiver = mpsc::Receiver<QueueMessage>;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 enum Status {
@@ -33,7 +33,7 @@ struct QueueState {
 
 pub struct CallsQueue {
     task_tracker: TaskTracker,
-    session: Session,
+    owner: Address,
     multicall_fetcher: Arc<RpcClient>,
     state: RwLock<QueueState>,
     tx: Arc<Sender>,
@@ -42,20 +42,23 @@ pub struct CallsQueue {
 impl CallsQueue {
     pub fn new(
         task_tracker: TaskTracker,
-        session: Session,
+        owner: Address,
         multicall_fetcher: Arc<RpcClient>,
-        tx: Sender,
-    ) -> Self {
-        Self {
+    ) -> (Self, Receiver) {
+        let (tx, rx) = mpsc::channel(1);
+
+        let queue = Self {
             task_tracker,
-            session,
+            owner,
             multicall_fetcher,
             state: RwLock::new(QueueState {
                 pending: HashMap::new(),
                 status: Status::None,
             }),
             tx: Arc::new(tx),
-        }
+        };
+
+        (queue, rx)
     }
 
     // upsert tokens to the queue with block_number for a delayed call
@@ -92,13 +95,13 @@ impl CallsQueue {
 
         if should_schedule {
             let this = Arc::clone(&self);
-            let session = self.session;
+            let owner = self.owner;
 
             self.task_tracker.spawn(async move {
                 let _ = this.flush().await.inspect_err(|err| {
                     tracing::error!(
                         error = %err,
-                        session = %session,
+                        owner = %owner,
                         "Error upserting delayed call"
                     );
                 });
@@ -159,15 +162,15 @@ impl CallsQueue {
 
         let result = self
             .multicall_fetcher
-            .fetch_balances_via_multicall(self.session.owner, &tokens, block_id)
+            .fetch_balances_via_multicall(self.owner, &tokens, block_id)
             .await;
         let msg = match result {
             Ok(response) => QueueMessage::Success(response),
             Err(err) => {
                 tracing::error!(
                     error = ?err,
-                    session = %self.session,
-                    "calls_queue: failed to send result"
+                    owner = %self.owner,
+                    "calls_queue: failed to fetch balances"
                 );
 
                 QueueMessage::Error(err)
