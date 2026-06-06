@@ -439,8 +439,8 @@ impl Watcher {
             block_number = block_number,
             "weth9 log is parsed, send fetching balance request to a queue"
         );
-        Arc::clone(&self.calls_queue_handler)
-            .upsert_delayed_rcp_call(weth9_address, block_number)
+        self.calls_queue_handler
+            .upsert_delayed_rpc_call(weth9_address, block_number)
             .await;
     }
 
@@ -583,9 +583,8 @@ impl Watcher {
             block_number = block_number,
             "erc20 event is parsed, send it to fetch queue"
         );
-        // always put native address into queue to keep it synced
         self.calls_queue_handler
-            .upsert_delayed_rcp_call(token_address, block_number)
+            .upsert_delayed_rpc_call(token_address, block_number)
             .await;
     }
 }

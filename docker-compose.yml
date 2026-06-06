@@ -66,7 +66,7 @@ services:
       - NETWORK=11155111
       - RPC_HTTP_URL=${SEPOLIA_RPC_HTTP_URL:-https://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}}
       - RPC_WS_URL=${SEPOLIA_RPC_WS_URL:-wss://eth-sepolia.g.alchemy.com/v2/${ALCHEMY_API_KEY}}
-      - RUST_LOG=${RUST_LOG:-debug}
+      - RUST_LOG=${RUST_LOG:-info}
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.sepolia.rule=PathPrefix(`/11155111/`) || PathPrefix(`/sse/11155111/`)"

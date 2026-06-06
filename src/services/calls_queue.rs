@@ -26,7 +26,7 @@ pub struct CallsQueueHandle {
 }
 
 impl CallsQueueHandle {
-    pub async fn upsert_delayed_rcp_call(&self, token: Address, block_number: Option<BlockNumber>) {
+    pub async fn upsert_delayed_rpc_call(&self, token: Address, block_number: Option<BlockNumber>) {
         let _ = self.tx_in.send((token, block_number)).await;
     }
 }
