@@ -279,31 +279,19 @@ impl Watcher {
             .event_signature(event_signatures)
             .topic1(Topic::from(session.owner));
 
-        let calls_queue = Arc::clone(&self.calls_queue);
-        let metrics = Arc::clone(&self.metrics);
-
         let this = Arc::clone(&self);
         self.task_tracker.spawn(async move {
-            let calls_queue = Arc::clone(&calls_queue);
-            let metrics_for_log = Arc::clone(&metrics);
+            let this_on_log = Arc::clone(&this);
+            let this_on_drop = Arc::clone(&this);
 
-            let _ = Arc::clone(&this)
+            let _ = Arc::clone(&this_on_log)
                 .run_log_subscription_loop(
                     filter,
                     move |log: Log| {
-                        let calls_queue = Arc::clone(&calls_queue);
-                        let metrics_for_log = Arc::clone(&metrics_for_log);
-
+                        let this = Arc::clone(&this_on_log);
                         Box::pin(async move {
-                            metrics_for_log.weth9_events_received_total.increment(1);
-
-                            Self::parse_weth9_logs_and_fetch_balance(
-                                session,
-                                &log,
-                                calls_queue,
-                                metrics_for_log,
-                            )
-                            .await;
+                            this.metrics.weth9_events_received_total.increment(1);
+                            this.parse_weth9_logs_and_fetch_balance(&log).await;
                         })
                     },
                     move || {
@@ -311,7 +299,8 @@ impl Watcher {
                             code: 503,
                             message: "WebSocket connection lost permanently".to_string(),
                         });
-                        Arc::clone(&this).send_balance_update_event(event);
+                        let this = Arc::clone(&this_on_drop);
+                        this.send_balance_update_event(event);
                     },
                 )
                 .await;
@@ -336,6 +325,7 @@ impl Watcher {
         mut on_web3_log_received: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
         mut on_drop: impl FnMut() + Send + 'static,
     ) {
+        let cancel = self.sub.cancellable();
         let pool_guard = match self.ws_connection_pool.acquire().await {
             Ok(pool_guard) => pool_guard,
             Err(err) => {
@@ -344,10 +334,10 @@ impl Watcher {
                     "failed to acquire connection pool guard, cancel watchers"
                 );
                 self.sub.cancellable().cancel();
+                cancel.cancel();
                 return;
             }
         };
-        let cancel = self.sub.cancellable();
 
         let this = self.clone();
         'ws_connection_loop: loop {
@@ -419,6 +409,7 @@ impl Watcher {
             .await
             .map_err(|_| WatcherError::WsSubscriptionExhausted)
     }
+
     fn create_ws_sub_backoff() -> ExponentialBuilder {
         ExponentialBuilder::default()
             .with_min_delay(Duration::from_secs(1))
@@ -427,15 +418,9 @@ impl Watcher {
             .with_jitter()
     }
 
-    async fn parse_weth9_logs_and_fetch_balance(
-        session: Session,
-        log: &Log,
-        calls_queue: Arc<CallsQueue>,
-        metrics: Arc<Metrics>,
-    ) {
-        let Ok(parsed_log) = Self::parse_weth9_logs(log).inspect_err(move |_| {
-            metrics.parse_weth9_logs_failed_total.increment(1);
-        }) else {
+    async fn parse_weth9_logs_and_fetch_balance(self: Arc<Self>, log: &Log) {
+        let Ok(parsed_log) = Self::parse_weth9_logs(log) else {
+            self.metrics.parse_weth9_logs_failed_total.increment(1);
             return;
         };
 
@@ -447,10 +432,12 @@ impl Watcher {
 
         // always put native address into queue to keep it synced
         let tokens = vec![
-            session.network.weth9_address(),
-            session.network.native_token_address(),
+            self.session.network.weth9_address(),
+            self.session.network.native_token_address(),
         ];
-        calls_queue.upsert_delayed_call(&tokens, block_number).await;
+        Arc::clone(&self.calls_queue)
+            .upsert_delayed_call(&tokens, block_number)
+            .await;
     }
 
     // parse WETH logs, search DEPOSIT/WITHDRAWAL events
