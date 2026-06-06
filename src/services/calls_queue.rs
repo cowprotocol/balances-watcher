@@ -5,8 +5,9 @@ use alloy::eips::BlockId;
 use alloy::primitives::{Address, BlockNumber};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::sleep;
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
 use tokio_util::task::TaskTracker;
 
 type TokenMap = HashMap<Address, BlockNumber>;
@@ -16,136 +17,75 @@ pub enum QueueMessage {
     Error(ServiceError),
 }
 
-type Sender = mpsc::Sender<QueueMessage>;
-pub type Receiver = mpsc::Receiver<QueueMessage>;
+pub type QueueResultReceiver = mpsc::Receiver<QueueMessage>;
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-enum Status {
-    None,
-    InFlight,
-    Scheduled,
+type TokenToFetch = (Address, Option<BlockNumber>);
+
+pub struct CallsQueueHandle {
+    tx_in: Arc<mpsc::Sender<TokenToFetch>>,
 }
 
-struct QueueState {
-    pending: TokenMap,
-    status: Status,
+impl CallsQueueHandle {
+    pub async fn upsert_delayed_rcp_call(&self, token: Address, block_number: Option<BlockNumber>) {
+        let _ = self.tx_in.send((token, block_number)).await;
+    }
 }
 
 pub struct CallsQueue {
     task_tracker: TaskTracker,
     owner: Address,
     rpc_client: Arc<RpcClient>,
-    state: RwLock<QueueState>,
-    tx: Arc<Sender>,
 }
 
 impl CallsQueue {
-    pub fn new(
-        task_tracker: TaskTracker,
-        owner: Address,
-        rpc_client: Arc<RpcClient>,
-    ) -> (Self, Receiver) {
-        let (tx, rx) = mpsc::channel(1);
-
-        let queue = Self {
+    pub fn new(task_tracker: TaskTracker, owner: Address, rpc_client: Arc<RpcClient>) -> Self {
+        Self {
             task_tracker,
             owner,
             rpc_client,
-            state: RwLock::new(QueueState {
-                pending: HashMap::new(),
-                status: Status::None,
-            }),
-            tx: Arc::new(tx),
-        };
-
-        (queue, rx)
+        }
     }
 
-    // upsert tokens to the queue with block_number for a delayed call
-    pub async fn upsert_delayed_call(
-        self: Arc<Self>,
-        tokens: &[Address],
-        block_number: Option<BlockNumber>,
-    ) {
-        let should_schedule = {
-            let mut state = self.state.write().await;
+    pub fn run_queue(self) -> (CallsQueueHandle, mpsc::Receiver<QueueMessage>) {
+        let (tx_in, rx_in) = mpsc::channel(1);
+        let (tx_out, rx_out) = mpsc::channel::<QueueMessage>(1);
 
-            // put zero if there is no block_number (if its zero - it means we should request them with "Latest" block id)
-            // otherwise we always use latest block_number
-            let block_number = block_number.unwrap_or(0);
+        self.task_tracker.clone().spawn(async move {
+            let stream = ReceiverStream::new(rx_in).chunks_timeout(usize::MAX, CALL_QUEUE_DELAY);
+            tokio::pin!(stream);
 
-            for token in tokens {
-                state
-                    .pending
-                    .entry(*token)
-                    .and_modify(|curr_block| {
-                        *curr_block = std::cmp::max(*curr_block, block_number);
-                    })
+            while let Some(batch) = stream.next().await {
+                let token_map = Self::fold_batch_vec_to_token_map(batch);
+                let result = self.process_batch(token_map).await;
+                let _ = tx_out.send(result).await;
+            }
+        });
+
+        (
+            CallsQueueHandle {
+                tx_in: Arc::new(tx_in),
+            },
+            rx_out,
+        )
+    }
+
+    fn fold_batch_vec_to_token_map(tokens_to_fetch_batch: Vec<TokenToFetch>) -> TokenMap {
+        tokens_to_fetch_batch
+            .into_iter()
+            .fold(TokenMap::new(), |mut acc, item| {
+                let (token_address, block_number) = item;
+                let block_number = block_number.unwrap_or(0);
+
+                // we should always keep the latest block number result
+                acc.entry(token_address)
+                    .and_modify(|saved_block_n| *saved_block_n = (*saved_block_n).max(block_number))
                     .or_insert(block_number);
-            }
 
-            match state.status {
-                Status::None => {
-                    state.status = Status::Scheduled;
-                    true
-                }
-                _ => false,
-            }
-        };
-
-        if should_schedule {
-            let this = Arc::clone(&self);
-            let owner = self.owner;
-
-            self.task_tracker.spawn(async move {
-                let _ = this.flush().await.inspect_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        owner = %owner,
-                        "Error upserting delayed call"
-                    );
-                });
-            });
-        }
+                acc
+            })
     }
 
-    // request balances for tokens in queue (per session) with delay
-    async fn flush(self: Arc<Self>) -> Result<(), ServiceError> {
-        loop {
-            sleep(CALL_QUEUE_DELAY).await;
-            let tokens = {
-                let mut state = self.state.write().await;
-
-                if state.pending.is_empty() {
-                    state.status = Status::None;
-                    return Ok(());
-                }
-
-                state.status = Status::InFlight;
-                std::mem::take(&mut state.pending)
-            };
-
-            self.process_batch(tokens).await?;
-
-            let should_reschedule = {
-                let mut state = self.state.write().await;
-
-                if !state.pending.is_empty() {
-                    state.status = Status::Scheduled;
-                    true
-                } else {
-                    state.status = Status::None;
-                    false
-                }
-            };
-
-            if !should_reschedule {
-                return Ok(());
-            }
-        }
-    }
-
-    async fn process_batch(&self, batch: TokenMap) -> Result<(), ServiceError> {
+    async fn process_batch(&self, batch: TokenMap) -> QueueMessage {
         let (latest_block, tokens) = batch.iter().fold(
             (0, Vec::<Address>::with_capacity(batch.len())),
             |(latest_block, mut tokens), (token, curr)| {
@@ -160,11 +100,18 @@ impl CallsQueue {
             BlockId::from(latest_block)
         };
 
+        tracing::debug!(
+            "request balances for tokens {:?}, with block number: {:?}",
+            tokens,
+            block_id
+        );
+
         let result = self
             .rpc_client
             .fetch_balances_via_multicall(self.owner, &tokens, block_id)
             .await;
-        let msg = match result {
+
+        match result {
             Ok(response) => QueueMessage::Success(response),
             Err(err) => {
                 tracing::error!(
@@ -175,11 +122,6 @@ impl CallsQueue {
 
                 QueueMessage::Error(err)
             }
-        };
-
-        self.tx
-            .send(msg)
-            .await
-            .map_err(|err| ServiceError::ErrorToSend(err.to_string()))
+        }
     }
 }

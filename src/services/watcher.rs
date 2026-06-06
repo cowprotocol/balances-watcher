@@ -17,7 +17,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
 use crate::metrics::Metrics;
-use crate::services::calls_queue::{CallsQueue, QueueMessage};
+use crate::services::calls_queue::{CallsQueueHandle, QueueMessage};
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
 use crate::services::subscription::Subscription;
 use crate::services::ws_connection_pool::WsConnectionPool;
@@ -49,14 +49,14 @@ pub enum ParseWeb3LogsError {
     UnexpectedHashSignature,
 }
 
-use crate::services::calls_queue::Receiver;
+use crate::services::calls_queue::QueueResultReceiver;
 
 pub struct Watcher {
     task_tracker: TaskTracker,
     session: Session,
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
-    calls_queue: Arc<CallsQueue>,
+    calls_queue_handler: Arc<CallsQueueHandle>,
     rpc_client: Arc<RpcClient>,
     metrics: Arc<Metrics>,
 }
@@ -66,7 +66,7 @@ impl Watcher {
         task_tracker: TaskTracker,
         rpc_client: Arc<RpcClient>,
         subscription: Arc<Subscription>,
-        calls_queue: CallsQueue,
+        calls_queue: CallsQueueHandle,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         session: Session,
@@ -74,7 +74,7 @@ impl Watcher {
         Self {
             task_tracker,
             session,
-            calls_queue: Arc::new(calls_queue),
+            calls_queue_handler: Arc::new(calls_queue),
             sub: subscription,
             rpc_client,
             ws_connection_pool,
@@ -86,7 +86,7 @@ impl Watcher {
     // spawn_erc20_transfer_listeners - spawn listener for erc20 transfer events
     // spawn_wrapped_events_listener - spawn listener for wrapped token events (deposit/withdrawal)
     // spawn_snapshot_updater - spawn listener for snapshot update (every interval_secs)
-    pub async fn spawn_watchers(self: Arc<Self>, rx: Receiver, interval_secs: usize) {
+    pub async fn spawn_watchers(self: Arc<Self>, rx: QueueResultReceiver, interval_secs: usize) {
         Arc::clone(&self)
             .spawn_snapshot_updater(interval_secs)
             .await;
@@ -143,7 +143,7 @@ impl Watcher {
         });
     }
 
-    async fn spawn_queue_result_receiver(self: Arc<Self>, mut rx: Receiver) {
+    async fn spawn_queue_result_receiver(self: Arc<Self>, mut rx: QueueResultReceiver) {
         let cancel = self.sub.cancellable();
 
         Arc::clone(&self).task_tracker.spawn(async move {
@@ -350,10 +350,10 @@ impl Watcher {
                 _ = async {
                     match Arc::clone(&this).subscribe_with_retries(&pool_guard.provider, filter.clone()).await {
                         Ok(sub) => {
-                            tracing::info!("subscribed to logs");
+                            tracing::debug!("subscribed to logs");
 
                             let mut stream = sub.into_stream();
-                             'logs_loop: loop {
+                             'web3_logs_loop: loop {
                                 tokio::select! {
                                     _ = cancel.cancelled() => {
                                         tracing::debug!("cancelled log subscription");
@@ -367,7 +367,7 @@ impl Watcher {
                                             None => {
                                                 this.metrics.ws_provider_disconnected_total.increment(1);
                                                 tracing::warn!("ws stream ended (disconnect). will resubscribe");
-                                                break 'logs_loop;
+                                                break 'web3_logs_loop;
                                             }
                                         }
                                     }
@@ -419,6 +419,8 @@ impl Watcher {
     }
 
     async fn parse_weth9_logs_and_fetch_balance(self: Arc<Self>, log: &Log) {
+        tracing::debug!("got weth9 log: {:?}", log);
+
         let Ok(parsed_log) = Self::parse_weth9_logs(log) else {
             self.metrics.parse_weth9_logs_failed_total.increment(1);
             return;
@@ -431,12 +433,14 @@ impl Watcher {
         };
 
         // always put native address into queue to keep it synced
-        let tokens = vec![
-            self.session.network.weth9_address(),
-            self.session.network.native_token_address(),
-        ];
-        Arc::clone(&self.calls_queue)
-            .upsert_delayed_call(&tokens, block_number)
+        let weth9_address = self.session.network.weth9_address();
+        tracing::debug!(
+            token = %weth9_address,
+            block_number = block_number,
+            "weth9 log is parsed, send fetching balance request to a queue"
+        );
+        Arc::clone(&self.calls_queue_handler)
+            .upsert_delayed_rcp_call(weth9_address, block_number)
             .await;
     }
 
@@ -447,7 +451,7 @@ impl Watcher {
         let topic0 = match log.topic0() {
             Some(topic0) => topic0,
             None => {
-                tracing::error!("topic0 is None for log(WETH event): {:#?}", log);
+                tracing::warn!("topic0 is None for log(WETH event): {:#?}", log);
                 return Err(ParseWeb3LogsError::Topic0IsNone);
             }
         };
@@ -518,34 +522,19 @@ impl Watcher {
     async fn spawn_erc20_transfer_listener_with_filter(self: Arc<Self>, filter: Filter) {
         let session = self.session;
         let sub = Arc::clone(&self.sub);
-        let calls_queue = Arc::clone(&self.calls_queue);
-        let metrics = Arc::clone(&self.metrics);
 
         let this = Arc::clone(&self);
         self.task_tracker.spawn(async move {
-            let sub_for_log_handler = Arc::clone(&sub);
-            let metrics_for_log = Arc::clone(&metrics);
-
-            let _ = this
+            let _ = Arc::clone(&this)
                 .run_log_subscription_loop(
                     filter,
                     move |log: Log| {
-                        let calls_queue = Arc::clone(&calls_queue);
-                        let metrics_for_log = Arc::clone(&metrics_for_log);
-                        let sub_for_parsing_tokens = Arc::clone(&sub_for_log_handler);
-
                         tracing::info!("received erc20 transfer event: {:#?}", log);
-                        metrics_for_log.erc20_event_received_total.increment(1);
+                        this.metrics.erc20_event_received_total.increment(1);
 
+                        let this = Arc::clone(&this);
                         Box::pin(async move {
-                            Self::parse_transfer_event_and_fetch_balance(
-                                session,
-                                calls_queue,
-                                sub_for_parsing_tokens,
-                                &log,
-                                metrics_for_log,
-                            )
-                            .await;
+                            this.parse_transfer_event_and_fetch_balance(&log).await;
                         })
                     },
                     move || {
@@ -562,22 +551,16 @@ impl Watcher {
         });
     }
 
-    async fn parse_transfer_event_and_fetch_balance(
-        session: Session,
-        calls_queue: Arc<CallsQueue>,
-        sub: Arc<Subscription>,
-        log: &Log,
-        metrics: Arc<Metrics>,
-    ) {
+    async fn parse_transfer_event_and_fetch_balance(self: Arc<Self>, log: &Log) {
         let block_number = log.block_number;
 
         let decoded_log: Log<ERC20::Transfer> = match log.log_decode() {
             Ok(log) => log,
             Err(err) => {
-                metrics.parse_erc20_log_errors_total.increment(1);
+                self.metrics.parse_erc20_log_errors_total.increment(1);
                 tracing::error!(
                     error = %err,
-                    owner = %session.owner,
+                    owner = %self.session.owner,
                     "error when parse log",
                 );
                 return;
@@ -587,7 +570,7 @@ impl Watcher {
         // service listens to all transfer events
         // skip all tokens that are not in the watched token list
         let token_address = decoded_log.address();
-        if !sub.is_watched(&token_address).await {
+        if !self.sub.is_watched(&token_address).await {
             tracing::info!(
                 token_address = %token_address,
                 "token is not watched, skip"
@@ -595,9 +578,14 @@ impl Watcher {
             return;
         }
 
+        tracing::debug!(
+            token = %token_address,
+            block_number = block_number,
+            "erc20 event is parsed, send it to fetch queue"
+        );
         // always put native address into queue to keep it synced
-        let tokens = vec![token_address, session.network.native_token_address()];
-
-        calls_queue.upsert_delayed_call(&tokens, block_number).await;
+        self.calls_queue_handler
+            .upsert_delayed_rcp_call(token_address, block_number)
+            .await;
     }
 }

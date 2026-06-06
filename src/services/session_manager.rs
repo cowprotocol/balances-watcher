@@ -193,24 +193,26 @@ impl SessionManager {
                 "upsert: spawning watchers"
             );
 
-            let (calls_queue, rx) = CallsQueue::new(
+            let calls_queue = CallsQueue::new(
                 self.task_tracker.clone(),
                 session.owner,
                 Arc::clone(&rpc_client),
             );
 
+            let (calls_queue_handler, receiver) = calls_queue.run_queue();
+
             let watcher = Arc::new(Watcher::new(
                 self.task_tracker.clone(),
                 rpc_client,
                 sub,
-                calls_queue,
+                calls_queue_handler,
                 ws_pool,
                 Arc::clone(&self.metrics),
                 session,
             ));
 
             watcher
-                .spawn_watchers(rx, self.config.snapshot_interval)
+                .spawn_watchers(receiver, self.config.snapshot_interval)
                 .await;
 
             tracing::info!(

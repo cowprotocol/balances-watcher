@@ -5,9 +5,6 @@ pub enum ServiceError {
     #[error("Error getting balances from multicall: {0}")]
     BalancesMultiCallError(String),
 
-    #[error("Error to send data via tx: {0}")]
-    ErrorToSend(String),
-
     #[error("Error when init the ws provider: {0}")]
     ErrorInitWsProvider(String),
 }
