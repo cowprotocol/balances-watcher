@@ -1,4 +1,4 @@
-use crate::config::constants::CALL_QUEUE_DELAY;
+use crate::config::constants::{CALL_QUEUE_DELAY, MAX_QUEUE_SIZE};
 use crate::services::errors::ServiceError;
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
 use alloy::eips::BlockId;
@@ -47,11 +47,12 @@ impl CallsQueue {
     }
 
     pub fn run_queue(self) -> (CallsQueueHandle, mpsc::Receiver<QueueMessage>) {
-        let (tx_in, rx_in) = mpsc::channel(1);
-        let (tx_out, rx_out) = mpsc::channel::<QueueMessage>(1);
+        let (tx_in, rx_in) = mpsc::channel(64);
+        let (tx_out, rx_out) = mpsc::channel::<QueueMessage>(64);
 
         self.task_tracker.clone().spawn(async move {
-            let stream = ReceiverStream::new(rx_in).chunks_timeout(usize::MAX, CALL_QUEUE_DELAY);
+            let stream =
+                ReceiverStream::new(rx_in).chunks_timeout(MAX_QUEUE_SIZE, CALL_QUEUE_DELAY);
             tokio::pin!(stream);
 
             while let Some(batch) = stream.next().await {

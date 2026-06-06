@@ -10,6 +10,8 @@ pub const DEFAULT_MAX_WATCHED_TOKENS_LIMIT: usize = 1500;
 
 pub const CALL_QUEUE_DELAY: Duration = Duration::from_millis(300);
 
+pub const MAX_QUEUE_SIZE: usize = 256;
+
 pub const MAX_CLIENTS_PER_WS_CONNECTION: usize = 300;
 
 pub const MULTICALL_PERMITS_COUNT: usize = 200;
