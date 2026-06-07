@@ -1,3 +1,15 @@
+//! HTTP-side RPC client: batched balance reads (Multicall3), concurrency cap,
+//! retry with transient/permanent classification, per-subcall failure
+//! isolation.
+//!
+//! ```text
+//!     fetch_balances_via_multicall
+//!         → semaphore permit
+//!         → try_block_and_aggregate_with_retries (backon + is_multicall_retryable)
+//!             → build_balance_of_multicall (rebuilt per attempt, MulticallBuilder is !Clone)
+//!             → alloy → eth_call → RPC provider
+//! ```
+
 use crate::config::constants::MULTICALL_PERMITS_COUNT;
 use crate::evm::erc20::ERC20;
 use crate::metrics::Metrics;
@@ -12,18 +24,24 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// `(token → balance, block_number_the_batch_was_read_at)`.
 pub type BalancesWithBlock = (HashMap<Address, U256>, BlockNumber);
 
 type DynMulticallBuilder<D> = MulticallBuilder<Dynamic<D>, Arc<DynProvider>, Ethereum>;
 
+/// Error surface for this module.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RpcError {
+    /// Single-shot RPC call failed (no retry layer involved).
     #[error("RPC call failed: {0}")]
     Call(String),
+    /// Multicall retry path: backoff exhausted, or short-circuited on a
+    /// permanent error by [`RpcClient::is_multicall_retryable`].
     #[error("Provider exhausted after retries: {0}")]
     Exhausted(String),
 }
 
+/// HTTP-side RPC client shared across the service.
 pub struct RpcClient {
     provider: Arc<DynProvider>,
     request_semaphore: tokio::sync::Semaphore,
@@ -31,6 +49,7 @@ pub struct RpcClient {
 }
 
 impl RpcClient {
+    /// Construct a client around an already-connected HTTP provider.
     pub fn new(provider: Arc<DynProvider>, metrics: Arc<Metrics>) -> Self {
         Self {
             provider,
@@ -39,6 +58,18 @@ impl RpcClient {
         }
     }
 
+    /// Read ERC20 balances for `owner` at `block_id`, one Multicall3
+    /// round-trip per call.
+    ///
+    /// Sent with `requireSuccess=false`: a single failing `balanceOf` does
+    /// not poison the snapshot. This matters in practice — upstream token
+    /// lists regularly include dead / migrated / proxy-broken ERC20s whose
+    /// `balanceOf` reverts. Those tokens are warned + counted and dropped from
+    /// the result map; healthy tokens still flow to the client.
+    ///
+    /// `Err` is returned only when the multicall itself never completed
+    /// (transient errors exhausted retries, or a permanent error such as
+    /// ABI mismatch / wrong multicall3 address).
     pub async fn fetch_balances_via_multicall(
         &self,
         owner: Address,
@@ -56,8 +87,7 @@ impl RpcClient {
             let erc20_tokens = erc20_tokens.clone();
 
             self.try_block_and_aggregate_with_retries(move || {
-                let provider = Arc::clone(&self.provider);
-                Self::build_balance_of_multicall(provider, &erc20_tokens, block_id, owner)
+                Self::build_balance_of_multicall(&self.provider, &erc20_tokens, block_id, owner)
             })
             .await
             .inspect(move |_| {
@@ -88,6 +118,7 @@ impl RpcClient {
         // failure is a different path — handled above by `provider_exhausted_with_retries_total`.
         for (i, erc20_token) in erc20_tokens.iter().enumerate() {
             let Some(sub_call_result) = subcalls_result.get(i) else {
+                self.metrics.multicall_subcall_failed_total.increment(1);
                 tracing::warn!(
                     token = %erc20_token,
                     index = i,
@@ -100,12 +131,14 @@ impl RpcClient {
                 Ok(balance) => {
                     balances.insert(*erc20_token, *balance);
                 }
-                Err(err) => {
+                Err(failure) => {
                     self.metrics.multicall_subcall_failed_total.increment(1);
+                    // `Failure` covers both subcall revert and abi-decode mismatch;
+                    // distinguish heuristically via return_data length when triaging.
                     tracing::warn!(
-                        error = %err,
                         token = %erc20_token,
-                        "multicall: abi_decode failed, skipping token"
+                        return_data_len = failure.return_data.len(),
+                        "multicall subcall failed, skipping token"
                     );
                 }
             }
@@ -114,20 +147,31 @@ impl RpcClient {
         Ok((balances, block_number))
     }
 
+    /// Build a `MulticallBuilder` of `balanceOf(owner)` for every `token`,
+    /// pinned to `block_id`.
     fn build_balance_of_multicall(
-        provider: Arc<DynProvider>,
+        provider: &Arc<DynProvider>,
         tokens: &[Address],
         block_id: BlockId,
         owner: Address,
     ) -> DynMulticallBuilder<ERC20::balanceOfCall> {
         let multicall = tokens.iter().fold(
-            MulticallBuilder::new(provider.clone()).dynamic::<ERC20::balanceOfCall>(),
-            |builder, token| builder.add_dynamic(ERC20::new(*token, &provider).balanceOf(owner)),
+            MulticallBuilder::new(Arc::clone(provider)).dynamic::<ERC20::balanceOfCall>(),
+            |builder, token| builder.add_dynamic(ERC20::new(*token, provider).balanceOf(owner)),
         );
 
         multicall.block(block_id)
     }
 
+    /// Run `tryBlockAndAggregate(false, …)` with retries from [`Self::backoff`].
+    ///
+    /// Transient errors are retried; permanent errors
+    /// ([`Self::is_multicall_retryable`] returns `false`) short-circuit.
+    /// Both flavours of final failure surface as [`RpcError::Exhausted`].
+    ///
+    /// Returns `(block_number, per-subcall results)`. `Err(Failure)` in the
+    /// inner `Vec` means the individual subcall reverted or its return data
+    /// could not be decoded.
     async fn try_block_and_aggregate_with_retries<D, F>(
         &self,
         build_multicall: F,
@@ -138,20 +182,22 @@ impl RpcClient {
     {
         let backoff = Self::backoff();
         let metrics = Arc::clone(&self.metrics);
-        (|| async {
+        (|| {
             let build_multicall = build_multicall.clone();
-            build_multicall()
-                .try_block_and_aggregate(false)
-                .await
-                .map(|(block_number, _block_hash, results)| (block_number, results))
+            async move {
+                build_multicall()
+                    .try_block_and_aggregate(false)
+                    .await
+                    .map(|(block_number, _block_hash, results)| (block_number, results))
+            }
         })
         .retry(backoff)
         .when(Self::is_multicall_retryable)
         .notify(move |err, duration| {
-            tracing::error!(
+            tracing::warn!(
                 error = %err,
                 duration = ?duration,
-                "failed to execute multicall"
+                "multicall attempt failed, will retry"
             );
             metrics.multicall_failed_total.increment(1);
         })
@@ -198,6 +244,7 @@ impl RpcClient {
             .with_jitter()
     }
 
+    /// Single `eth_blockNumber` call. Used by `/health`.
     pub async fn get_block_number(&self) -> Result<BlockNumber, RpcError> {
         self.provider
             .get_block_number()
