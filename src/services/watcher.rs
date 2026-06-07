@@ -439,7 +439,6 @@ impl Watcher {
             _ => None,
         };
 
-        // always put native address into queue to keep it synced
         let weth9_address = self.session.network.weth9_address();
         tracing::debug!(
             token = %weth9_address,
