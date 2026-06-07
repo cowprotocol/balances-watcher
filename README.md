@@ -1,8 +1,15 @@
 # Token Balances Watcher
 
-Real-time ERC20 + native token balance tracking service for EVM chains, designed
-to back the CoW Swap frontend without each user blowing through their wallet's
-RPC rate limits.
+Real-time **ERC20** balance tracking service for EVM chains, designed to back
+the CoW Swap frontend without each user blowing through their wallet's RPC rate
+limits.
+
+> **Scope:** native balances (ETH on Ethereum, BNB on BSC, MATIC on Polygon, …)
+> are **not** tracked. The native sentinel address `0xEee…EEeE` is silently
+> dropped from the watched set if a client supplies it. Clients that need the
+> native balance should query their wallet provider directly (`eth_getBalance`)
+> — it is a single, cheap RPC call and does not benefit from this service's
+> batching pipeline.
 
 The service is **chain-scoped**: one process serves exactly one network. Multi-chain
 coverage is achieved by running N replicas (one per chain) behind a path-based
@@ -11,8 +18,8 @@ ingress — see [Deployment model](#deployment-model).
 ## Features
 
 - Real-time balance updates via **Server-Sent Events (SSE)**
-- **Multicall3** for efficient batch balance reads (`balanceOf` + native `getEthBalance`
-  in a single call)
+- **Multicall3** for efficient batch balance reads (one `balanceOf` per watched
+  token, coalesced into a single multicall round-trip)
 - **WebSocket subscriptions** for ERC20 `Transfer` events + WETH9 `Deposit`/`Withdrawal`
   events, with automatic reconnect and resubscription
 - **Event batching** via a 300 ms debounce queue — bursts of transfers collapse
@@ -360,9 +367,9 @@ These live in `src/config/constants.rs`:
 
 | Event | Contract | Triggers |
 |---|---|---|
-| `Transfer(from indexed, to indexed, value)` | any ERC20 in the watched set | balance refresh for the token + native ETH |
-| `Deposit(dst indexed, wad)` | WETH9 | balance refresh for WETH + native ETH |
-| `Withdrawal(src indexed, wad)` | WETH9 | balance refresh for WETH + native ETH |
+| `Transfer(from indexed, to indexed, value)` | any ERC20 in the watched set | balance refresh for the token |
+| `Deposit(dst indexed, wad)` | WETH9 | balance refresh for WETH |
+| `Withdrawal(src indexed, wad)` | WETH9 | balance refresh for WETH |
 
 Filtering is done client-side (the subscription is `Transfer` topic + owner
 indexed), so transfers involving tokens outside the watched set are dropped
