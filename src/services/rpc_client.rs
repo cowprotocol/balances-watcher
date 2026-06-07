@@ -1,20 +1,20 @@
 use crate::config::constants::MULTICALL_PERMITS_COUNT;
-use crate::domain::EvmNetwork;
 use crate::evm::erc20::ERC20;
-use crate::evm::multicall3::Multicall3;
-use crate::evm::multicall3::Multicall3::Multicall3Instance;
 use crate::metrics::Metrics;
 use crate::services::errors::ServiceError;
 use alloy::eips::BlockId;
+use alloy::network::Ethereum;
 use alloy::primitives::{Address, BlockNumber, U256};
-use alloy::providers::{DynProvider, Provider};
-use alloy::sol_types::{SolCall, SolValue};
+use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError, Provider};
+use alloy::sol_types::SolCall;
 use backon::{ExponentialBuilder, Retryable};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-pub type BalancesWithBlock = (HashMap<Address, U256>, U256);
+pub type BalancesWithBlock = (HashMap<Address, U256>, BlockNumber);
+
+type DynMulticallBuilder<D> = MulticallBuilder<Dynamic<D>, Arc<DynProvider>, Ethereum>;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RpcError {
@@ -27,16 +27,14 @@ pub enum RpcError {
 pub struct RpcClient {
     provider: Arc<DynProvider>,
     request_semaphore: tokio::sync::Semaphore,
-    network: EvmNetwork,
     metrics: Arc<Metrics>,
 }
 
 impl RpcClient {
-    pub fn new(provider: Arc<DynProvider>, network: EvmNetwork, metrics: Arc<Metrics>) -> Self {
+    pub fn new(provider: Arc<DynProvider>, metrics: Arc<Metrics>) -> Self {
         Self {
             provider,
             request_semaphore: tokio::sync::Semaphore::new(MULTICALL_PERMITS_COUNT),
-            network,
             metrics,
         }
     }
@@ -50,37 +48,30 @@ impl RpcClient {
         let mut erc20_tokens: Vec<Address> = tokens.to_vec();
         erc20_tokens.sort();
 
-        let multicall3 = Multicall3::new(self.network.multicall3_address(), self.provider.clone());
-        let mut calls: Vec<Multicall3::Call> = Vec::new();
-
-        for address in &erc20_tokens {
-            let call = ERC20::balanceOfCall { owner };
-            let calldata = call.abi_encode();
-            calls.push(Multicall3::Call {
-                target: *address,
-                callData: calldata.into(),
-            });
-        }
-
         let t0 = Instant::now();
 
-        let call_result = {
+        let (block_number, subcalls_result) = {
             let _permit = self.request_semaphore.acquire().await;
             let metrics = Arc::clone(&self.metrics);
-            self.multicall_with_backoff(&multicall3, &calls, block_id)
-                .await
-                .inspect(move |_| {
-                    self.metrics.multicall_total.increment(1);
-                    metrics
-                        .multicall_duration_ms
-                        .record(t0.elapsed().as_millis() as f64);
-                })
-                .map_err(|e| {
-                    self.metrics
-                        .provider_exhausted_with_retries_total
-                        .increment(1);
-                    ServiceError::BalancesMultiCallError(e.to_string())
-                })?
+            let erc20_tokens = erc20_tokens.clone();
+
+            self.try_block_and_aggregate_with_retries(move || {
+                let provider = Arc::clone(&self.provider);
+                Self::build_balance_of_multicall(provider, &erc20_tokens, block_id, owner)
+            })
+            .await
+            .inspect(move |_| {
+                self.metrics.multicall_total.increment(1);
+                metrics
+                    .multicall_duration_ms
+                    .record(t0.elapsed().as_millis() as f64);
+            })
+            .map_err(|err| {
+                self.metrics
+                    .provider_exhausted_with_retries_total
+                    .increment(1);
+                ServiceError::MultiCallError(err.to_string())
+            })?
         };
 
         tracing::info!(
@@ -89,7 +80,6 @@ impl RpcClient {
         );
 
         let mut balances: HashMap<Address, U256> = HashMap::new();
-        let return_data = &call_result.returnData;
 
         // We call multicall with `requireSuccess=false`, so per-subcall failures
         // are expected and non-fatal: dead/migrated/proxy-broken ERC20s appear
@@ -97,35 +87,23 @@ impl RpcClient {
         // token; the rest of the batch still flows to the client. A full-batch
         // failure is a different path — handled above by `provider_exhausted_with_retries_total`.
         for (i, erc20_token) in erc20_tokens.iter().enumerate() {
-            let Some(resp) = return_data.get(i) else {
-                self.metrics.multicall_subcall_failed_total.increment(1);
+            let Some(sub_call_result) = subcalls_result.get(i) else {
                 tracing::warn!(
                     token = %erc20_token,
                     index = i,
-                    "multicall: missing response slot, skipping token"
+                    "multicall response is not matched to current token list size"
                 );
                 continue;
             };
 
-            if !resp.success {
-                self.metrics.multicall_subcall_failed_total.increment(1);
-                tracing::warn!(
-                    token = %erc20_token,
-                    index = i,
-                    return_data_len = resp.returnData.len(),
-                    "multicall3 subcall reverted, skipping token"
-                );
-                continue;
-            }
-
-            match <U256 as SolValue>::abi_decode(&resp.returnData) {
+            match sub_call_result {
                 Ok(balance) => {
-                    balances.insert(*erc20_token, balance);
+                    balances.insert(*erc20_token, *balance);
                 }
-                Err(e) => {
+                Err(err) => {
                     self.metrics.multicall_subcall_failed_total.increment(1);
                     tracing::warn!(
-                        error = %e,
+                        error = %err,
                         token = %erc20_token,
                         "multicall: abi_decode failed, skipping token"
                     );
@@ -133,30 +111,42 @@ impl RpcClient {
             }
         }
 
-        Ok((balances, call_result.blockNumber))
+        Ok((balances, block_number))
     }
 
-    async fn multicall_with_backoff(
-        &self,
-        multicall3: &Multicall3Instance<Arc<DynProvider>>,
-        calls: &[Multicall3::Call],
+    fn build_balance_of_multicall(
+        provider: Arc<DynProvider>,
+        tokens: &[Address],
         block_id: BlockId,
-    ) -> Result<Multicall3::tryBlockAndAggregateReturn, RpcError> {
+        owner: Address,
+    ) -> DynMulticallBuilder<ERC20::balanceOfCall> {
+        let multicall = tokens.iter().fold(
+            MulticallBuilder::new(provider.clone()).dynamic::<ERC20::balanceOfCall>(),
+            |builder, token| builder.add_dynamic(ERC20::new(*token, &provider).balanceOf(owner)),
+        );
+
+        multicall.block(block_id)
+    }
+
+    async fn try_block_and_aggregate_with_retries<D, F>(
+        &self,
+        build_multicall: F,
+    ) -> Result<(u64, Vec<Result<D::Return, Failure>>), RpcError>
+    where
+        D: SolCall + Send + Sync + Unpin + 'static,
+        F: Fn() -> DynMulticallBuilder<D> + Clone + Send + Sync,
+    {
         let backoff = Self::backoff();
         let metrics = Arc::clone(&self.metrics);
-        (|| {
-            let calls = calls.to_owned();
-            let mc = multicall3.clone();
-
-            async move {
-                mc.tryBlockAndAggregate(false, calls)
-                    .block(block_id)
-                    .call()
-                    .await
-            }
+        (|| async {
+            let build_multicall = build_multicall.clone();
+            build_multicall()
+                .try_block_and_aggregate(false)
+                .await
+                .map(|(block_number, _block_hash, results)| (block_number, results))
         })
         .retry(backoff)
-        .when(Self::is_retryable)
+        .when(Self::is_multicall_retryable)
         .notify(move |err, duration| {
             tracing::error!(
                 error = %err,
@@ -167,7 +157,7 @@ impl RpcClient {
         })
         .await
         .map_err(|err| {
-            if !Self::is_retryable(&err) {
+            if !Self::is_multicall_retryable(&err) {
                 tracing::warn!(
                     error = %err,
                     "multicall returned a permanent error, not retrying"
@@ -177,33 +167,26 @@ impl RpcClient {
         })
     }
 
-    /// Classify a contract-call error: which ones are worth retrying.
+    /// Classify a `MulticallError` from `alloy::providers::MulticallBuilder`:
+    /// which ones are worth retrying.
     ///
-    /// Transient (retry): transport-layer failures — backend gone, missing
-    /// response, network timeouts, 5xx from the RPC. A `backon` round may
-    /// recover.
+    /// Transient (retry): transport-layer failures — backend gone, network
+    /// timeouts, 5xx from the RPC. A `backon` round may recover.
     ///
-    /// Permanent (give up immediately): caller-side bugs that no amount of
-    /// retrying will fix — multicall3 not deployed at the configured address,
-    /// ABI mismatch, unknown selector, on-chain revert with payload.
-    fn is_retryable(err: &alloy::contract::Error) -> bool {
-        use alloy::contract::Error;
+    /// Permanent (give up immediately):
+    /// - `TransportError` that carries on-chain revert payload — multicall3
+    ///   itself reverted (wrong address / out-of-gas on the whole batch),
+    ///   retrying with the same input will fail the same way.
+    /// - `DecodeError` / `NoReturnData` / `CallFailed` / `ValueTx` — encoder
+    ///   bug or ABI mismatch on our side; no retry will fix it.
+    fn is_multicall_retryable(err: &MulticallError) -> bool {
+        use MulticallError::*;
         match err {
-            Error::UnknownFunction(_)
-            | Error::UnknownSelector(_)
-            | Error::NotADeploymentTransaction
-            | Error::ContractNotDeployed
-            | Error::ZeroData(_, _)
-            | Error::AbiError(_)
-            | Error::PendingTransactionError(_) => false,
-            Error::TransportError(transport_err) => {
-                // A transport error carrying revert payload is a contract-level
-                // failure (e.g. multicall3 itself reverted) — no point retrying.
-                transport_err
-                    .as_error_resp()
-                    .and_then(|e| e.as_revert_data())
-                    .is_none()
-            }
+            TransportError(transport_err) => transport_err
+                .as_error_resp()
+                .and_then(|e| e.as_revert_data())
+                .is_none(),
+            DecodeError(_) | NoReturnData | CallFailed(_) | ValueTx => false,
         }
     }
 

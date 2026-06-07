@@ -27,10 +27,6 @@ impl EvmNetwork {
         self as u64
     }
 
-    pub fn multicall3_address(self) -> Address {
-        address!("0xcA11bde05977b3631167028862bE2a173976CA11")
-    }
-
     /// De-facto sentinel for the native token used by most DeFi UIs and token
     /// lists (ETH on Ethereum, BNB on BSC, MATIC on Polygon, …). The same
     /// pseudo-address on every EVM chain — not a real contract. This service
