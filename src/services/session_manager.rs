@@ -1,6 +1,7 @@
 use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::metrics::Metrics;
+use crate::services::calls_queue::BalanceRefreshQueue;
 use crate::services::cleanup_stream;
 use crate::services::errors::{FetcherError, SubscriptionError};
 use crate::services::rpc_client::{RpcClient, RpcError};
@@ -47,7 +48,7 @@ pub struct SessionConfig {
 /// - bridge subscription events to SSE clients
 pub struct SessionManager {
     sub_manager: Arc<SubscriptionManager>,
-    multicall_fetcher: Arc<RpcClient>,
+    rpc_client: Arc<RpcClient>,
     ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
     task_tracker: TaskTracker,
@@ -106,7 +107,7 @@ pub enum SessionError {
 
 impl SessionManager {
     pub fn new(
-        multicall_fetcher: Arc<RpcClient>,
+        rpc_client: Arc<RpcClient>,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         task_tracker: TaskTracker,
@@ -131,7 +132,7 @@ impl SessionManager {
             sub_manager: Arc::clone(&sub_manager),
             ws_connection_pool,
             fetcher: Arc::new(token_list_fetcher),
-            multicall_fetcher,
+            rpc_client,
             task_tracker,
             metrics,
             config,
@@ -143,7 +144,7 @@ impl SessionManager {
 
         // Single-network instance: the fetcher & ws pool are pre-bound. No
         // session-time lookup, no "provider not defined" branch.
-        let provider = Arc::clone(&self.multicall_fetcher);
+        let rpc_client = Arc::clone(&self.rpc_client);
         let ws_pool = Arc::clone(&self.ws_connection_pool);
 
         let tokens = self
@@ -192,16 +193,26 @@ impl SessionManager {
                 "upsert: spawning watchers"
             );
 
-            Watcher::new(
+            let (refresh_queue, result_rx) = BalanceRefreshQueue::new(
                 self.task_tracker.clone(),
-                session,
-                provider,
-                Arc::clone(&sub),
+                session.owner,
+                Arc::clone(&rpc_client),
+            )
+            .spawn();
+
+            let watcher = Arc::new(Watcher::new(
+                self.task_tracker.clone(),
+                rpc_client,
+                sub,
+                refresh_queue,
                 ws_pool,
                 Arc::clone(&self.metrics),
-            )
-            .spawn_watchers(self.config.snapshot_interval)
-            .await;
+                session,
+            ));
+
+            watcher
+                .spawn_watchers(result_rx, self.config.snapshot_interval)
+                .await;
 
             tracing::info!(
                 session = %session,
@@ -256,10 +267,7 @@ impl SessionManager {
     }
 
     pub async fn healthcheck(&self) -> Result<(), RpcError> {
-        self.multicall_fetcher
-            .get_block_number()
-            .await
-            .map(|_| Ok(()))?
+        self.rpc_client.get_block_number().await.map(|_| Ok(()))?
     }
 
     pub async fn create_sse_connection(
