@@ -12,12 +12,14 @@ use futures::future::BoxFuture;
 use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use tokio::time::interval;
 use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
 use crate::metrics::Metrics;
-use crate::services::calls_queue::{CallsQueueHandle, QueueMessage};
+use crate::services::calls_queue::BalanceRefreshQueueHandle;
+use crate::services::errors::ServiceError;
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
 use crate::services::subscription::Subscription;
 use crate::services::ws_connection_pool::WsConnectionPool;
@@ -49,14 +51,12 @@ pub enum ParseWeb3LogsError {
     UnexpectedHashSignature,
 }
 
-use crate::services::calls_queue::QueueResultReceiver;
-
 pub struct Watcher {
     task_tracker: TaskTracker,
     session: Session,
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
-    calls_queue_handler: Arc<CallsQueueHandle>,
+    refresh_queue: BalanceRefreshQueueHandle,
     rpc_client: Arc<RpcClient>,
     metrics: Arc<Metrics>,
 }
@@ -66,7 +66,7 @@ impl Watcher {
         task_tracker: TaskTracker,
         rpc_client: Arc<RpcClient>,
         subscription: Arc<Subscription>,
-        calls_queue: CallsQueueHandle,
+        refresh_queue: BalanceRefreshQueueHandle,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         session: Session,
@@ -74,7 +74,7 @@ impl Watcher {
         Self {
             task_tracker,
             session,
-            calls_queue_handler: Arc::new(calls_queue),
+            refresh_queue,
             sub: subscription,
             rpc_client,
             ws_connection_pool,
@@ -86,7 +86,11 @@ impl Watcher {
     // spawn_erc20_transfer_listeners - spawn listener for erc20 transfer events
     // spawn_wrapped_events_listener - spawn listener for wrapped token events (deposit/withdrawal)
     // spawn_snapshot_updater - spawn listener for snapshot update (every interval_secs)
-    pub async fn spawn_watchers(self: Arc<Self>, rx: QueueResultReceiver, interval_secs: usize) {
+    pub async fn spawn_watchers(
+        self: Arc<Self>,
+        rx: mpsc::Receiver<Result<BalancesWithBlock, ServiceError>>,
+        interval_secs: usize,
+    ) {
         Arc::clone(&self)
             .spawn_snapshot_updater(interval_secs)
             .await;
@@ -143,7 +147,10 @@ impl Watcher {
         });
     }
 
-    async fn spawn_queue_result_receiver(self: Arc<Self>, mut rx: QueueResultReceiver) {
+    async fn spawn_queue_result_receiver(
+        self: Arc<Self>,
+        mut rx: mpsc::Receiver<Result<BalancesWithBlock, ServiceError>>,
+    ) {
         let cancel = self.sub.cancellable();
 
         Arc::clone(&self).task_tracker.spawn(async move {
@@ -156,9 +163,9 @@ impl Watcher {
                         break;
                     },
                     msg = rx.recv() => {
-                        if let Some(msg) = msg {
-                            match msg {
-                                QueueMessage::Success(balances) => {
+                        if let Some(result) = msg {
+                            match result {
+                                Ok(balances) => {
                                     tracing::debug!(
                                         owner = %this.session.owner,
                                         "balances received from queue, updating snapshot"
@@ -166,7 +173,7 @@ impl Watcher {
 
                                     this.update_balances_and_send_event(balances).await;
                                 },
-                                QueueMessage::Error(err) => {
+                                Err(err) => {
                                     tracing::error!(
                                         owner = %this.session.owner,
                                         error = %err,
@@ -439,8 +446,8 @@ impl Watcher {
             block_number = block_number,
             "weth9 log is parsed, send fetching balance request to a queue"
         );
-        self.calls_queue_handler
-            .upsert_delayed_rpc_call(weth9_address, block_number)
+        self.refresh_queue
+            .enqueue(weth9_address, block_number)
             .await;
     }
 
@@ -583,8 +590,8 @@ impl Watcher {
             block_number = block_number,
             "erc20 event is parsed, send it to fetch queue"
         );
-        self.calls_queue_handler
-            .upsert_delayed_rpc_call(token_address, block_number)
+        self.refresh_queue
+            .enqueue(token_address, block_number)
             .await;
     }
 }

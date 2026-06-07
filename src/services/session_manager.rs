@@ -1,7 +1,7 @@
 use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::metrics::Metrics;
-use crate::services::calls_queue::CallsQueue;
+use crate::services::calls_queue::BalanceRefreshQueue;
 use crate::services::cleanup_stream;
 use crate::services::errors::{FetcherError, SubscriptionError};
 use crate::services::rpc_client::{RpcClient, RpcError};
@@ -193,26 +193,25 @@ impl SessionManager {
                 "upsert: spawning watchers"
             );
 
-            let calls_queue = CallsQueue::new(
+            let (refresh_queue, result_rx) = BalanceRefreshQueue::new(
                 self.task_tracker.clone(),
                 session.owner,
                 Arc::clone(&rpc_client),
-            );
-
-            let (calls_queue_handler, receiver) = calls_queue.run_queue();
+            )
+            .spawn();
 
             let watcher = Arc::new(Watcher::new(
                 self.task_tracker.clone(),
                 rpc_client,
                 sub,
-                calls_queue_handler,
+                refresh_queue,
                 ws_pool,
                 Arc::clone(&self.metrics),
                 session,
             ));
 
             watcher
-                .spawn_watchers(receiver, self.config.snapshot_interval)
+                .spawn_watchers(result_rx, self.config.snapshot_interval)
                 .await;
 
             tracing::info!(
