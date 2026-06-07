@@ -27,6 +27,10 @@ pub struct Metrics {
     pub multicall_duration_ms: Histogram,
     /// multicall gave up after backoff exhausted
     pub provider_exhausted_with_retries_total: Counter,
+    /// per-token subcall inside a successful multicall failed
+    /// (revert / missing slot / abi-decode failure). The token is skipped,
+    /// the rest of the batch still flows to the client.
+    pub multicall_subcall_failed_total: Counter,
 
     /// erc20 transfer log received
     pub erc20_event_received_total: Counter,
@@ -80,6 +84,7 @@ impl Metrics {
             provider_exhausted_with_retries_total: counter!(
                 "provider_exhausted_with_retries_total"
             ),
+            multicall_subcall_failed_total: counter!("multicall_subcall_failed_total"),
 
             erc20_event_received_total: counter!("erc20_event_received_total"),
             weth9_events_received_total: counter!("weth9_events_received_total"),

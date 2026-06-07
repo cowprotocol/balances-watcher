@@ -223,7 +223,7 @@ impl SessionManager {
         Ok(())
     }
 
-    // fetch tokens from lists and add eth/weth9 as watched
+    // fetch tokens from lists and add weth9 as watched
     async fn fetch_and_extend_tokens(
         &self,
         session: Session,
@@ -239,8 +239,18 @@ impl SessionManager {
                 FetcherError::UnableToLoadList(url, _) => SessionError::TokenListNotFound(url),
             })?;
         tokens.extend(custom_tokens);
+        // token lists doesn't contain weth9 address, we always should insert it
         tokens.insert(session.network.weth9_address());
-        tokens.insert(session.network.native_token_address());
+        // native token tracking is intentionally not supported by this service.
+        // Clients (and some token lists) commonly include the native sentinel
+        // (0xEee…EEeE) alongside ERC20 addresses; strip it once here so it
+        // never reaches `balanceOf` downstream.
+        if tokens.remove(&session.network.native_token_address()) {
+            tracing::debug!(
+                session = %session,
+                "dropped native token sentinel from watched set"
+            );
+        }
 
         Ok(tokens)
     }
