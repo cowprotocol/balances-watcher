@@ -39,7 +39,6 @@ impl AppState {
             .erased();
         let rpc_client = Arc::new(RpcClient::new(
             Arc::new(http_provider),
-            network,
             Arc::clone(&metrics),
         ));
         tracing::info!(%network, "http provider connected");

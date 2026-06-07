@@ -2,7 +2,7 @@ use crate::domain::{BalanceEvent, Session};
 use crate::metrics::Metrics;
 use crate::services::errors::SubscriptionError;
 use crate::services::subscription::Subscription;
-use alloy::primitives::{Address, U256};
+use alloy::primitives::{Address, BlockNumber, U256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,7 +19,7 @@ struct SubWithCounter {
 #[derive(Debug, Clone)]
 pub struct Balance {
     pub amount: U256,
-    pub block_number: U256,
+    pub block_number: BlockNumber,
 }
 
 pub type BalanceSnapshot = HashMap<Address, Balance>;

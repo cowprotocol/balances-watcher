@@ -25,4 +25,4 @@ moka = { version = "0.12.15", features = ["future"] }
 
 [dev-dependencies]
 wiremock = "0.6.5"
-serde_json="1.0.149"
+serde_json = "1.0.149"

@@ -2,8 +2,8 @@ use thiserror;
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ServiceError {
-    #[error("Error getting balances from multicall: {0}")]
-    BalancesMultiCallError(String),
+    #[error("Multicall error: {0}")]
+    MultiCallError(String),
 
     #[error("Error when init the ws provider: {0}")]
     ErrorInitWsProvider(String),
