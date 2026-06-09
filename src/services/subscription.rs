@@ -1,3 +1,22 @@
+//! Per-session shared state: watched-token set, balance snapshot, cancel
+//! token, SSE broadcast fan-out, snapshot-refresh signal.
+//!
+//! One [`Subscription`] is created per `(owner, network)` pair and shared by
+//! every component that touches that session — watchers, SSE handlers,
+//! manager cleanup. All mutable state goes through `RwLock` / `AtomicBool` /
+//! `Notify`, so the struct is held by `Arc<Subscription>` everywhere.
+//!
+//! ```text
+//!         producers                     consumers
+//!     ┌──────────────────┐          ┌─────────────────────┐
+//!     │ extend_tokens    │──►       │ is_watched          │
+//!     │ update_balances… │──►       │ current_snapshot    │
+//!     │ emit_refresh     │──Notify─►│ snapshot_updater    │
+//!     │ send_event       │─broadcast│ SSE clients         │
+//!     │ cancel           │─token───►│ all watcher tasks   │
+//!     └──────────────────┘          └─────────────────────┘
+//! ```
+
 use crate::config::constants::BROADCAST_CHANNEL_CAPACITY;
 use crate::domain::{BalanceEvent, Session};
 use crate::metrics::Metrics;
@@ -10,17 +29,21 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
 
+/// Per-session shared state. Always held by `Arc<Subscription>`.
 pub struct Subscription {
     balances_snapshot: RwLock<BalanceSnapshot>,
     sender: broadcast::Sender<BalanceEvent>,
     tokens: RwLock<HashSet<Address>>,
     watchers_spawned: AtomicBool,
     cancellation_token: CancellationToken,
-    sync_notify: Arc<Notify>,
+    snapshot_refresh_notify: Arc<Notify>,
     metrics: Arc<Metrics>,
 }
 
 impl Subscription {
+    /// Create a fresh subscription pre-seeded with `tokens`. `cancellation_token`
+    /// is owned by `SubscriptionManager`; cancelling it tears down every
+    /// watcher spawned for this session.
     pub fn new(
         tokens: HashSet<Address>,
         cancellation_token: CancellationToken,
@@ -28,57 +51,72 @@ impl Subscription {
     ) -> Self {
         let (sender, _) = broadcast::channel(BROADCAST_CHANNEL_CAPACITY);
         Self {
-            // snapshot of all watched tokens
             balances_snapshot: RwLock::new(HashMap::new()),
-            // signal to cancel all watchers for this sub
             cancellation_token,
-            // watched tokens
             tokens: RwLock::new(tokens),
-            // flag to detect if the watcher was spawned for this subscription
             watchers_spawned: AtomicBool::new(false),
-            // notifier to force balance snapshot update (if watched token list was updated)
-            sync_notify: Arc::new(Notify::new()),
-            // send events to clients
+            // wakes the snapshot updater on any of: cold-start WS subscribe,
+            // WS resubscribe after disconnect, watched-token list extension.
+            snapshot_refresh_notify: Arc::new(Notify::new()),
             sender,
             metrics,
         }
     }
 
+    /// Signal that watchers should refresh the full balance snapshot.
+    ///
+    /// Backed by `Notify::notify_one`, so bursty calls (e.g. all WS log
+    /// listeners resubscribing in lockstep after a node restart) collapse
+    /// into at most one extra wake of the snapshot updater.
     pub fn emit_balance_snapshot_refresh(&self) {
-        self.sync_notify.notify_one();
+        self.snapshot_refresh_notify.notify_one();
     }
 
-    pub fn take_sync_notifier(&self) -> Arc<Notify> {
-        Arc::clone(&self.sync_notify)
+    /// Get a shared handle to the notifier that fires on
+    /// [`Self::emit_balance_snapshot_refresh`]. The receiver `.await`s on
+    /// `.notified()`.
+    pub fn snapshot_refresh_notifier(&self) -> Arc<Notify> {
+        Arc::clone(&self.snapshot_refresh_notify)
     }
 
+    /// Cloned token that watchers `.cancelled().await` on.
     pub fn cancellable(&self) -> CancellationToken {
         self.cancellation_token.clone()
     }
 
-    // check the flag that watcher was spawned and switched it if it wasn't
-    // return true if the flag was switched
+    /// Atomic claim — the first caller flips the flag from `false` to `true`
+    /// and gets `true` back. Used by `SessionManager::upsert` to spawn
+    /// watchers exactly once per session lifetime.
     pub fn try_mark_watchers_spawned(&self) -> bool {
         self.watchers_spawned
             .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
     }
 
+    /// Snapshot copy of the watched set.
     pub async fn clone_watched_tokens(&self) -> HashSet<Address> {
         self.tokens.read().await.clone()
     }
 
-    // update watched token list
+    /// Add tokens to the watched set. Returns the new total. Does not emit
+    /// a refresh — caller decides whether new tokens warrant a multicall.
+    ///
+    /// TODO: should be replaced by intersection with the client's current
+    /// list, so the watched set stops growing forever as clients churn
+    /// through token lists.
     pub async fn extend_tokens(&self, tokens: HashSet<Address>) -> usize {
         let mut watched_tokens = self.tokens.write().await;
         watched_tokens.extend(tokens);
         watched_tokens.len()
     }
 
+    /// Hot-path predicate for the ERC20 log handler. Read-only RwLock.
     pub async fn is_watched(&self, token: &Address) -> bool {
         self.tokens.read().await.contains(token)
     }
 
+    /// Fan out a balance event to all SSE subscribers. Disconnected clients
+    /// are logged at debug and never escalate to error.
     pub fn send_event(&self, event: BalanceEvent, session: Session) {
         match self.sender.send(event) {
             Ok(receivers) => {
@@ -90,8 +128,6 @@ impl Subscription {
                 );
             }
             Err(err) => {
-                // no need to log it as error because clients could close their connection
-                // before accepting events and it just spam with errors
                 tracing::debug!(
                     error = %err,
                     session = %session,
@@ -101,15 +137,17 @@ impl Subscription {
         }
     }
 
-    // subscribe new client to events
+    /// Attach a new SSE client to the broadcast stream.
     pub fn subscribe(&self) -> broadcast::Receiver<BalanceEvent> {
         self.sender.subscribe()
     }
 
-    // update a snapshot with new balances
-    // first compare block_number, if it is bigger than in the snapshot - update it
-    // if the balance is different - put it in diff (only if the block_number the same or bigger)
-    // return diff
+    /// Merge `new_balances` (read at `block_number`) into the snapshot and
+    /// return the diff for clients.
+    ///
+    /// Block-guarded: a per-token update only applies if `block_number` is
+    /// strictly higher than what's currently stored — protects against an
+    /// in-flight stale snapshot overwriting fresher per-event updates.
     pub async fn update_balances_and_take_diff(
         &self,
         (new_balances, block_number): BalancesWithBlock,
@@ -153,7 +191,8 @@ impl Subscription {
         diff
     }
 
-    // return the cloned snapshot
+    /// Cloned full snapshot. Used by the SSE handler to seed a new client
+    /// with the initial state before switching it to broadcast diffs.
     pub async fn current_snapshot(&self) -> BalanceSnapshot {
         self.balances_snapshot.read().await.clone()
     }
