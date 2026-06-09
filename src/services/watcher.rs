@@ -108,7 +108,16 @@ impl Watcher {
         let owner = self.session.owner;
 
         Arc::clone(&self).task_tracker.spawn(async move {
-            let mut interval = interval(Duration::from_secs(interval_secs as u64));
+            // interval for refreshing full balance snapshot should be called only after
+            // watcher subscribe on ws, to prevent race condition
+            tokio::select! {
+                _ = cancel.cancelled() => { return },
+                _ = sync_balance_notifier.notified() => {}
+            }
+
+            let interval_duration = Duration::from_secs(interval_secs as u64);
+            let mut interval = interval(interval_duration);
+
             let this = Arc::clone(&self);
 
             loop {
@@ -122,25 +131,17 @@ impl Watcher {
                         break;
                     }
                     _ = interval.tick() => {
-                        // every n secs we make a multicall to sync all token balances
                         this.metrics.snapshot_updater_runs_total.increment(1);
                         this.fetch_balances_and_broadcast().await;
                     }
-                    // there are few cases when we need to request balances immediately
-                    // 1 - when ws is exhausted for a while, and then we got reconnect - we should get
-                    // new balance snapshot to be sure we don't lost any events
-                    // 2 - when we got new tokens (client sends new tokens list or new custom tokens)
-                    // todo - it's better to request new tokens in a different multicall without full snapshot
                     _ = sync_balance_notifier.notified() => {
-                        // if there are new tokens that were added to a subscription, we should immediately update a snapshot to not
-                        //  wait for the next interval
+                        interval.reset();
                         tracing::info!(
                             owner = %owner,
                             "watched tokens were updated - force sync and reset interval"
                         );
                         this.metrics.snapshot_updater_runs_total.increment(1);
                         this.fetch_balances_and_broadcast().await;
-                        interval.reset();
                     }
                 }
             }
@@ -346,6 +347,8 @@ impl Watcher {
             }
         };
 
+        let mut is_reconnect = false;
+
         let this = self.clone();
         'ws_connection_loop: loop {
             let this = Arc::clone(&this);
@@ -357,7 +360,14 @@ impl Watcher {
                 _ = async {
                     match Arc::clone(&this).subscribe_with_retries(&pool_guard.provider, filter.clone()).await {
                         Ok(sub) => {
-                            tracing::debug!("subscribed to logs");
+                            // notify to refresh full snapshot
+                            this.sub.emit_balance_snapshot_refresh();
+                            if is_reconnect {
+                                this.metrics.ws_resubscribed_total.increment(1);
+                            }
+
+                            is_reconnect = true;
+                            tracing::debug!("ws subscribed");
 
                             let mut stream = sub.into_stream();
                              'web3_logs_loop: loop {

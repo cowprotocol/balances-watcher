@@ -50,6 +50,9 @@ pub struct Metrics {
     /// ws subscribe gave up after backoff exhausted
     pub ws_subscribe_is_down_total: Counter,
 
+    /// ws resubscribe
+    pub ws_resubscribed_total: Counter,
+
     /// token list fetched ok
     pub token_list_loaded_total: Counter,
     /// token list fetch failed after retries
@@ -95,6 +98,7 @@ impl Metrics {
             ws_reconnect_attempts_total: counter!("ws_reconnect_attempts_total"),
             ws_subscribe_errors_total: counter!("ws_subscribe_errors_total"),
             ws_subscribe_is_down_total: counter!("ws_subscribe_is_down_total"),
+            ws_resubscribed_total: counter!("ws_resubscribed_total"),
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),

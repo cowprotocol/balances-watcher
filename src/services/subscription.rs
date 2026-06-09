@@ -44,7 +44,7 @@ impl Subscription {
         }
     }
 
-    pub fn sync_balance(&self) {
+    pub fn emit_balance_snapshot_refresh(&self) {
         self.sync_notify.notify_one();
     }
 
