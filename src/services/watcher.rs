@@ -1,3 +1,23 @@
+//! Per-session background workers. One `Watcher` owns a tree of spawned
+//! Tokio tasks that keep balances in sync for a single `(owner, network)`:
+//!
+//! - **Snapshot updater** — periodic full multicall + on-demand resync on
+//!   cold-start, WS reconnect, and watched-token-list extension.
+//! - **ERC20 / WETH9 log listeners** — WS subscriptions that filter events
+//!   client-side and enqueue refresh requests into `BalanceRefreshQueue`.
+//! - **Queue result receiver** — drains multicall results from the queue
+//!   into the broadcast stream feeding SSE clients.
+//!
+//! Lifecycle is gated by the per-session `CancellationToken` carried inside
+//! [`Subscription`]. All workers exit when that token fires.
+//!
+//! ```text
+//!     WS pool                              snapshot loop
+//!        │                                       ▲
+//!        ▼                                       │ Notify::notify_one
+//!     log listeners ─► BalanceRefreshQueue ─► queue receiver ─► broadcast
+//! ```
+
 use crate::evm::erc20::ERC20;
 use alloy::eips::BlockId;
 use alloy::primitives::BlockNumber;
@@ -33,6 +53,7 @@ enum WethEvents {
     Withdrawal(Option<BlockNumber>),
 }
 
+/// Errors surfaced from the watcher's RPC interactions.
 #[derive(Error, Debug, Clone)]
 pub enum WatcherError {
     #[error("unable to get balance for owner{0} in network{1}: {2}")]
@@ -42,6 +63,7 @@ pub enum WatcherError {
     WsSubscriptionExhausted,
 }
 
+/// Errors from decoding raw `Log` items into known event shapes.
 #[derive(Error, Debug, Clone)]
 pub enum ParseWeb3LogsError {
     #[error("log.topic0() is none")]
@@ -51,6 +73,8 @@ pub enum ParseWeb3LogsError {
     UnexpectedHashSignature,
 }
 
+/// Per-session worker. Wraps the session-scoped state and RPC handles, and
+/// spawns the background tasks via [`Self::spawn_watchers`].
 pub struct Watcher {
     task_tracker: TaskTracker,
     session: Session,
@@ -62,6 +86,8 @@ pub struct Watcher {
 }
 
 impl Watcher {
+    /// Construct a watcher. Does not start any background tasks — call
+    /// [`Self::spawn_watchers`] for that.
     pub fn new(
         task_tracker: TaskTracker,
         rpc_client: Arc<RpcClient>,
@@ -82,10 +108,19 @@ impl Watcher {
         }
     }
 
-    // create all necessary watchers to sync balances
-    // spawn_erc20_transfer_listeners - spawn listener for erc20 transfer events
-    // spawn_wrapped_events_listener - spawn listener for wrapped token events (deposit/withdrawal)
-    // spawn_snapshot_updater - spawn listener for snapshot update (every interval_secs)
+    /// Spawn the three background tasks that keep balances in sync for the
+    /// session:
+    ///
+    /// - **snapshot updater** — periodic full multicall + reconnect-driven
+    ///   resync (see [`Self::spawn_snapshot_updater`]).
+    /// - **ERC20 transfer listeners** — WS subscriptions for `Transfer` /
+    ///   WETH9 events.
+    /// - **queue result receiver** — drains `BalanceRefreshQueue` results
+    ///   into the broadcast stream.
+    ///
+    /// Idempotent at the session level via
+    /// [`Subscription::try_mark_watchers_spawned`] — `SessionManager` calls
+    /// this exactly once per session lifetime.
     pub async fn spawn_watchers(
         self: Arc<Self>,
         rx: mpsc::Receiver<Result<BalancesWithBlock, ServiceError>>,
@@ -98,49 +133,63 @@ impl Watcher {
         Arc::clone(&self).spawn_queue_result_receiver(rx).await;
     }
 
-    // watcher to request balances via multicall every interval_secs to have an actual state
-    // it updates the whole state of balances and then send event to clients
-    // could be removed if we check more ws subscriptions for updates
+    // Periodic full balance snapshot + on-demand resync.
+    //
+    // Stays parked until the first refresh signal arrives (cold-start race
+    // closed: log subscriptions must be live before we issue a multicall —
+    // otherwise Transfer events between the multicall block and the WS
+    // subscribe handshake would be silently dropped). After the first
+    // signal:
+    // - `interval.tick()` — periodic refresh every `interval_secs`.
+    // - notifier — on-demand resync (new tokens via `extend_tokens`, WS
+    //   resubscribe after disconnect, cold start).
     async fn spawn_snapshot_updater(self: Arc<Self>, interval_secs: usize) {
         let sub = Arc::clone(&self.sub);
         let cancel = sub.cancellable();
-        let sync_balance_notifier = sub.take_sync_notifier();
+        let refresh_notifier = sub.snapshot_refresh_notifier();
         let owner = self.session.owner;
 
         Arc::clone(&self).task_tracker.spawn(async move {
-            let mut interval = interval(Duration::from_secs(interval_secs as u64));
+            // Wait for the first refresh request before starting the interval.
+            // The interval is intentionally created AFTER this wait so its
+            // deadline is anchored to the moment the loop actually starts,
+            // not to spawn time.
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = refresh_notifier.notified() => {}
+            }
+            tracing::debug!(
+                owner = %owner,
+                "snapshot updater unblocked, starting periodic refresh loop"
+            );
+
+            let interval_duration = Duration::from_secs(interval_secs as u64);
+            let mut interval = interval(interval_duration);
+
             let this = Arc::clone(&self);
 
             loop {
                 let this = Arc::clone(&this);
                 tokio::select! {
                     _ = cancel.cancelled() => {
-                        tracing::info!(
+                        tracing::debug!(
                             owner = %owner,
-                            "cancelled watcher"
+                            "snapshot updater cancelled"
                         );
                         break;
                     }
                     _ = interval.tick() => {
-                        // every n secs we make a multicall to sync all token balances
                         this.metrics.snapshot_updater_runs_total.increment(1);
                         this.fetch_balances_and_broadcast().await;
                     }
-                    // there are few cases when we need to request balances immediately
-                    // 1 - when ws is exhausted for a while, and then we got reconnect - we should get
-                    // new balance snapshot to be sure we don't lost any events
-                    // 2 - when we got new tokens (client sends new tokens list or new custom tokens)
-                    // todo - it's better to request new tokens in a different multicall without full snapshot
-                    _ = sync_balance_notifier.notified() => {
-                        // if there are new tokens that were added to a subscription, we should immediately update a snapshot to not
-                        //  wait for the next interval
-                        tracing::info!(
+                    _ = refresh_notifier.notified() => {
+                        interval.reset();
+                        tracing::debug!(
                             owner = %owner,
-                            "watched tokens were updated - force sync and reset interval"
+                            "snapshot refresh requested"
                         );
                         this.metrics.snapshot_updater_runs_total.increment(1);
                         this.fetch_balances_and_broadcast().await;
-                        interval.reset();
                     }
                 }
             }
@@ -346,18 +395,27 @@ impl Watcher {
             }
         };
 
+        let mut is_reconnect = false;
+
         let this = self.clone();
         'ws_connection_loop: loop {
             let this = Arc::clone(&this);
             tokio::select! {
                 _ = cancel.cancelled() => {
-                    tracing::info!("cancelled log subscription");
+                    tracing::debug!("log subscription cancelled");
                     break 'ws_connection_loop;
                 },
                 _ = async {
                     match Arc::clone(&this).subscribe_with_retries(&pool_guard.provider, filter.clone()).await {
                         Ok(sub) => {
-                            tracing::debug!("subscribed to logs");
+                            // notify to refresh full snapshot
+                            this.sub.emit_balance_snapshot_refresh();
+                            if is_reconnect {
+                                this.metrics.ws_resubscribed_total.increment(1);
+                            }
+
+                            is_reconnect = true;
+                            tracing::debug!("ws subscribed");
 
                             let mut stream = sub.into_stream();
                              'web3_logs_loop: loop {

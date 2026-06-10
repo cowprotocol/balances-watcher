@@ -68,7 +68,7 @@ impl SubscriptionManager {
             if new_tokens_len > 0 {
                 // if there are new tokens -> we should immediately make multicall
                 // to update a balance snapshot for the current subscription
-                sub.sync_balance();
+                sub.emit_balance_snapshot_refresh();
             }
 
             return sub;
