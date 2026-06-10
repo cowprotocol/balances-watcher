@@ -98,14 +98,24 @@ impl Subscription {
         self.tokens.read().await.clone()
     }
 
+    /// Replace the watched set with `new_tokens`. Evicts any cached balances
+    /// for tokens that drop out so SSE clients stop seeing stale entries.
+    ///
+    /// Returns `true` if the watched set actually changed, `false` if
+    /// `new_tokens` was identical to the current set (no-op fast path that
+    /// lets the caller skip a forced snapshot refresh).
     pub async fn set_watched_tokens(&self, new_tokens: HashSet<Address>) -> bool {
         let mut watched_tokens = self.tokens.write().await;
-        if *watched_tokens != new_tokens {
-            *watched_tokens = new_tokens;
-            return true;
+        if *watched_tokens == new_tokens {
+            return false;
         }
-
-        false
+        *watched_tokens = new_tokens;
+        // Lock ordering: tokens (write) -> snapshot (write). Hold both at
+        // once so a concurrent reader can never observe a watched set that
+        // has been swapped while the snapshot still carries ghost entries.
+        let mut snapshot = self.balances_snapshot.write().await;
+        snapshot.retain(|token, _| watched_tokens.contains(token));
+        true
     }
 
     /// Hot-path predicate for the ERC20 log handler. Read-only RwLock.
