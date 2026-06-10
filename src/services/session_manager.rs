@@ -147,42 +147,23 @@ impl SessionManager {
         let rpc_client = Arc::clone(&self.rpc_client);
         let ws_pool = Arc::clone(&self.ws_connection_pool);
 
-        let tokens = self
+        let new_watched_tokens = self
             .fetch_and_extend_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
 
-        let subscription = self.sub_manager.get_subscription(session).await;
-        // if the sub already exists - check if there are new tokens to watch and check limits
-        let (updated_tokens, new_uniq_tokens) = if let Some(sub) = subscription {
-            let mut watched_tokens = sub.clone_watched_tokens().await;
-
-            let new_tokens = tokens
-                .iter()
-                .filter(|t| !watched_tokens.contains(*t))
-                .copied()
-                .collect::<HashSet<_>>();
-
-            watched_tokens.extend(new_tokens.clone());
-
-            (watched_tokens, Some(new_tokens))
-        } else {
-            (tokens, None)
-        };
-
-        if updated_tokens.len() > self.config.token_limit {
+        if new_watched_tokens.len() > self.config.token_limit {
             self.metrics.tokens_limit_exceeded_total.increment(1);
             tracing::error!(
-                tokens_len = updated_tokens.len(),
+                tokens_len = new_watched_tokens.len(),
                 "limit of watched tokens was exceeded",
             );
             return Err(SessionError::TokenLimitExceeded(
-                updated_tokens.len(),
+                new_watched_tokens.len(),
                 self.config.token_limit,
             ));
         }
 
-        let new_tokens = new_uniq_tokens.unwrap_or(updated_tokens);
-        let sub = self.sub_manager.upsert(session, new_tokens).await;
+        let sub = self.sub_manager.upsert(session, new_watched_tokens).await;
 
         // if there aren't spawners yet - spawn them and create a first subscription
         let should_spawn_watchers = sub.try_mark_watchers_spawned();

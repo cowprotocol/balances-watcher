@@ -98,16 +98,14 @@ impl Subscription {
         self.tokens.read().await.clone()
     }
 
-    /// Add tokens to the watched set. Returns the new total. Does not emit
-    /// a refresh — caller decides whether new tokens warrant a multicall.
-    ///
-    /// TODO: should be replaced by intersection with the client's current
-    /// list, so the watched set stops growing forever as clients churn
-    /// through token lists.
-    pub async fn extend_tokens(&self, tokens: HashSet<Address>) -> usize {
+    pub async fn set_watched_tokens(&self, new_tokens: HashSet<Address>) -> bool {
         let mut watched_tokens = self.tokens.write().await;
-        watched_tokens.extend(tokens);
-        watched_tokens.len()
+        if *watched_tokens != new_tokens {
+            *watched_tokens = new_tokens;
+            return true;
+        }
+
+        false
     }
 
     /// Hot-path predicate for the ERC20 log handler. Read-only RwLock.
