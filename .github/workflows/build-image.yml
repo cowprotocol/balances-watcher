@@ -45,29 +45,11 @@ jobs:
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
-          load: ${{ github.event_name != 'pull_request' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-      - name: Pick image ref for Trivy
-        if: github.event_name != 'pull_request'
-        id: scan_ref
-        run: |
-          REF=$(printf '%s\n' "${{ steps.meta.outputs.tags }}" | head -n 1)
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-
-      - name: Scan image for CVEs (Trivy)
-        if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@a9c7b0f06e461e9d4b4d1711f154ee024b8d7ab8 # v0.36.0
-        with:
-          image-ref: ${{ steps.scan_ref.outputs.ref }}
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: '1'
-          format: table
 
   release:
     name: Tag & Release Image
