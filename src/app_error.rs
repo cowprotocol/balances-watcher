@@ -2,6 +2,7 @@ use crate::services::session_manager::SessionError;
 use axum::{http::StatusCode, response::IntoResponse, Json};
 use serde::Serialize;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -12,10 +13,12 @@ pub enum AppError {
     BadRequest(String),
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct ErrorBody {
-    code: u16,
-    message: String,
+    /// Mirrors the HTTP status code (400 / 404).
+    pub code: u16,
+    /// Human-readable explanation; safe to surface to end users.
+    pub message: String,
 }
 
 impl From<SessionError> for AppError {
