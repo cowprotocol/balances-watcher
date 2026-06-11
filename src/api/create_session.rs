@@ -6,7 +6,6 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
-use utoipa::ToSchema;
 
 use crate::api::extractors::ChainId;
 use crate::services::session_manager::SessionContext;
@@ -16,42 +15,24 @@ use crate::{
     domain::{EvmNetwork, Session},
 };
 
-#[derive(Deserialize, Clone, Debug, ToSchema)]
+#[derive(Deserialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateSessionRequest {
-    /// HTTPS URLs of token-list JSON files (Uniswap-style `tokens.json`).
-    /// At least one of `tokensListsUrls` or `customTokens` must be non-empty.
-    #[schema(example = json!(["https://tokens.coingecko.com/uniswap/all.json"]))]
     tokens_lists_urls: Vec<String>,
 
-    /// Extra ERC20 addresses to watch beyond the token lists.
     #[serde(default)]
-    #[schema(value_type = Vec<String>, example = json!(["0xdAC17F958D2ee523a2206206994597C13D831ec7"]))]
     custom_tokens: Vec<Address>,
 }
 
-#[utoipa::path(
-    post,
-    path = "/{chain_id}/sessions/{owner}",
-    tag = "sessions",
-    params(
-        ("chain_id" = u64, Path, description = "EVM chain id; must match the instance's configured NETWORK", example = 1),
-        ("owner"    = String, Path, description = "0x-prefixed owner address (20 bytes)", example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
-    ),
-    request_body = CreateSessionRequest,
-    responses(
-        (status = 200, description = "Session created or watched list replaced if it already existed"),
-        (status = 400, description = "Empty token lists or token limit exceeded", body = crate::app_error::ErrorBody),
-        (status = 404, description = "chain_id does not match this instance's NETWORK", body = crate::app_error::ErrorBody),
-    ),
-)]
+/// `POST /{chain_id}/sessions/{owner}` — see `openapi.yml` for the full
+/// request / response contract. Creates a watcher session and spawns its
+/// background tasks.
 pub async fn create_session(
     ChainId(network): ChainId,
-    path: Path<(EvmNetwork, Address)>,
+    Path((_, owner)): Path<(EvmNetwork, Address)>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<(), AppError> {
-    let (_, owner) = path.0;
     if body.tokens_lists_urls.is_empty() && body.custom_tokens.is_empty() {
         return Err(AppError::BadRequest(
             "tokens_lists_urls or custom_tokens should not be empty both".into(),
