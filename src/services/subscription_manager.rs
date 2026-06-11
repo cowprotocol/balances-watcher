@@ -105,11 +105,6 @@ impl SubscriptionManager {
         subscription
     }
 
-    pub async fn get_subscription(&self, session: Session) -> Option<Arc<Subscription>> {
-        let subs = self.subscriptions.read().await;
-        subs.get(&session).map(|sub| Arc::clone(&sub.subscription))
-    }
-
     pub async fn subscribe(
         &self,
         session: Session,
