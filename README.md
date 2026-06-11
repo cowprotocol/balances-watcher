@@ -79,13 +79,20 @@ curl -X POST http://localhost:8080/1/sessions/0xd8dA6BF26964aF9D7eEd9e03E53415D3
 
 | Status | Meaning |
 |---|---|
-| `200 OK` | Session created (or extended if it already existed) |
+| `200 OK` | Session created (or watched list replaced if it already existed) |
 | `400 Bad Request` | Both `tokensListsUrls` and `customTokens` empty, or token limit exceeded |
 | `404 Not Found` | `chain_id` does not match this instance's `NETWORK` |
 
-### `PUT /{chain_id}/sessions/{owner}` — extend session
+### `PUT /{chain_id}/sessions/{owner}` — replace watched token list
 
-Adds more tokens to an existing session.
+Sets the session's watched token list to **exactly** the resolved list (token
+lists + `customTokens` + WETH9). Tokens previously watched but absent from
+the new request are dropped from the watched set, and their cached balance
+entries are evicted so SSE clients stop receiving stale data for them.
+
+The `400 Bad Request` token-limit check applies to the **new** list, not to
+the union with the previous one — clients can freely rotate token lists
+without hitting the limit as long as each individual request stays under it.
 
 ```bash
 curl -X PUT http://localhost:8080/1/sessions/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
@@ -95,8 +102,8 @@ curl -X PUT http://localhost:8080/1/sessions/0xd8dA6BF26964aF9D7eEd9e03E53415D37
 
 | Status | Meaning |
 |---|---|
-| `200 OK` | Tokens added |
-| `400 Bad Request` | Body empty or token limit exceeded |
+| `200 OK` | Watched list replaced |
+| `400 Bad Request` | Body empty or new list exceeds token limit |
 | `404 Not Found` | `chain_id` mismatch or session does not exist |
 
 ### `GET /sse/{chain_id}/balances/{owner}` — balance stream
@@ -172,7 +179,7 @@ sequenceDiagram
         Server-->>Client: SSE: balance_update (diff only)
     end
 
-    Client->>Server: PUT /1/sessions/0x... (add tokens)
+    Client->>Server: PUT /1/sessions/0x... (replace watched list)
     Server-->>Client: 200 OK
 ```
 

@@ -49,32 +49,33 @@ impl SubscriptionManager {
 
     // create or update subscriptions clients count and watched token list
     pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
-        let new_tokens_len = tokens.len();
+        let tokens_len = tokens.len();
         let maybe_sub = {
             let subs = self.subscriptions.read().await;
             subs.get(&session).map(|sub| Arc::clone(&sub.subscription))
         };
 
         if let Some(sub) = maybe_sub {
-            let watched_tokens_len = sub.extend_tokens(tokens).await;
+            let changed = sub.set_watched_tokens(tokens).await;
 
             self.metrics.sessions_updated_total.increment(1);
             tracing::info!(
                 session = %session,
-                tokens_len = watched_tokens_len,
-                "session is updated"
+                tokens_len,
+                watched_tokens_changed = changed,
+                "watched token list updated"
             );
 
-            if new_tokens_len > 0 {
-                // if there are new tokens -> we should immediately make multicall
-                // to update a balance snapshot for the current subscription
+            if changed {
+                // PUT had a real effect — force a fresh multicall so balances
+                // reflect the new set right away instead of waiting for the
+                // next snapshot tick.
                 sub.emit_balance_snapshot_refresh();
             }
 
             return sub;
         }
 
-        let tokens_len = tokens.len();
         let shutdown_token = self.shutdown_token.clone();
         let subscription = Arc::new(Subscription::new(
             tokens,
@@ -102,11 +103,6 @@ impl SubscriptionManager {
         );
 
         subscription
-    }
-
-    pub async fn get_subscription(&self, session: Session) -> Option<Arc<Subscription>> {
-        let subs = self.subscriptions.read().await;
-        subs.get(&session).map(|sub| Arc::clone(&sub.subscription))
     }
 
     pub async fn subscribe(
