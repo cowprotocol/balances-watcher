@@ -24,7 +24,7 @@ uuid = { version = "1.23.1", features = ["v4"] }
 moka = { version = "0.12.15", features = ["future"] }
 utoipa = { version = "5.5.0", features = ["axum_extras"] }
 utoipa-axum = "0.2.0"
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "reqwest"] }
 
 [dev-dependencies]
 wiremock = "0.6.5"
