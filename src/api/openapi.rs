@@ -12,10 +12,10 @@
 
 use utoipa::OpenApi;
 
-use crate::api::create_session::{CreateSessionRequest, __path_create_session};
+use crate::api::create_session::{__path_create_session, CreateSessionRequest};
 use crate::api::create_sse_session::__path_create_sse_connection;
 use crate::api::health::__path_health_handler;
-use crate::api::update_session::{UpdateSessionRequest, __path_update_session};
+use crate::api::update_session::{__path_update_session, UpdateSessionRequest};
 use crate::app_error::ErrorBody;
 
 #[derive(OpenApi)]
