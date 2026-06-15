@@ -48,15 +48,3 @@ jobs:
               with:
                 components: rustfmt
             - uses: actions-rust-lang/rustfmt@4066006ec54a31931b9b1fddfd38f2fdf2d27143 # v1.1.2
-
-    openapi:
-        name: OpenAPI lint
-        runs-on: ubuntu-latest
-
-        steps:
-            - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-              with:
-                persist-credentials: false
-            - run: npm install @apidevtools/swagger-cli @stoplight/spectral-cli
-            - run: node_modules/.bin/swagger-cli validate openapi.yml
-            - run: node_modules/.bin/spectral lint openapi.yml

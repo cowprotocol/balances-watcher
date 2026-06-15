@@ -10,14 +10,30 @@ use axum::{
 use futures::Stream;
 use std::{convert::Infallible, sync::Arc};
 
-/// `GET /sse/{chain_id}/balances/{owner}` — see `openapi.yml` for the full
-/// contract. Long-lived SSE stream: first event is the full snapshot,
-/// subsequent events are diffs.
+#[utoipa::path(
+    get,
+    path = "/sse/{chain_id}/balances/{owner}",
+    tag = "streaming",
+    params(
+        ("chain_id" = u64, Path, description = "EVM chain id; must match the instance's configured NETWORK", example = 1),
+        ("owner"    = String, Path, description = "0x-prefixed owner address (20 bytes)", example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
+    ),
+    responses(
+        (status = 200,
+         description = "Long-lived SSE stream. First event is the full snapshot \
+                        (`event: balance_update`, JSON `{ balances: { address: amount } }`); \
+                        every subsequent `balance_update` event is a diff (only changed entries). \
+                        Terminal errors are emitted as `event: error` with `{ code, message }`.",
+         content_type = "text/event-stream"),
+        (status = 404, description = "chain_id mismatch or session not created"),
+    ),
+)]
 pub async fn create_sse_connection(
     ChainId(network): ChainId,
-    Path((_, owner)): Path<(EvmNetwork, Address)>,
+    path: Path<(EvmNetwork, Address)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
+    let (_, owner) = path.0;
     state
         .session_manager
         .create_sse_connection(owner, network)
