@@ -11,7 +11,6 @@
 use crate::{
     domain::{EvmNetwork, Token},
     metrics::Metrics,
-    services::errors::FetcherError,
 };
 use alloy::primitives::Address;
 use backon::{ExponentialBuilder, Retryable};
@@ -30,6 +29,13 @@ const CACHE_CAPACITY: u64 = 256;
 type ListUrl = String;
 
 type ChainTokens = HashSet<Address>;
+
+/// Errors surfaced by [`TokenListFetcher`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum FetcherError {
+    #[error("unable to load token list, url: {0}, error: {1}")]
+    UnableToLoadList(String, String),
+}
 
 pub struct TokenListFetcher {
     cache: Cache<ListUrl, ChainTokens>,

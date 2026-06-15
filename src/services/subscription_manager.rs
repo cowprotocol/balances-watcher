@@ -1,6 +1,30 @@
+//! Server-side registry of live SSE sessions, keyed by [`Session`]
+//! (`(owner, network)`). Owns every [`Subscription`] the process holds and
+//! arbitrates between HTTP handlers and a background cleanup task.
+//!
+//! - [`upsert`](SubscriptionManager::upsert) — create a session, or
+//!   PUT-replace its watched-token set via
+//!   [`Subscription::set_watched_tokens`]. Forces a fresh multicall via
+//!   [`Subscription::emit_balance_snapshot_refresh`] only when the set
+//!   actually changed, so re-PUT'ing the same list is a no-op.
+//! - [`subscribe`](SubscriptionManager::subscribe) — hand a
+//!   `broadcast::Receiver` to an SSE handler and bump the per-session client
+//!   counter.
+//! - [`unsubscribe`](SubscriptionManager::unsubscribe) — decrement the
+//!   counter; when it hits zero, stamp `idle_since` so cleanup can reap the
+//!   session later.
+//! - [`spawn_cleanup`](SubscriptionManager::spawn_cleanup) — background task
+//!   ticking every `SESSION_TTL`. Drops sessions with zero clients idle past
+//!   the TTL, cancelling their per-session token (which unwinds every
+//!   watcher worker in [`crate::services::watcher`]). On shutdown, broadcasts
+//!   a 503 close event to every client and clears the map.
+//!
+//! `SubWithCounter` is the per-session bookkeeping cell — `clients`,
+//! `idle_since`, `Arc<Subscription>` — that the registry inspects to decide
+//! "is anyone still listening?" without touching subscription internals.
+
 use crate::domain::{BalanceEvent, Session};
 use crate::metrics::Metrics;
-use crate::services::errors::SubscriptionError;
 use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, BlockNumber, U256};
 use std::collections::{HashMap, HashSet};
@@ -9,6 +33,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, RwLock};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
+
+/// Errors surfaced by [`SubscriptionManager`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum SubscriptionError {
+    /// Per-session client counter would overflow `u32::MAX` — refuse the new
+    /// SSE connection rather than silently wrap.
+    #[error("per-session client limit exceeded")]
+    ClientLimitExceeded,
+
+    /// The lookup hit a session that was never created, was already cleaned
+    /// up, or had its client counter underflow on `unsubscribe`.
+    #[error("no subscription registered for this session")]
+    SessionNotRegistered,
+}
 
 struct SubWithCounter {
     pub clients: u32,
@@ -115,7 +153,7 @@ impl SubscriptionManager {
             existing.clients = existing
                 .clients
                 .checked_add(1)
-                .ok_or(SubscriptionError::TooManySubscriptions)?;
+                .ok_or(SubscriptionError::ClientLimitExceeded)?;
             existing.idle_since = None;
             let receiver = existing.subscription.subscribe();
 
@@ -129,7 +167,7 @@ impl SubscriptionManager {
             return Ok((receiver, Arc::clone(&existing.subscription)));
         }
 
-        Err(SubscriptionError::ThereArentCreatedSubscriptions)
+        Err(SubscriptionError::SessionNotRegistered)
     }
 
     // true - if it was the last client
@@ -140,7 +178,7 @@ impl SubscriptionManager {
             existing.clients = existing
                 .clients
                 .checked_sub(1)
-                .ok_or(SubscriptionError::ThereArentCreatedSubscriptions)?;
+                .ok_or(SubscriptionError::SessionNotRegistered)?;
 
             if existing.clients == 0 {
                 existing.idle_since = Some(Instant::now());
@@ -164,7 +202,7 @@ impl SubscriptionManager {
             return Ok(false);
         }
 
-        Err(SubscriptionError::ThereArentCreatedSubscriptions)
+        Err(SubscriptionError::SessionNotRegistered)
     }
 
     pub fn spawn_cleanup(self: Arc<Self>) {
