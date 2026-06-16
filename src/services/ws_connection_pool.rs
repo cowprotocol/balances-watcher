@@ -1,8 +1,14 @@
-use crate::services::errors::ServiceError;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// Errors surfaced by [`WsConnectionPool`].
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum WsPoolError {
+    #[error("failed to init WS provider: {0}")]
+    InitProvider(String),
+}
 
 struct Connection {
     provider: DynProvider,
@@ -48,7 +54,7 @@ impl WsConnectionPool {
     // Uses Mutex held across connect_ws to prevent thundering herd:
     // without this, under load all tasks see an empty pool simultaneously and
     // each creates its own WS connection, flooding the RPC provider.
-    pub async fn acquire(self: &Arc<Self>) -> Result<PoolGuard, ServiceError> {
+    pub async fn acquire(self: &Arc<Self>) -> Result<PoolGuard, WsPoolError> {
         let mut conns = self.connections.lock().await;
 
         // check if there is a connection with free capacity
@@ -72,7 +78,7 @@ impl WsConnectionPool {
         let provider = ProviderBuilder::new()
             .connect_ws(ws)
             .await
-            .map_err(|err| ServiceError::ErrorInitWsProvider(err.to_string()))?
+            .map_err(|err| WsPoolError::InitProvider(err.to_string()))?
             .erased();
         let new_con = Connection {
             provider: provider.clone(),

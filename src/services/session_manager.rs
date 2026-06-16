@@ -3,10 +3,9 @@ use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::metrics::Metrics;
 use crate::services::calls_queue::BalanceRefreshQueue;
 use crate::services::cleanup_stream;
-use crate::services::errors::{FetcherError, SubscriptionError};
 use crate::services::rpc_client::{RpcClient, RpcError};
-use crate::services::subscription_manager::SubscriptionManager;
-use crate::services::token_list_fetcher::TokenListFetcher;
+use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
+use crate::services::token_list_fetcher::{FetcherError, TokenListFetcher};
 use crate::services::watcher::Watcher;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::primitives::Address;
@@ -345,8 +344,8 @@ impl SessionManager {
 
     fn map_subscription_error(sub_error: SubscriptionError) -> SessionError {
         match sub_error {
-            SubscriptionError::TooManySubscriptions => SessionError::TooManyClients,
-            SubscriptionError::ThereArentCreatedSubscriptions => SessionError::SessionIsNotCreated,
+            SubscriptionError::ClientLimitExceeded => SessionError::TooManyClients,
+            SubscriptionError::SessionNotRegistered => SessionError::SessionIsNotCreated,
         }
     }
 }

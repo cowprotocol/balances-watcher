@@ -39,8 +39,7 @@ use tokio_util::task::TaskTracker;
 use crate::domain::Session;
 use crate::metrics::Metrics;
 use crate::services::calls_queue::BalanceRefreshQueueHandle;
-use crate::services::errors::ServiceError;
-use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
+use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use crate::services::subscription::Subscription;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use crate::{
@@ -123,7 +122,7 @@ impl Watcher {
     /// this exactly once per session lifetime.
     pub async fn spawn_watchers(
         self: Arc<Self>,
-        rx: mpsc::Receiver<Result<BalancesWithBlock, ServiceError>>,
+        rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
         interval_secs: usize,
     ) {
         Arc::clone(&self)
@@ -198,7 +197,7 @@ impl Watcher {
 
     async fn spawn_queue_result_receiver(
         self: Arc<Self>,
-        mut rx: mpsc::Receiver<Result<BalancesWithBlock, ServiceError>>,
+        mut rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
     ) {
         let cancel = self.sub.cancellable();
 

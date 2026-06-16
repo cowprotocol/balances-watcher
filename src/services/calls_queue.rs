@@ -24,7 +24,7 @@
 //! [`TaskTracker`] and returns:
 //!  * a [`BalanceRefreshQueueHandle`] producers use to submit tokens via
 //!    [`BalanceRefreshQueueHandle::enqueue`]
-//!  * a `mpsc::Receiver<Result<BalancesWithBlock, ServiceError>>` the consumer
+//!  * a `mpsc::Receiver<Result<BalancesWithBlock, RpcError>>` the consumer
 //!    polls for batched multicall results
 //!
 //! # Backpressure & lifecycle
@@ -36,8 +36,7 @@
 //! outbound channel closes).
 
 use crate::config::constants::{CALL_QUEUE_DELAY, MAX_QUEUE_SIZE};
-use crate::services::errors::ServiceError;
-use crate::services::rpc_client::{BalancesWithBlock, RpcClient};
+use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use alloy::eips::BlockId;
 use alloy::primitives::{Address, BlockNumber};
 use std::collections::HashMap;
@@ -125,10 +124,10 @@ impl BalanceRefreshQueue {
         self,
     ) -> (
         BalanceRefreshQueueHandle,
-        mpsc::Receiver<Result<BalancesWithBlock, ServiceError>>,
+        mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
     ) {
         let (tx_in, rx_in) = mpsc::channel::<FetchRequest>(64);
-        let (tx_out, rx_out) = mpsc::channel::<Result<BalancesWithBlock, ServiceError>>(64);
+        let (tx_out, rx_out) = mpsc::channel::<Result<BalancesWithBlock, RpcError>>(64);
 
         self.task_tracker.clone().spawn(async move {
             let stream =
@@ -178,7 +177,7 @@ impl BalanceRefreshQueue {
     async fn process_batch(
         &self,
         batch: LatestBlockByToken,
-    ) -> Result<BalancesWithBlock, ServiceError> {
+    ) -> Result<BalancesWithBlock, RpcError> {
         let tokens: Vec<Address> = batch.keys().copied().collect();
         let block_id = Self::resolve_block_id(&batch);
 

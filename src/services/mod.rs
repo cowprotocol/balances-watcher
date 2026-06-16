@@ -1,6 +1,5 @@
 pub mod calls_queue;
 pub mod cleanup_stream;
-pub mod errors;
 pub mod session_manager;
 mod subscription;
 pub mod subscription_manager;

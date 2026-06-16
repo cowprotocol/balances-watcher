@@ -13,7 +13,6 @@
 use crate::config::constants::MULTICALL_PERMITS_COUNT;
 use crate::evm::erc20::ERC20;
 use crate::metrics::Metrics;
-use crate::services::errors::ServiceError;
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, BlockNumber, U256};
@@ -75,7 +74,7 @@ impl RpcClient {
         owner: Address,
         tokens: &[Address],
         block_id: BlockId,
-    ) -> Result<BalancesWithBlock, ServiceError> {
+    ) -> Result<BalancesWithBlock, RpcError> {
         let mut erc20_tokens: Vec<Address> = tokens.to_vec();
         erc20_tokens.sort();
 
@@ -96,11 +95,10 @@ impl RpcClient {
                     .multicall_duration_ms
                     .record(t0.elapsed().as_millis() as f64);
             })
-            .map_err(|err| {
+            .inspect_err(|_| {
                 self.metrics
                     .provider_exhausted_with_retries_total
                     .increment(1);
-                ServiceError::MultiCallError(err.to_string())
             })?
         };
 
