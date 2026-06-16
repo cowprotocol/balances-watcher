@@ -306,14 +306,7 @@ impl Watcher {
         self.rpc_client
             .fetch_balances_via_multicall(owner, tokens, block_id)
             .await
-            .map_err(|e| {
-                tracing::error!(
-                    error = %e,
-                    owner = %owner,
-                    "Failed to fetch balance"
-                );
-                WatcherError::GettingBalance(owner, self.session.network, e.to_string())
-            })
+            .map_err(|e| WatcherError::GettingBalance(owner, self.session.network, e.to_string()))
     }
 
     /**
@@ -463,10 +456,10 @@ impl Watcher {
         (|| async { provider.subscribe_logs(&filter).await })
             .retry(backoff)
             .notify(move |err, duration| {
-                tracing::error!(
+                tracing::warn!(
                     error = %err,
                     duration = ?duration,
-                    "failed to subscribe logs"
+                    "ws subscribe attempt failed, will retry"
                 );
                 self.metrics.ws_subscribe_errors_total.increment(1);
             })
@@ -520,7 +513,12 @@ impl Watcher {
         };
 
         let block_number = log.block_number.or_else(|| {
-            tracing::error!("block_number is None for log(WETH event): {:#?}", log);
+            // Falls back to `BlockId::latest()` at fetch time — recoverable, but
+            // worth flagging since pinned-block refresh is preferable.
+            tracing::warn!(
+                ?log,
+                "weth9 event log has no block_number, will refresh at latest"
+            );
             None
         });
 
@@ -535,7 +533,7 @@ impl Watcher {
                 })
                 .map(|log| {
                     let data = log.inner.data;
-                    tracing::info!("Deposit event dst={}, wad={}", data.dst, data.wad);
+                    tracing::debug!(dst = %data.dst, wad = %data.wad, "weth9 deposit event");
 
                     WethEvents::Deposit(block_number)
                 })
@@ -555,7 +553,7 @@ impl Watcher {
                 })
                 .map(|log| {
                     let data = log.inner.data;
-                    tracing::info!("Withdrawal event: src={}, wad={}", data.src, data.wad);
+                    tracing::debug!(src = %data.src, wad = %data.wad, "weth9 withdrawal event");
                     WethEvents::Withdrawal(block_number)
                 })
                 .ok();
@@ -601,7 +599,7 @@ impl Watcher {
                 .run_log_subscription_loop(
                     filter,
                     move |log: Log| {
-                        tracing::info!("received erc20 transfer event: {:#?}", log);
+                        tracing::debug!(?log, "received erc20 transfer event");
                         this.metrics.erc20_event_received_total.increment(1);
 
                         let this = Arc::clone(&this);
@@ -633,7 +631,7 @@ impl Watcher {
                 tracing::error!(
                     error = %err,
                     owner = %self.session.owner,
-                    "error when parse log",
+                    "failed to decode erc20 transfer log",
                 );
                 return;
             }
@@ -643,7 +641,7 @@ impl Watcher {
         // skip all tokens that are not in the watched token list
         let token_address = decoded_log.address();
         if !self.sub.is_watched(&token_address).await {
-            tracing::info!(
+            tracing::debug!(
                 token_address = %token_address,
                 "token is not watched, skip"
             );
