@@ -140,6 +140,21 @@ transient failures are absorbed by `failureThreshold` at the probe level.
 curl -i http://localhost:8080/health
 ```
 
+### `GET /openapi.json` and `GET /docs` — OpenAPI
+
+The OpenAPI 3.1 spec is generated at compile time via [`utoipa`] from
+`#[utoipa::path]` attributes on the handlers (see `src/api/openapi.rs`).
+
+- `GET /openapi.json` — raw spec, suitable for codegen / API clients.
+- `GET /docs` — Swagger UI for interactive exploration, served by
+  [`utoipa-swagger-ui`].
+
+No external API portal — the service hosts both endpoints directly because it
+is internal-use only.
+
+[`utoipa`]: https://crates.io/crates/utoipa
+[`utoipa-swagger-ui`]: https://crates.io/crates/utoipa-swagger-ui
+
 ### `GET /metrics` — Prometheus
 
 Standard scrape endpoint, exposes counters / gauges / histograms for sessions,
@@ -219,7 +234,7 @@ flowchart TB
         T4["Queue result receiver"]
     end
 
-    subgraph Queue["CallsQueue (300 ms debounce)"]
+    subgraph Queue["BalanceRefreshQueue (300 ms debounce)"]
         CQ["Pending tokens map<br/>upsert_delayed_call()"]
         FL["flush() → process_batch()"]
     end
@@ -414,7 +429,6 @@ src/
 │
 ├── evm/                    alloy sol! bindings
 │   ├── erc20.rs            ERC20 Transfer
-│   ├── multicall3.rs       Multicall3 tryBlockAndAggregate
 │   └── wrapped.rs          WETH9 Deposit / Withdrawal
 │
 ├── services/
@@ -422,12 +436,11 @@ src/
 │   ├── subscription_manager.rs  session registry, shared subs, idle cleanup
 │   ├── subscription.rs     per-session state (snapshot, broadcast, watched set)
 │   ├── watcher.rs          spawns 5 background tasks per session (snapshot updater, 2× ERC20 listeners, WETH9, queue receiver)
-│   ├── calls_queue.rs      300 ms debounce + state machine
+│   ├── calls_queue.rs      BalanceRefreshQueue: 300 ms debounce + coalesce-by-token
 │   ├── rpc_client.rs       HTTP RPC client: multicall (semaphore + retry) + healthcheck (get_block_number)
 │   ├── ws_connection_pool.rs  shared WS providers (max 300 subs each)
 │   ├── token_list_fetcher.rs  HTTP + cache + singleflight dedup
-│   ├── cleanup_stream.rs   Drop guard that unsubscribes when SSE stream is dropped
-│   └── errors.rs
+│   └── cleanup_stream.rs   Drop guard that unsubscribes when SSE stream is dropped
 │
 ├── graceful_shutdown/      SIGTERM → CancellationToken
 └── tracing/                tracing-subscriber init (JSON layer)

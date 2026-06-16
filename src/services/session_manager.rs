@@ -152,9 +152,10 @@ impl SessionManager {
 
         if new_watched_tokens.len() > self.config.token_limit {
             self.metrics.tokens_limit_exceeded_total.increment(1);
-            tracing::error!(
+            tracing::warn!(
                 tokens_len = new_watched_tokens.len(),
-                "limit of watched tokens was exceeded",
+                limit = self.config.token_limit,
+                "client request rejected: watched-token limit exceeded",
             );
             return Err(SessionError::TokenLimitExceeded(
                 new_watched_tokens.len(),
@@ -298,7 +299,7 @@ impl SessionManager {
                 Err(err) => {
                     tracing::error!(
                         error = %err,
-                        "error when converting initial snapshot to sse event",
+                        "failed to serialize initial snapshot as sse event",
                     );
                     stream::iter(vec![])
                 }
@@ -317,16 +318,16 @@ impl SessionManager {
                         Err(err) => {
                             tracing::error!(
                                 error = %err,
-                                "error when convert balance event to sse event",
+                                "failed to serialize balance event as sse event",
                             );
                             None
                         }
                     },
                     Err(err) => {
                         metrics.broadcast_lagged_total.increment(1);
-                        tracing::error!(
+                        tracing::warn!(
                             error = %err,
-                            "broadcast stream error",
+                            "sse client lagged behind broadcast, dropping event",
                         );
                         None
                     }
