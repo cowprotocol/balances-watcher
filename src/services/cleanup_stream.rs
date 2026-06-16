@@ -9,7 +9,6 @@ pub struct CleanupStream<S> {
     inner: Pin<Box<S>>,
     manager: Arc<SubscriptionManager>,
     session: Session,
-    cleaned_up: bool,
 }
 
 impl<S> CleanupStream<S> {
@@ -18,7 +17,6 @@ impl<S> CleanupStream<S> {
             inner: Box::pin(inner),
             manager,
             session,
-            cleaned_up: false,
         }
     }
 }
@@ -33,19 +31,16 @@ impl<S: Stream> Stream for CleanupStream<S> {
 
 impl<S> Drop for CleanupStream<S> {
     fn drop(&mut self) {
-        if !self.cleaned_up {
-            self.cleaned_up = true;
-            let manager = Arc::clone(&self.manager);
-            let session = self.session;
-            tokio::spawn(async move {
-                let _ = manager.unsubscribe(&session).await.inspect_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        session = %session,
-                        "error when unsubscribe",
-                    );
-                });
+        let manager = Arc::clone(&self.manager);
+        let session = self.session;
+        tokio::spawn(async move {
+            let _ = manager.unsubscribe(&session).await.inspect_err(|err| {
+                tracing::error!(
+                    error = %err,
+                    session = %session,
+                    "auto-unsubscribe on SSE stream drop failed",
+                );
             });
-        }
+        });
     }
 }
