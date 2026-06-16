@@ -567,6 +567,15 @@ impl Watcher {
         Err(ParseWeb3LogsError::UnexpectedHashSignature)
     }
 
+    // Two WS subscriptions — Transfer(from=owner) and Transfer(to=owner) — plus
+    // the WETH9 listener. The filter is **address-less** by design: we match on
+    // `event_signature(Transfer)` + the owner topic, then drop unwatched tokens
+    // client-side in `parse_transfer_event` via `Subscription::is_watched`.
+    //
+    // This sidesteps any provider-side cap on addresses-per-filter (Alchemy and
+    // Infura both impose one, in the low thousands), and keeps the WS
+    // subscription set bounded — three per session, regardless of how large the
+    // watched-token list grows.
     async fn spawn_erc20_transfer_listeners(self: Arc<Self>) {
         let session = self.session;
         let base = Filter::new().event_signature(ERC20::Transfer::SIGNATURE_HASH);
