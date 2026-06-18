@@ -5,7 +5,7 @@ use alloy::rpc::types::{Filter, Log};
 use backon::{ExponentialBuilder, Retryable};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, Semaphore};
 
 /// Errors surfaced by [`WsConnectionPool`].
@@ -17,8 +17,11 @@ pub enum WsPoolError {
     #[error("failed to acquire WS connection pool: {0}")]
     FailedToAcquireConnectionPool(String),
 
-    #[error("WS subscription is exhausted with retires")]
+    #[error("WS subscription is exhausted with retries")]
     WsSubscriptionExhausted,
+
+    #[error("WS subscribe semaphore is closed")]
+    SubscribeSemaphoreClosed,
 }
 
 struct Connection {
@@ -43,12 +46,25 @@ impl Drop for PoolGuard {
     }
 }
 
-// handle active connections per a provider instance
+/// Shared pool of WS providers for ERC20 Transfer listeners.
+///
+/// Two layers of back-pressure live here:
+///
+/// 1. `subscribe_semaphore` caps **concurrent** `subscribe()` calls so a burst
+///    of session creations can't fan out into a stampede of `eth_subscribe`
+///    against one shared upstream WS pipe. The permit is held across the
+///    whole `backon` retry window — not per attempt — so a session stuck in
+///    backoff does not yield slots for fresh attempts that would hammer the
+///    upstream again.
+/// 2. `connections` Mutex serialises `connect_ws()` so under cold start we
+///    open exactly one WS pipe per `max_clients_per_connection`, not one per
+///    concurrent task. New tasks see the freshly-inserted Connection and reuse
+///    it instead of opening duplicates.
 pub struct WsConnectionPool {
     ws_url: String,
     connections: Mutex<HashMap<uuid::Uuid, Connection>>,
     max_clients_per_connection: usize,
-    semaphore: Arc<Semaphore>,
+    subscribe_semaphore: Arc<Semaphore>,
     metrics: Arc<Metrics>,
 }
 
@@ -63,23 +79,46 @@ impl WsConnectionPool {
             ws_url,
             connections: Mutex::new(HashMap::new()),
             max_clients_per_connection: max_connections,
-            semaphore: Arc::new(Semaphore::new(WS_SUBSCRIPTION_PERMITS_COUNT)),
+            subscribe_semaphore: Arc::new(Semaphore::new(WS_SUBSCRIPTION_PERMITS_COUNT)),
             metrics,
         }
     }
 
+    /// Obtain a `Subscription<Log>` for `filter`, paired with a [`PoolGuard`]
+    /// inside [`GuardedWsSubscription`] so the underlying WS pipe stays alive
+    /// as long as the caller reads from the stream.
+    ///
+    /// Back-pressure: a single permit is taken from `subscribe_semaphore`
+    /// before any work and **held across the whole retry backoff window**.
+    /// That cap (`WS_SUBSCRIPTION_PERMITS_COUNT`) is the only knob keeping
+    /// burst subscribe-storms from RST-ing the upstream WS pipe.
     pub async fn subscribe(
         self: Arc<Self>,
         filter: &Filter,
     ) -> Result<GuardedWsSubscription, WsPoolError> {
-        let _permit = self.semaphore.acquire().await;
+        let waiting_permit_time = Instant::now();
+        let _permit = self
+            .subscribe_semaphore
+            .acquire()
+            .await
+            .map_err(|_| WsPoolError::SubscribeSemaphoreClosed)?;
 
-        let pool_guard = Arc::clone(&self).acquire().await;
+        self.metrics
+            .ws_subscribe_permit_wait_ms
+            .record(waiting_permit_time.elapsed().as_millis() as f64);
+        self.metrics.ws_subscribes_in_flight.increment(1.0);
 
-        match pool_guard {
-            Ok(pool) => Self::subscribe_with_retries(pool, filter).await,
-            Err(err) => Err(WsPoolError::FailedToAcquireConnectionPool(err.to_string())),
+        let result = async {
+            let pool_guard = Arc::clone(&self)
+                .acquire()
+                .await
+                .map_err(|err| WsPoolError::FailedToAcquireConnectionPool(err.to_string()))?;
+            Self::subscribe_with_retries(pool_guard, filter).await
         }
+        .await;
+
+        self.metrics.ws_subscribes_in_flight.decrement(1.0);
+        result
     }
 
     async fn subscribe_with_retries(
@@ -147,6 +186,7 @@ impl WsConnectionPool {
 
         let id = uuid::Uuid::new_v4();
         conns.insert(id, new_con);
+        self.metrics.ws_pool_connections.set(conns.len() as f64);
 
         Ok(PoolGuard {
             pool: Arc::clone(&self),
@@ -175,6 +215,7 @@ impl WsConnectionPool {
 
         if should_remove {
             conns.remove(&id);
+            self.metrics.ws_pool_connections.set(conns.len() as f64);
         }
     }
 }

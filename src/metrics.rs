@@ -53,6 +53,16 @@ pub struct Metrics {
     /// ws resubscribe
     pub ws_resubscribed_total: Counter,
 
+    /// time waited for a WS subscribe permit before the actual `eth_subscribe`.
+    /// Long tails here mean the cap is being hit — sessions are queueing.
+    pub ws_subscribe_permit_wait_ms: Histogram,
+    /// in-flight `subscribe()` calls (permits currently held).
+    /// Stable at the cap → cap too small or upstream too slow.
+    pub ws_subscribes_in_flight: Gauge,
+    /// live WS provider pipes in the pool right now (one per
+    /// `MAX_CLIENTS_PER_WS_CONNECTION` sessions).
+    pub ws_pool_connections: Gauge,
+
     /// token list fetched ok
     pub token_list_loaded_total: Counter,
     /// token list fetch failed after retries
@@ -99,6 +109,10 @@ impl Metrics {
             ws_subscribe_errors_total: counter!("ws_subscribe_errors_total"),
             ws_subscribe_is_down_total: counter!("ws_subscribe_is_down_total"),
             ws_resubscribed_total: counter!("ws_resubscribed_total"),
+
+            ws_subscribe_permit_wait_ms: histogram!("ws_subscribe_permit_wait_ms"),
+            ws_subscribes_in_flight: gauge!("ws_subscribes_in_flight"),
+            ws_pool_connections: gauge!("ws_pool_connections"),
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),
