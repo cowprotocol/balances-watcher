@@ -45,6 +45,7 @@ impl AppState {
 
         let ws_pool = Arc::new(WsConnectionPool::new(
             network_config.rpc_ws_url.clone(),
+            Arc::clone(&metrics),
             MAX_CLIENTS_PER_WS_CONNECTION,
         ));
         tracing::info!(%network, "ws connection pool ready");

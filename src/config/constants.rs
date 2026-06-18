@@ -14,4 +14,6 @@ pub const MAX_QUEUE_SIZE: usize = 256;
 
 pub const MAX_CLIENTS_PER_WS_CONNECTION: usize = 300;
 
-pub const MULTICALL_PERMITS_COUNT: usize = 500;
+pub const MULTICALL_PERMITS_COUNT: usize = 300;
+
+pub const WS_SUBSCRIPTION_PERMITS_COUNT: usize = 40;
