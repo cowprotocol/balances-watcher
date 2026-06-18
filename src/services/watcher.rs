@@ -23,11 +23,9 @@ use alloy::eips::BlockId;
 use alloy::primitives::BlockNumber;
 use alloy::{
     primitives::Address,
-    providers::{DynProvider, Provider},
     rpc::types::{Filter, Log, Topic},
     sol_types::SolEvent,
 };
-use backon::{ExponentialBuilder, Retryable};
 use futures::future::BoxFuture;
 use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
@@ -57,9 +55,6 @@ enum WethEvents {
 pub enum WatcherError {
     #[error("unable to get balance for owner{0} in network{1}: {2}")]
     GettingBalance(Address, EvmNetwork, String),
-
-    #[error("WS subscription is exhausted with retires")]
-    WsSubscriptionExhausted,
 }
 
 /// Errors from decoding raw `Log` items into known event shapes.
@@ -374,18 +369,6 @@ impl Watcher {
         mut on_drop: impl FnMut() + Send + 'static,
     ) {
         let cancel = self.sub.cancellable();
-        let pool_guard = match self.ws_connection_pool.acquire().await {
-            Ok(pool_guard) => pool_guard,
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "failed to acquire connection pool guard, cancel watchers"
-                );
-                self.sub.cancellable().cancel();
-                cancel.cancel();
-                return;
-            }
-        };
 
         let mut is_reconnect = false;
 
@@ -398,7 +381,7 @@ impl Watcher {
                     break 'ws_connection_loop;
                 },
                 _ = async {
-                    match Arc::clone(&this).subscribe_with_retries(&pool_guard.provider, filter.clone()).await {
+                    match Arc::clone(&this.ws_connection_pool).subscribe(&filter).await {
                         Ok(sub) => {
                             // notify to refresh full snapshot
                             this.sub.emit_balance_snapshot_refresh();
@@ -409,7 +392,7 @@ impl Watcher {
                             is_reconnect = true;
                             tracing::debug!("ws subscribed");
 
-                            let mut stream = sub.into_stream();
+                            let mut stream = sub.ws_sub.into_stream();
                              'web3_logs_loop: loop {
                                 tokio::select! {
                                     _ = cancel.cancelled() => {
@@ -444,35 +427,6 @@ impl Watcher {
                 } => {}
             }
         }
-    }
-
-    // subscribe to events with backoff
-    async fn subscribe_with_retries(
-        self: Arc<Self>,
-        provider: &DynProvider,
-        filter: Filter,
-    ) -> Result<alloy::pubsub::Subscription<Log>, WatcherError> {
-        let backoff = Self::create_ws_sub_backoff();
-        (|| async { provider.subscribe_logs(&filter).await })
-            .retry(backoff)
-            .notify(move |err, duration| {
-                tracing::warn!(
-                    error = %err,
-                    duration = ?duration,
-                    "ws subscribe attempt failed, will retry"
-                );
-                self.metrics.ws_subscribe_errors_total.increment(1);
-            })
-            .await
-            .map_err(|_| WatcherError::WsSubscriptionExhausted)
-    }
-
-    fn create_ws_sub_backoff() -> ExponentialBuilder {
-        ExponentialBuilder::default()
-            .with_min_delay(Duration::from_secs(1))
-            .with_max_delay(Duration::from_secs(5))
-            .with_max_times(5)
-            .with_jitter()
     }
 
     async fn parse_weth9_logs_and_fetch_balance(self: Arc<Self>, log: &Log) {

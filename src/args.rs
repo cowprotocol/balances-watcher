@@ -28,6 +28,16 @@ pub struct Args {
 
     #[arg(long, env = "MAX_WATCHED_TOKENS_LIMIT", default_value = "1500")]
     pub max_watched_tokens_limit: String,
+
+    /// Hard cap on sessions sharing a single WS provider pipe. When exceeded,
+    /// the pool opens a new pipe.
+    #[arg(long, env = "MAX_CLIENTS_PER_WS_CONNECTION", default_value = "300")]
+    pub max_clients_per_ws_connection: String,
+
+    /// Concurrency cap on in-flight `eth_subscribe` calls. Held across the
+    /// whole `subscribe_with_retries` backoff window, not per attempt.
+    #[arg(long, env = "WS_SUBSCRIPTION_PERMITS_COUNT", default_value = "40")]
+    pub ws_subscription_permits_count: String,
 }
 
 impl Args {
