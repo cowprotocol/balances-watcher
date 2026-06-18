@@ -7,7 +7,6 @@ pub struct NetworkConfig {
     /// The single EVM network this instance serves. Set via `NETWORK` env (chain id).
     pub network: EvmNetwork,
     pub rpc_http_url: String,
-    pub rpc_ws_url: String,
     pub snapshot_interval: usize,
     pub max_watched_tokens_limit: usize,
 }
@@ -39,7 +38,6 @@ impl NetworkConfig {
         Self {
             network: args.network,
             rpc_http_url: args.rpc_http_url.clone(),
-            rpc_ws_url: args.rpc_ws_url.clone(),
             snapshot_interval,
             max_watched_tokens_limit,
         }

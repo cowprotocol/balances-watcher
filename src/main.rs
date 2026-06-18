@@ -16,6 +16,7 @@ use crate::metrics::Metrics;
 use crate::tracing::init_tracing::init_tracing;
 use app_state::AppState;
 use config::network_config::NetworkConfig;
+use config::ws_pool_config::WsPoolConfig;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -33,6 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cfg = Args::from_env();
     let network_cfg = NetworkConfig::from_args(&cfg);
+    let ws_pool_cfg = WsPoolConfig::from_args(&cfg);
 
     ::tracing::info!(
         network = %network_cfg.network,
@@ -48,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token_for_app_state = shutdown_token.clone();
     let app_state = AppState::build(
         network_cfg,
+        ws_pool_cfg,
         Arc::clone(&metrics),
         task_tracker.clone(),
         token_for_app_state,

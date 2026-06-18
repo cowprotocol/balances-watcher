@@ -60,7 +60,7 @@ pub struct Metrics {
     /// Stable at the cap → cap too small or upstream too slow.
     pub ws_subscribes_in_flight: Gauge,
     /// live WS provider pipes in the pool right now (one per
-    /// `MAX_CLIENTS_PER_WS_CONNECTION` sessions).
+    /// `WsPoolConfig::max_clients_per_ws_connection` sessions).
     pub ws_pool_connections: Gauge,
 
     /// token list fetched ok

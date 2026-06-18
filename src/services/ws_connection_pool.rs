@@ -1,4 +1,4 @@
-use crate::config::constants::WS_SUBSCRIPTION_PERMITS_COUNT;
+use crate::config::ws_pool_config::WsPoolConfig;
 use crate::metrics::Metrics;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
 use alloy::rpc::types::{Filter, Log};
@@ -57,13 +57,13 @@ impl Drop for PoolGuard {
 ///    backoff does not yield slots for fresh attempts that would hammer the
 ///    upstream again.
 /// 2. `connections` Mutex serialises `connect_ws()` so under cold start we
-///    open exactly one WS pipe per `max_clients_per_connection`, not one per
+///    open exactly one WS pipe per `max_clients_per_ws_connection`, not one per
 ///    concurrent task. New tasks see the freshly-inserted Connection and reuse
 ///    it instead of opening duplicates.
 pub struct WsConnectionPool {
     ws_url: String,
     connections: Mutex<HashMap<uuid::Uuid, Connection>>,
-    max_clients_per_connection: usize,
+    max_clients_per_ws_connection: usize,
     subscribe_semaphore: Arc<Semaphore>,
     metrics: Arc<Metrics>,
 }
@@ -74,12 +74,12 @@ pub struct GuardedWsSubscription {
 }
 
 impl WsConnectionPool {
-    pub fn new(ws_url: String, metrics: Arc<Metrics>, max_connections: usize) -> WsConnectionPool {
+    pub fn new(config: WsPoolConfig, metrics: Arc<Metrics>) -> WsConnectionPool {
         Self {
-            ws_url,
+            ws_url: config.ws_url,
             connections: Mutex::new(HashMap::new()),
-            max_clients_per_connection: max_connections,
-            subscribe_semaphore: Arc::new(Semaphore::new(WS_SUBSCRIPTION_PERMITS_COUNT)),
+            max_clients_per_ws_connection: config.max_clients_per_ws_connection,
+            subscribe_semaphore: Arc::new(Semaphore::new(config.subscribe_permits_count)),
             metrics,
         }
     }
@@ -90,8 +90,8 @@ impl WsConnectionPool {
     ///
     /// Back-pressure: a single permit is taken from `subscribe_semaphore`
     /// before any work and **held across the whole retry backoff window**.
-    /// That cap (`WS_SUBSCRIPTION_PERMITS_COUNT`) is the only knob keeping
-    /// burst subscribe-storms from RST-ing the upstream WS pipe.
+    /// That cap (`WsPoolConfig::subscribe_permits_count`) is the only knob
+    /// keeping burst subscribe-storms from RST-ing the upstream WS pipe.
     pub async fn subscribe(
         self: Arc<Self>,
         filter: &Filter,
@@ -159,7 +159,7 @@ impl WsConnectionPool {
         // check if there is a connection with free capacity
         let maybe_entry = conns
             .iter_mut()
-            .find(|(_, conn)| conn.clients < self.max_clients_per_connection);
+            .find(|(_, conn)| conn.clients < self.max_clients_per_ws_connection);
 
         if let Some((id, conn)) = maybe_entry {
             conn.clients += 1;
