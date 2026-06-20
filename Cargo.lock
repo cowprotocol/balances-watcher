@@ -1141,6 +1141,7 @@ name = "balances-watcher"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "anyhow",
  "axum",
  "backon",
  "clap",

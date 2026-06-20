@@ -1,6 +1,7 @@
 use crate::domain::errors::EvmError;
 use alloy::primitives::{address, Address};
 use serde::{Deserialize, Deserializer};
+use std::time::Duration;
 use std::{
     fmt::{Display, Formatter},
     str::FromStr,
@@ -49,6 +50,21 @@ impl EvmNetwork {
             EvmNetwork::Ink => address!("0x4200000000000000000000000000000000000006"),
             EvmNetwork::Linea => address!("0xe5d7c2a44ffddf6b295a15c148167daaaf5cf34f"),
             EvmNetwork::Sepolia => address!("0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14"),
+        }
+    }
+    pub fn block_time(self) -> Duration {
+        match self {
+            EvmNetwork::Eth => Duration::from_secs(12),
+            EvmNetwork::Bnb => Duration::from_millis(750),
+            EvmNetwork::Gnosis => Duration::from_secs(5),
+            EvmNetwork::Polygon => Duration::from_secs(2),
+            EvmNetwork::Base => Duration::from_secs(2),
+            EvmNetwork::Plasma => Duration::from_secs(1),
+            EvmNetwork::Arbitrum => Duration::from_millis(250),
+            EvmNetwork::Avalanche => Duration::from_secs(2),
+            EvmNetwork::Ink => Duration::from_secs(1),
+            EvmNetwork::Linea => Duration::from_secs(2),
+            EvmNetwork::Sepolia => Duration::from_secs(12),
         }
     }
 }

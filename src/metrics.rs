@@ -50,6 +50,8 @@ pub struct Metrics {
     /// ws subscribe gave up after backoff exhausted
     pub ws_subscribe_is_down_total: Counter,
 
+    pub ws_reconnect_attempt_duration_ms: Histogram,
+
     /// ws resubscribe
     pub ws_resubscribed_total: Counter,
 
@@ -109,6 +111,7 @@ impl Metrics {
             ws_subscribe_errors_total: counter!("ws_subscribe_errors_total"),
             ws_subscribe_is_down_total: counter!("ws_subscribe_is_down_total"),
             ws_resubscribed_total: counter!("ws_resubscribed_total"),
+            ws_reconnect_attempt_duration_ms: histogram!("ws_reconnect_attempt_duration_ms"),
 
             ws_subscribe_permit_wait_ms: histogram!("ws_subscribe_permit_wait_ms"),
             ws_subscribes_in_flight: gauge!("ws_subscribes_in_flight"),
