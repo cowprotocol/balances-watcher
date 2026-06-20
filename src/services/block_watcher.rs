@@ -1,6 +1,6 @@
 use crate::domain::EvmNetwork;
 use crate::metrics::Metrics;
-use alloy::providers::{Provider, ProviderBuilder, WsConnect};
+use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
 use alloy::pubsub::SubscriptionStream;
 use alloy::rpc::types::Header;
 use backon::{ExponentialBuilder, Retryable};
@@ -56,12 +56,12 @@ impl BlockWatcher {
                 break;
             }
 
-            let Some(stream) = self.connect_with_retry(&cancel, &ws_url).await else {
+            let Some((provider, stream)) = self.connect_with_retry(&cancel, &ws_url).await else {
                 break;
             };
             tracing::info!("block watcher connected to websocket server");
 
-            self.consume_until_disconnect(stream, &cancel).await;
+            self.consume_until_disconnect(provider, stream, &cancel).await;
             self.connected.store(false, Ordering::Relaxed);
 
             tracing::info!(
@@ -75,7 +75,12 @@ impl BlockWatcher {
         }
     }
 
-    async fn consume_until_disconnect(&self, mut stream: BlockStream, cancel: &CancellationToken) {
+    async fn consume_until_disconnect(
+        &self,
+        _provider: DynProvider,
+        mut stream: BlockStream,
+        cancel: &CancellationToken,
+    ) {
         let stall_timeout = Self::stall_timeout(self.network.block_time());
 
         loop {
@@ -117,7 +122,7 @@ impl BlockWatcher {
         &self,
         cancel: &CancellationToken,
         ws_url: &str,
-    ) -> Option<BlockStream> {
+    ) -> Option<(DynProvider, BlockStream)> {
         let backoff = Self::backoff();
 
         tokio::select! {
@@ -132,11 +137,13 @@ impl BlockWatcher {
         }
     }
 
-    async fn attempt_to_connect(ws_url: String) -> Result<BlockStream, anyhow::Error> {
+    async fn attempt_to_connect(
+        ws_url: String,
+    ) -> Result<(DynProvider, BlockStream), anyhow::Error> {
         let ws = WsConnect::new(ws_url);
         let provider = ProviderBuilder::new().connect_ws(ws).await?;
         let sub = provider.subscribe_blocks().await?;
-        Ok(sub.into_stream())
+        Ok((provider.erased(), sub.into_stream()))
     }
 
     fn stall_timeout(block_time: Duration) -> Duration {
