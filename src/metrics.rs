@@ -49,8 +49,10 @@ pub struct Metrics {
     pub ws_subscribe_errors_total: Counter,
     /// ws subscribe gave up after backoff exhausted
     pub ws_subscribe_is_down_total: Counter,
-
+    // todo add comment
     pub ws_reconnect_attempt_duration_ms: Histogram,
+
+    pub block_accepted_total: Counter,
 
     /// ws resubscribe
     pub ws_resubscribed_total: Counter,
@@ -116,6 +118,8 @@ impl Metrics {
             ws_subscribe_permit_wait_ms: histogram!("ws_subscribe_permit_wait_ms"),
             ws_subscribes_in_flight: gauge!("ws_subscribes_in_flight"),
             ws_pool_connections: gauge!("ws_pool_connections"),
+
+            block_accepted_total: counter!("block_accepted_total"),
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),

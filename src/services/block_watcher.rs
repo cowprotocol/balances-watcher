@@ -4,16 +4,17 @@ use alloy::providers::{Provider, ProviderBuilder, WsConnect};
 use alloy::pubsub::SubscriptionStream;
 use alloy::rpc::types::Header;
 use backon::{ExponentialBuilder, Retryable};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 const MIN_STALL_DURATION: Duration = Duration::from_secs(2);
-const MIN_RECONNECT_DELAY: Duration = Duration::from_secs(1);
-const MAX_RECONNECT_DELAY: Duration = Duration::from_secs(30);
+const MIN_RECONNECT_ATTEMPT_DELAY: Duration = Duration::from_secs(1);
+const MAX_RECONNECT_ATTEMPT_DELAY: Duration = Duration::from_secs(30);
+const RUN_DELAY: Duration = Duration::from_millis(200);
 
 type BlockStream = SubscriptionStream<Header>;
 
@@ -21,7 +22,6 @@ pub struct BlockWatcher {
     network: EvmNetwork,
     metrics: Arc<Metrics>,
     connected: AtomicBool,
-    last_block_at_sec: AtomicU64,
 }
 
 impl BlockWatcher {
@@ -36,7 +36,6 @@ impl BlockWatcher {
             network,
             metrics,
             connected: AtomicBool::new(false),
-            last_block_at_sec: AtomicU64::new(0),
         });
 
         let watcher_for_spawn = Arc::clone(&watcher);
@@ -47,7 +46,7 @@ impl BlockWatcher {
         watcher
     }
 
-    pub fn is_connected(&self) -> bool {
+    pub fn is_healthy(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
 
@@ -61,9 +60,19 @@ impl BlockWatcher {
             let Some(stream) = self.connect_with_retry(&cancel, ws_url).await else {
                 break;
             };
+            tracing::debug!("block watcher connected to websocket server");
 
             self.consume_until_disconnect(stream, &cancel).await;
             self.connected.store(false, Ordering::Relaxed);
+
+            tracing::debug!(
+                "block watcher disconnected to websocket server, sleep for {} and resubscribe",
+                RUN_DELAY.as_millis()
+            );
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                _ = tokio::time::sleep(RUN_DELAY) => {}
+            }
         }
     }
 
@@ -75,9 +84,9 @@ impl BlockWatcher {
                 _ = cancel.cancelled() => return,
                 next = tokio::time::timeout(stall_timeout, stream.next()) => {
                     match next {
-                        Ok(Some(header)) => self.record_header(header),
+                        Ok(Some(_)) => self.record_connected(),
                         Ok(None) => {
-                            self.metrics.ws_subscribe_is_down_total.increment(1);
+                            self.metrics.ws_provider_disconnected_total.increment(1);
                             tracing::warn!("stream terminated, subscription closed by server");
                             return;
                         },
@@ -91,21 +100,16 @@ impl BlockWatcher {
         }
     }
 
-    fn notify_connection_error(&self, err: &anyhow::Error, reconnect_duration: Duration) {
-        self.metrics.ws_provider_disconnected_total.increment(1);
+    fn notify_reconnect_error(&self, err: &anyhow::Error, reconnect_duration: Duration) {
+        self.metrics.ws_reconnect_attempts_total.increment(1);
         self.metrics
             .ws_reconnect_attempt_duration_ms
             .record(reconnect_duration);
         tracing::warn!(err = %err, "ws connect/subscribe failed, backing off");
     }
 
-    fn record_header(&self, _: Header) {
-        let now = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .expect("SystemTime before UNIX EPOCH!?")
-            .as_secs();
-
-        self.last_block_at_sec.store(now, Ordering::Relaxed);
+    fn record_connected(&self) {
+        self.metrics.block_accepted_total.increment(1);
         self.connected.store(true, Ordering::Relaxed);
     }
 
@@ -123,7 +127,7 @@ impl BlockWatcher {
                 async move { Self::attempt_to_connect(ws_url).await }
             })
             .retry(backoff)
-            .notify(|err, duration| self.notify_connection_error(err, duration))
+            .notify(|err, duration| self.notify_reconnect_error(err, duration))
             .when(|_| !cancel.is_cancelled()) => res.ok()
         }
     }
@@ -132,7 +136,7 @@ impl BlockWatcher {
         let ws = WsConnect::new(ws_url);
         let provider = ProviderBuilder::new().connect_ws(ws).await?;
         let sub = provider.subscribe_blocks().await?;
-        Ok::<_, anyhow::Error>(sub.into_stream())
+        Ok(sub.into_stream())
     }
 
     fn stall_timeout(block_time: Duration) -> Duration {
@@ -141,8 +145,8 @@ impl BlockWatcher {
 
     fn backoff() -> ExponentialBuilder {
         ExponentialBuilder::default()
-            .with_min_delay(MIN_RECONNECT_DELAY)
-            .with_max_delay(MAX_RECONNECT_DELAY)
+            .with_min_delay(MIN_RECONNECT_ATTEMPT_DELAY)
+            .with_max_delay(MAX_RECONNECT_ATTEMPT_DELAY)
             .with_jitter()
             // never stop
             .with_max_times(usize::MAX)
