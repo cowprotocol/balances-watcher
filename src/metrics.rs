@@ -49,9 +49,10 @@ pub struct Metrics {
     pub ws_subscribe_errors_total: Counter,
     /// ws subscribe gave up after backoff exhausted
     pub ws_subscribe_is_down_total: Counter,
-    // todo add comment
+    /// time spent in backoff between a failed ws connect/subscribe attempt and the next retry
     pub ws_reconnect_attempt_duration_ms: Histogram,
 
+    /// blocks accepted from the ws subscription. Rate ≈ chain block rate when healthy
     pub block_accepted_total: Counter,
 
     /// ws resubscribe

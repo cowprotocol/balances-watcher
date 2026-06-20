@@ -56,18 +56,17 @@ impl BlockWatcher {
                 break;
             }
 
-            let ws_url = ws_url.clone();
-            let Some(stream) = self.connect_with_retry(&cancel, ws_url).await else {
+            let Some(stream) = self.connect_with_retry(&cancel, &ws_url).await else {
                 break;
             };
-            tracing::debug!("block watcher connected to websocket server");
+            tracing::info!("block watcher connected to websocket server");
 
             self.consume_until_disconnect(stream, &cancel).await;
             self.connected.store(false, Ordering::Relaxed);
 
-            tracing::debug!(
-                "block watcher disconnected to websocket server, sleep for {} and resubscribe",
-                RUN_DELAY.as_millis()
+            tracing::info!(
+                delay_ms = RUN_DELAY.as_millis() as u64,
+                "block watcher disconnected from websocket server, will resubscribe after delay"
             );
             tokio::select! {
                 _ = cancel.cancelled() => break,
@@ -91,7 +90,8 @@ impl BlockWatcher {
                             return;
                         },
                         Err(_) => {
-                            tracing::warn!(stall_timeout = stall_timeout.as_secs(), "stream stalled");
+                            self.metrics.ws_provider_disconnected_total.increment(1);
+                            tracing::warn!(stall_timeout_s = stall_timeout.as_secs(), "stream stalled");
                             return;
                         }
                     }
@@ -116,15 +116,15 @@ impl BlockWatcher {
     async fn connect_with_retry(
         &self,
         cancel: &CancellationToken,
-        ws_url: String,
+        ws_url: &str,
     ) -> Option<BlockStream> {
         let backoff = Self::backoff();
 
         tokio::select! {
             _ = cancel.cancelled() => None,
             res = (|| {
-                let ws_url = ws_url.clone();
-                async move { Self::attempt_to_connect(ws_url).await }
+                let url = ws_url.to_owned();
+                async move { Self::attempt_to_connect(url).await }
             })
             .retry(backoff)
             .notify(|err, duration| self.notify_reconnect_error(err, duration))
