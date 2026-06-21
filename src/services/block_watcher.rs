@@ -81,7 +81,8 @@ impl BlockWatcher {
             };
             tracing::info!("block subscription established, waiting for first header");
 
-            self.consume_until_disconnect(provider, stream, &cancel).await;
+            self.consume_until_disconnect(provider, stream, &cancel)
+                .await;
             self.connected.store(false, Ordering::Relaxed);
 
             tracing::info!(
