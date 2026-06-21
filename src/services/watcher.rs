@@ -109,21 +109,27 @@ impl Watcher {
     /// - **queue result receiver** — drains `BalanceRefreshQueue` results
     ///   into the broadcast stream.
     ///
+    /// `refresh_queue` is the producer side of the refresh queue, owned upstream
+    /// by [`crate::services::subscription_manager`] — Watcher holds it only to
+    /// let its WS listeners enqueue refreshes. It is a transient dependency
+    /// that disappears once the shared `EventDispatcher` takes over routing in
+    /// a later migration phase.
+    ///
     /// Idempotent at the session level via
-    /// [`Subscription::try_mark_watchers_spawned`] — `SessionManager` calls
-    /// this exactly once per session lifetime.
+    /// [`crate::services::subscription_manager::SubscriptionManager::upsert`],
+    /// which hands back the queue endpoints only on first creation —
+    /// `SessionManager` calls this exactly once per session lifetime.
     pub async fn spawn_watchers(
         self: Arc<Self>,
         rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
-        // transient dep, will be removed after migration to common EventDispatcher
-        queue_handle: Arc<BalanceRefreshQueueHandle>,
+        refresh_queue: BalanceRefreshQueueHandle,
         interval_secs: usize,
     ) {
         Arc::clone(&self)
             .spawn_snapshot_updater(interval_secs)
             .await;
         Arc::clone(&self)
-            .spawn_erc20_transfer_listeners(queue_handle)
+            .spawn_erc20_transfer_listeners(refresh_queue)
             .await;
         Arc::clone(&self).spawn_queue_result_receiver(rx).await;
     }
@@ -312,7 +318,7 @@ impl Watcher {
      */
     async fn spawn_weth9_events_listener(
         self: Arc<Self>,
-        queue_handler: Arc<BalanceRefreshQueueHandle>,
+        refresh_queue: BalanceRefreshQueueHandle,
     ) {
         let session = self.session;
         let weth9_address = session.network.weth9_address();
@@ -336,11 +342,11 @@ impl Watcher {
                     filter,
                     move |log: Log| {
                         let this = Arc::clone(&this_on_log);
-                        let queue_handler = Arc::clone(&queue_handler);
+                        let refresh_queue = refresh_queue.clone();
 
                         Box::pin(async move {
                             this.metrics.weth9_events_received_total.increment(1);
-                            this.parse_weth9_logs_and_fetch_balance(queue_handler, &log)
+                            this.parse_weth9_logs_and_fetch_balance(refresh_queue, &log)
                                 .await;
                         })
                     },
@@ -438,7 +444,7 @@ impl Watcher {
 
     async fn parse_weth9_logs_and_fetch_balance(
         self: Arc<Self>,
-        queue_handler: Arc<BalanceRefreshQueueHandle>,
+        refresh_queue: BalanceRefreshQueueHandle,
         log: &Log,
     ) {
         tracing::debug!("got weth9 log: {:?}", log);
@@ -460,7 +466,7 @@ impl Watcher {
             block_number = block_number,
             "weth9 log is parsed, send fetching balance request to a queue"
         );
-        queue_handler.enqueue(weth9_address, block_number).await;
+        refresh_queue.enqueue(weth9_address, block_number).await;
     }
 
     // parse WETH logs, search DEPOSIT/WITHDRAWAL events
@@ -539,7 +545,7 @@ impl Watcher {
     // watched-token list grows.
     async fn spawn_erc20_transfer_listeners(
         self: Arc<Self>,
-        queue_handler: Arc<BalanceRefreshQueueHandle>,
+        refresh_queue: BalanceRefreshQueueHandle,
     ) {
         let session = self.session;
         let base = Filter::new().event_signature(ERC20::Transfer::SIGNATURE_HASH);
@@ -547,17 +553,17 @@ impl Watcher {
         let to = base.clone().topic2(Topic::from(session.owner));
 
         Arc::clone(&self)
-            .spawn_erc20_transfer_listener_with_filter(Arc::clone(&queue_handler), from)
+            .spawn_erc20_transfer_listener_with_filter(refresh_queue.clone(), from)
             .await;
         Arc::clone(&self)
-            .spawn_erc20_transfer_listener_with_filter(Arc::clone(&queue_handler), to)
+            .spawn_erc20_transfer_listener_with_filter(refresh_queue.clone(), to)
             .await;
-        self.spawn_weth9_events_listener(queue_handler).await;
+        self.spawn_weth9_events_listener(refresh_queue).await;
     }
 
     async fn spawn_erc20_transfer_listener_with_filter(
         self: Arc<Self>,
-        queue_handler: Arc<BalanceRefreshQueueHandle>,
+        refresh_queue: BalanceRefreshQueueHandle,
         filter: Filter,
     ) {
         let session = self.session;
@@ -571,11 +577,11 @@ impl Watcher {
                     move |log: Log| {
                         tracing::debug!(?log, "received erc20 transfer event");
                         this.metrics.erc20_event_received_total.increment(1);
-                        let queue_handler = Arc::clone(&queue_handler);
+                        let refresh_queue = refresh_queue.clone();
 
                         let this = Arc::clone(&this);
                         Box::pin(async move {
-                            this.parse_transfer_event_and_fetch_balance(queue_handler, &log)
+                            this.parse_transfer_event_and_fetch_balance(refresh_queue, &log)
                                 .await;
                         })
                     },
@@ -595,7 +601,7 @@ impl Watcher {
 
     async fn parse_transfer_event_and_fetch_balance(
         self: Arc<Self>,
-        queue_handler: Arc<BalanceRefreshQueueHandle>,
+        refresh_queue: BalanceRefreshQueueHandle,
         log: &Log,
     ) {
         let block_number = log.block_number;
@@ -629,6 +635,6 @@ impl Watcher {
             block_number = block_number,
             "erc20 event is parsed, send it to fetch queue"
         );
-        queue_handler.enqueue(token_address, block_number).await;
+        refresh_queue.enqueue(token_address, block_number).await;
     }
 }

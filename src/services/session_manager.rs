@@ -163,9 +163,13 @@ impl SessionManager {
             ));
         }
 
-        let (sub, maybe_queue_handler) = self.sub_manager.upsert(session, new_watched_tokens).await;
+        let (sub, maybe_queue_endpoints) =
+            self.sub_manager.upsert(session, new_watched_tokens).await;
 
-        if let Some((result_rx, queue_handler)) = maybe_queue_handler {
+        // `upsert` returns the queue endpoints only for a brand-new session —
+        // re-PUT'ing tokens for an already-live session yields `None` here,
+        // so we spawn the per-session watchers exactly once over its lifetime.
+        if let Some(queue_endpoints) = maybe_queue_endpoints {
             tracing::info!(
                 session = %session,
                 "upsert: spawning watchers"
@@ -181,7 +185,11 @@ impl SessionManager {
             ));
 
             watcher
-                .spawn_watchers(result_rx, queue_handler, self.config.snapshot_interval)
+                .spawn_watchers(
+                    queue_endpoints.result_rx,
+                    queue_endpoints.refresh_queue,
+                    self.config.snapshot_interval,
+                )
                 .await;
 
             tracing::info!(
