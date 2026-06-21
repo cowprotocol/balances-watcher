@@ -1,3 +1,16 @@
+//! WebSocket health canary: a dedicated `eth_subscribe("newHeads")` subscription
+//! that powers `/health` via [`BlockWatcher::is_healthy`].
+//!
+//! Runs in its own task with infinite-retry exponential backoff
+//! (`MIN_RECONNECT_ATTEMPT_DELAY` → `MAX_RECONNECT_ATTEMPT_DELAY`, jitter) and a
+//! stall watchdog (`block_time × STALL_TIMEOUT_BLOCKS`, floored at `MIN_STALL_DURATION`) that forces
+//! a reconnect when headers stop arriving. The provider is **not** shared with the per-session pool
+//! ([`crate::services::ws_connection_pool`]) — a dedicated socket keeps the health
+//! signal isolated from data-plane churn (event load, session reconnect storms).
+//!
+//! Health is a single [`std::sync::atomic::AtomicBool`]: flipped `true` on the
+//! first header received, `false` on disconnect, stall, or shutdown.
+
 use crate::domain::EvmNetwork;
 use crate::metrics::Metrics;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
@@ -12,12 +25,15 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 const MIN_STALL_DURATION: Duration = Duration::from_secs(2);
+const STALL_TIMEOUT_BLOCKS: u32 = 3;
 const MIN_RECONNECT_ATTEMPT_DELAY: Duration = Duration::from_secs(1);
 const MAX_RECONNECT_ATTEMPT_DELAY: Duration = Duration::from_secs(30);
-const RUN_DELAY: Duration = Duration::from_millis(200);
+const POST_DISCONNECT_DELAY: Duration = Duration::from_millis(200);
 
 type BlockStream = SubscriptionStream<Header>;
 
+/// Process-wide WS subscription to `newHeads`. See module docs for the reconnect
+/// strategy and the rationale for a dedicated provider.
 pub struct BlockWatcher {
     network: EvmNetwork,
     metrics: Arc<Metrics>,
@@ -25,6 +41,8 @@ pub struct BlockWatcher {
 }
 
 impl BlockWatcher {
+    /// Spawns the watcher task on `task_tracker` and returns a shared handle.
+    /// The task runs until `cancellation_token` is cancelled.
     pub fn spawn(
         network: EvmNetwork,
         metrics: Arc<Metrics>,
@@ -46,6 +64,8 @@ impl BlockWatcher {
         watcher
     }
 
+    /// `true` iff the watcher has received at least one header since the most
+    /// recent reconnect and the stream has not since closed or stalled.
     pub fn is_healthy(&self) -> bool {
         self.connected.load(Ordering::Relaxed)
     }
@@ -59,18 +79,18 @@ impl BlockWatcher {
             let Some((provider, stream)) = self.connect_with_retry(&cancel, &ws_url).await else {
                 break;
             };
-            tracing::info!("block watcher connected to websocket server");
+            tracing::info!("block subscription established, waiting for first header");
 
             self.consume_until_disconnect(provider, stream, &cancel).await;
             self.connected.store(false, Ordering::Relaxed);
 
             tracing::info!(
-                delay_ms = RUN_DELAY.as_millis() as u64,
-                "block watcher disconnected from websocket server, will resubscribe after delay"
+                delay_ms = POST_DISCONNECT_DELAY.as_millis() as u64,
+                "block subscription ended, will resubscribe after delay"
             );
             tokio::select! {
                 _ = cancel.cancelled() => break,
-                _ = tokio::time::sleep(RUN_DELAY) => {}
+                _ = tokio::time::sleep(POST_DISCONNECT_DELAY) => {}
             }
         }
     }
@@ -147,7 +167,7 @@ impl BlockWatcher {
     }
 
     fn stall_timeout(block_time: Duration) -> Duration {
-        (block_time * 3).max(MIN_STALL_DURATION)
+        (block_time * STALL_TIMEOUT_BLOCKS).max(MIN_STALL_DURATION)
     }
 
     fn backoff() -> ExponentialBuilder {
@@ -155,7 +175,6 @@ impl BlockWatcher {
             .with_min_delay(MIN_RECONNECT_ATTEMPT_DELAY)
             .with_max_delay(MAX_RECONNECT_ATTEMPT_DELAY)
             .with_jitter()
-            // never stop
             .with_max_times(usize::MAX)
     }
 }
