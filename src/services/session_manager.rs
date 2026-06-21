@@ -3,7 +3,7 @@ use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::metrics::Metrics;
 use crate::services::calls_queue::BalanceRefreshQueue;
 use crate::services::cleanup_stream;
-use crate::services::rpc_client::{RpcClient, RpcError};
+use crate::services::rpc_client::RpcClient;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
 use crate::services::token_list_fetcher::{FetcherError, TokenListFetcher};
 use crate::services::watcher::Watcher;
@@ -255,10 +255,6 @@ impl SessionManager {
                 .event("error")
                 .json_data(ErrorEvent { code, message }),
         }
-    }
-
-    pub async fn healthcheck(&self) -> Result<(), RpcError> {
-        self.rpc_client.get_block_number().await.map(|_| Ok(()))?
     }
 
     pub async fn create_sse_connection(

@@ -2,6 +2,7 @@ use crate::config::network_config::NetworkConfig;
 use crate::config::ws_pool_config::WsPoolConfig;
 use crate::domain::EvmNetwork;
 use crate::metrics::Metrics;
+use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::RpcClient;
 use crate::services::session_manager::{SessionConfig, SessionManager};
 use crate::services::ws_connection_pool::WsConnectionPool;
@@ -22,6 +23,7 @@ pub struct AppState {
     /// addressed to a different chain.
     pub network: EvmNetwork,
     pub metrics: Arc<Metrics>,
+    pub block_watcher: Arc<BlockWatcher>,
 }
 
 impl AppState {
@@ -29,6 +31,7 @@ impl AppState {
         network_config: NetworkConfig,
         ws_pool_config: WsPoolConfig,
         metrics: Arc<Metrics>,
+        block_watcher: Arc<BlockWatcher>,
         task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
@@ -64,6 +67,7 @@ impl AppState {
             session_manager,
             network,
             metrics,
+            block_watcher,
         }))
     }
 }

@@ -49,6 +49,11 @@ pub struct Metrics {
     pub ws_subscribe_errors_total: Counter,
     /// ws subscribe gave up after backoff exhausted
     pub ws_subscribe_is_down_total: Counter,
+    /// time spent in backoff between a failed ws connect/subscribe attempt and the next retry
+    pub ws_reconnect_attempt_duration_ms: Histogram,
+
+    /// blocks accepted from the ws subscription. Rate ≈ chain block rate when healthy
+    pub block_accepted_total: Counter,
 
     /// ws resubscribe
     pub ws_resubscribed_total: Counter,
@@ -109,10 +114,13 @@ impl Metrics {
             ws_subscribe_errors_total: counter!("ws_subscribe_errors_total"),
             ws_subscribe_is_down_total: counter!("ws_subscribe_is_down_total"),
             ws_resubscribed_total: counter!("ws_resubscribed_total"),
+            ws_reconnect_attempt_duration_ms: histogram!("ws_reconnect_attempt_duration_ms"),
 
             ws_subscribe_permit_wait_ms: histogram!("ws_subscribe_permit_wait_ms"),
             ws_subscribes_in_flight: gauge!("ws_subscribes_in_flight"),
             ws_pool_connections: gauge!("ws_pool_connections"),
+
+            block_accepted_total: counter!("block_accepted_total"),
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),

@@ -130,11 +130,16 @@ data: {"code":503,"message":"WebSocket connection lost permanently"}
 
 ### `GET /health` — health probe
 
-Active synthetic probe. Calls `eth_blockNumber` on the HTTP RPC provider; returns
-`200 OK` if the upstream node responds, `503 Service Unavailable` otherwise.
+Passive WS-liveness probe. Returns `200 OK` if the process-wide `BlockWatcher`
+has an active `eth_subscribe("newHeads")` stream that has produced at least one
+header since the most recent reconnect, `503 Service Unavailable` otherwise.
 
-Used by Kubernetes `readinessProbe` + `livenessProbe`. No internal retries —
-transient failures are absorbed by `failureThreshold` at the probe level.
+The handler is a pure atomic read — no RPC round-trip per probe. The flag is
+updated in the background by the watcher task, which uses exponential backoff
+with jitter (1s → 30s, infinite retries) and a stall watchdog (`block_time × 3`)
+that flips the flag red if no header arrives in the window.
+
+Used by Kubernetes `readinessProbe` + `livenessProbe`.
 
 ```bash
 curl -i http://localhost:8080/health
@@ -412,7 +417,7 @@ src/
 │   ├── create_session.rs   POST /{chain_id}/sessions/{owner}
 │   ├── update_session.rs   PUT  /{chain_id}/sessions/{owner}
 │   ├── create_sse_session.rs  GET /sse/{chain_id}/balances/{owner}
-│   ├── health.rs           GET /health — active probe via RpcClient::get_block_number
+│   ├── health.rs           GET /health — reads BlockWatcher::is_healthy()
 │   └── extractors.rs       ChainId — validates {chain_id} against AppState::network
 │
 ├── config/
@@ -432,6 +437,7 @@ src/
 │   └── wrapped.rs          WETH9 Deposit / Withdrawal
 │
 ├── services/
+│   ├── block_watcher.rs    process-wide WS newHeads subscription; backs /health via is_healthy()
 │   ├── session_manager.rs  per-network orchestrator: token lists, watchers, SSE bridge
 │   ├── subscription_manager.rs  session registry, shared subs, idle cleanup
 │   ├── subscription.rs     per-session state (snapshot, broadcast, watched set)

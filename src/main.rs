@@ -13,6 +13,7 @@ mod tracing;
 use crate::api::create_router;
 use crate::args::Args;
 use crate::metrics::Metrics;
+use crate::services::block_watcher::BlockWatcher;
 use crate::tracing::init_tracing::init_tracing;
 use app_state::AppState;
 use config::network_config::NetworkConfig;
@@ -47,13 +48,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let shutdown_token = graceful_shutdown::get_token();
     let task_tracker = TaskTracker::new();
-    let token_for_app_state = shutdown_token.clone();
+
+    let block_watcher = BlockWatcher::spawn(
+        network_cfg.network,
+        Arc::clone(&metrics),
+        task_tracker.clone(),
+        shutdown_token.clone(),
+        ws_pool_cfg.ws_url.clone(),
+    );
+
     let app_state = AppState::build(
         network_cfg,
         ws_pool_cfg,
         Arc::clone(&metrics),
+        block_watcher,
         task_tracker.clone(),
-        token_for_app_state,
+        shutdown_token.clone(),
     )
     .await?;
 

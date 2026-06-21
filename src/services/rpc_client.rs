@@ -16,7 +16,7 @@ use crate::metrics::Metrics;
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, BlockNumber, U256};
-use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError, Provider};
+use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError};
 use alloy::sol_types::SolCall;
 use backon::{ExponentialBuilder, Retryable};
 use std::collections::HashMap;
@@ -31,9 +31,6 @@ type DynMulticallBuilder<D> = MulticallBuilder<Dynamic<D>, Arc<DynProvider>, Eth
 /// Error surface for this module.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RpcError {
-    /// Single-shot RPC call failed (no retry layer involved).
-    #[error("RPC call failed: {0}")]
-    Call(String),
     /// Multicall retry path: backoff exhausted, or short-circuited on a
     /// permanent error by [`RpcClient::is_multicall_retryable`].
     #[error("Provider exhausted after retries: {0}")]
@@ -240,13 +237,5 @@ impl RpcClient {
             .with_max_delay(Duration::from_secs(10))
             .with_max_times(3)
             .with_jitter()
-    }
-
-    /// Single `eth_blockNumber` call. Used by `/health`.
-    pub async fn get_block_number(&self) -> Result<BlockNumber, RpcError> {
-        self.provider
-            .get_block_number()
-            .await
-            .map_err(|err| RpcError::Call(err.to_string()))
     }
 }

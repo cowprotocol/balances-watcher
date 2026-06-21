@@ -13,6 +13,7 @@ tokio-stream = "0.1"
 clap = { version = "4.6.1", features = ["env", "derive"] }
 alloy = { version = "2.0.4", features = ["provider-ws", "getrandom"] }
 thiserror = "2.0.18"
+anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
