@@ -1,4 +1,4 @@
-pub mod calls_queue;
+pub mod balance_refresh_queue;
 pub mod cleanup_stream;
 pub mod session_manager;
 mod subscription;

@@ -25,12 +25,14 @@
 
 use crate::domain::{BalanceEvent, Session};
 use crate::metrics::Metrics;
+use crate::services::balance_refresh_queue::{BalanceRefreshQueue, BalanceRefreshQueueHandle};
+use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, BlockNumber, U256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -52,6 +54,8 @@ struct SubWithCounter {
     pub clients: u32,
     pub subscription: Arc<Subscription>,
     pub idle_since: Option<Instant>,
+    // todo will be implemented in the next pr when EventDispatcher will be implemented
+    // pub refresh_queue: Arc<BalanceRefreshQueueHandle>,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +71,7 @@ pub struct SubscriptionManager {
     task_tracker: TaskTracker,
     shutdown_token: CancellationToken,
     metrics: Arc<Metrics>,
+    rpc_client: Arc<RpcClient>,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
@@ -76,17 +81,29 @@ impl SubscriptionManager {
         task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
         metrics: Arc<Metrics>,
+        rpc_client: Arc<RpcClient>,
     ) -> Self {
         Self {
             subscriptions: RwLock::new(HashMap::new()),
             task_tracker,
             shutdown_token,
             metrics,
+            rpc_client,
         }
     }
 
     // create or update subscriptions clients count and watched token list
-    pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
+    pub async fn upsert(
+        &self,
+        session: Session,
+        tokens: HashSet<Address>,
+    ) -> (
+        Arc<Subscription>,
+        Option<(
+            mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
+            Arc<BalanceRefreshQueueHandle>,
+        )>,
+    ) {
         let tokens_len = tokens.len();
         let maybe_sub = {
             let subs = self.subscriptions.read().await;
@@ -111,7 +128,7 @@ impl SubscriptionManager {
                 sub.emit_balance_snapshot_refresh();
             }
 
-            return sub;
+            return (sub, None);
         }
 
         let shutdown_token = self.shutdown_token.clone();
@@ -121,10 +138,21 @@ impl SubscriptionManager {
             Arc::clone(&self.metrics),
         ));
 
+        let (refresh_queue, result_rx) = BalanceRefreshQueue::new(
+            self.task_tracker.clone(),
+            session.owner,
+            Arc::clone(&self.rpc_client),
+        )
+        .spawn();
+
+        let refresh_queue = Arc::new(refresh_queue);
+
         let sub_with_counter = SubWithCounter {
             clients: 0,
             subscription: Arc::clone(&subscription),
             idle_since: Some(Instant::now()),
+            // see todo
+            // refresh_queue: Arc::clone(&refresh_queue),
         };
 
         self.subscriptions
@@ -140,7 +168,7 @@ impl SubscriptionManager {
             "session is created"
         );
 
-        subscription
+        (subscription, Some((result_rx, refresh_queue)))
     }
 
     pub async fn subscribe(
