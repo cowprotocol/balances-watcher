@@ -9,14 +9,14 @@ mod graceful_shutdown;
 mod metrics;
 mod services;
 mod tracing;
-mod ws_provider;
+mod ws_connection;
 
 use crate::api::create_router;
 use crate::args::Args;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::tracing::init_tracing::init_tracing;
-use crate::ws_provider::WsProvider;
+use crate::ws_connection::WsConnection;
 use app_state::AppState;
 use config::network_config::NetworkConfig;
 use config::ws_pool_config::WsPoolConfig;
@@ -51,7 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let shutdown_token = graceful_shutdown::get_token();
     let task_tracker = TaskTracker::new();
 
-    let ws_provider = WsProvider::new(
+    let ws_connection = WsConnection::new(
         ws_pool_cfg.ws_url.clone(),
         Arc::clone(&metrics),
         shutdown_token.clone(),
@@ -62,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::clone(&metrics),
         task_tracker.clone(),
         shutdown_token.clone(),
-        ws_provider,
+        ws_connection,
     );
 
     let app_state = AppState::build(

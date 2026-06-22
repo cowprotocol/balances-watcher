@@ -1,19 +1,22 @@
 //! WebSocket health canary: a dedicated `eth_subscribe("newHeads")` subscription
 //! that powers `/health` via [`BlockWatcher::is_healthy`].
 //!
-//! Runs in its own task with infinite-retry exponential backoff
-//! (`MIN_RECONNECT_ATTEMPT_DELAY` → `MAX_RECONNECT_ATTEMPT_DELAY`, jitter) and a
-//! stall watchdog (`block_time × STALL_TIMEOUT_BLOCKS`, floored at `MIN_STALL_DURATION`) that forces
-//! a reconnect when headers stop arriving. The provider is **not** shared with the per-session pool
-//! ([`crate::services::ws_connection_pool`]) — a dedicated socket keeps the health
-//! signal isolated from data-plane churn (event load, session reconnect storms).
+//! Connect/subscribe and infinite-retry reconnect live in
+//! [`crate::ws_connection::WsConnection`]. This module only owns the
+//! consume-loop: a stall watchdog
+//! (`block_time × STALL_TIMEOUT_BLOCKS`, floored at `MIN_STALL_DURATION`)
+//! that forces a fresh subscription when headers stop arriving, and the
+//! single-bit health flag. The WS provider is **not** shared with the
+//! per-session pool ([`crate::services::ws_connection_pool`]) — a
+//! dedicated socket keeps the health signal isolated from data-plane
+//! churn (event load, session reconnect storms).
 //!
 //! Health is a single [`std::sync::atomic::AtomicBool`]: flipped `true` on the
 //! first header received, `false` on disconnect, stall, or shutdown.
 
 use crate::domain::EvmNetwork;
 use crate::metrics::Metrics;
-use crate::ws_provider::{ManagedWsSubscription, WsProvider};
+use crate::ws_connection::{ManagedWsSubscription, WsConnection};
 use alloy::rpc::types::Header;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -42,7 +45,7 @@ impl BlockWatcher {
         metrics: Arc<Metrics>,
         task_tracker: TaskTracker,
         cancellation_token: CancellationToken,
-        ws_provider: WsProvider,
+        ws_connection: WsConnection,
     ) -> Arc<Self> {
         let watcher = Arc::new(Self {
             network,
@@ -53,7 +56,7 @@ impl BlockWatcher {
         let watcher_for_spawn = Arc::clone(&watcher);
         task_tracker.spawn(async move {
             watcher_for_spawn
-                .run(cancellation_token, &ws_provider)
+                .run(cancellation_token, &ws_connection)
                 .await;
         });
 
@@ -66,13 +69,14 @@ impl BlockWatcher {
         self.connected.load(Ordering::Relaxed)
     }
 
-    async fn run(self: Arc<Self>, cancel: CancellationToken, ws_provider: &WsProvider) {
+    async fn run(self: Arc<Self>, cancel: CancellationToken, ws_connection: &WsConnection) {
         loop {
             if cancel.is_cancelled() {
                 break;
             }
 
-            let Some(sub) = ws_provider.subscribe_blocks().await else {
+            let Some(sub) = ws_connection.subscribe_blocks().await else {
+                tracing::info!("block subscription cancelled, exiting");
                 break;
             };
             tracing::info!("block subscription established, waiting for first header");
