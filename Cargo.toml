@@ -17,7 +17,7 @@ anyhow = "1.0.102"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["json", "env-filter"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
-metrics = "0.24.5"
+metrics = "0.24.6"
 metrics-exporter-prometheus = "0.18.3"
 rustls = { version = "0.23.40", features = ["ring"], default-features = false }
 backon = "1.6.0"
