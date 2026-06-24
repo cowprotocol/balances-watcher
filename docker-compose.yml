@@ -33,6 +33,14 @@ services:
       - "--providers.docker=true"
       - "--providers.docker.exposedbydefault=false"
       - "--entrypoints.web.address=:80"
+    labels:
+      # Shared CORS middleware — referenced by all three balances-watcher routers.
+      - "traefik.enable=true"
+      - "traefik.http.middlewares.cors.headers.accessControlAllowOriginList=http://localhost:3000"
+      - "traefik.http.middlewares.cors.headers.accessControlAllowMethods=GET,POST,PUT,DELETE,OPTIONS"
+      - "traefik.http.middlewares.cors.headers.accessControlAllowHeaders=Content-Type,Authorization"
+      - "traefik.http.middlewares.cors.headers.accessControlMaxAge=300"
+      - "traefik.http.middlewares.cors.headers.addVaryHeader=true"
 
   balances-watcher-eth:
     <<: *balances-watcher
@@ -45,6 +53,7 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.eth.rule=PathPrefix(`/1/`) || PathPrefix(`/sse/1/`)"
       - "traefik.http.routers.eth.entrypoints=web"
+      - "traefik.http.routers.eth.middlewares=cors@docker"
       - "traefik.http.services.eth.loadbalancer.server.port=8080"
 
   balances-watcher-arb:
@@ -58,6 +67,7 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.arb.rule=PathPrefix(`/42161/`) || PathPrefix(`/sse/42161/`)"
       - "traefik.http.routers.arb.entrypoints=web"
+      - "traefik.http.routers.arb.middlewares=cors@docker"
       - "traefik.http.services.arb.loadbalancer.server.port=8080"
 
   balances-watcher-sepolia:
@@ -71,4 +81,5 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.sepolia.rule=PathPrefix(`/11155111/`) || PathPrefix(`/sse/11155111/`)"
       - "traefik.http.routers.sepolia.entrypoints=web"
+      - "traefik.http.routers.sepolia.middlewares=cors@docker"
       - "traefik.http.services.sepolia.loadbalancer.server.port=8080"
