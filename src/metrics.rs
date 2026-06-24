@@ -36,8 +36,6 @@ pub struct Metrics {
     pub erc20_event_received_total: Counter,
     /// weth9 deposit or withdrawal log received
     pub weth9_events_received_total: Counter,
-    /// erc20 transfer log decode failed
-    pub parse_erc20_log_errors_total: Counter,
     /// weth9 log decode failed
     pub parse_weth9_logs_failed_total: Counter,
 
@@ -106,7 +104,6 @@ impl Metrics {
 
             erc20_event_received_total: counter!("erc20_event_received_total"),
             weth9_events_received_total: counter!("weth9_events_received_total"),
-            parse_erc20_log_errors_total: counter!("parse_erc20_log_errors_total"),
             parse_weth9_logs_failed_total: counter!("parse_weth9_logs_failed_total"),
 
             ws_provider_disconnected_total: counter!("ws_provider_disconnected_total"),

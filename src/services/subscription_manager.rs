@@ -211,18 +211,20 @@ impl SubscriptionManager {
     }
 
     // todo ONLY FOR TESTING, session will be rewritten in next pr
-    pub async fn get_owned_queue(&self, owner: &Address) -> Option<BalanceRefreshQueueHandle> {
-        self.subscriptions
-            .read()
-            .await
-            .iter()
-            .find_map(|(session, sub)| {
-                if session.owner == *owner {
-                    Some(sub.refresh_queue.clone())
-                } else {
-                    None
-                }
-            })
+    pub async fn get_owned_queue_if_watched(
+        &self,
+        owner: &Address,
+        token: &Address,
+    ) -> Option<BalanceRefreshQueueHandle> {
+        for (session, sub_with_counter) in self.subscriptions.read().await.iter() {
+            if session.owner == *owner
+                && sub_with_counter.subscription.is_watched_token(token).await
+            {
+                return Some(sub_with_counter.refresh_queue.clone());
+            }
+        }
+
+        None
     }
 
     // true - if it was the last client

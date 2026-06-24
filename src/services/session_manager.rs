@@ -230,7 +230,7 @@ impl SessionManager {
                     next = receiver.recv() => {
                         match next {
                             Some(event) => {
-                                if let Some(queue_handle) = this.sub_manager.get_owned_queue(&event.owner).await {
+                                if let Some(queue_handle) = this.sub_manager.get_owned_queue_if_watched(&event.owner, &event.token).await {
                                     queue_handle.enqueue(event.token, event.block).await;
                                 }
                             },

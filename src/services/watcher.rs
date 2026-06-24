@@ -18,7 +18,6 @@
 //!     log listeners ─► BalanceRefreshQueue ─► queue receiver ─► broadcast
 //! ```
 
-use crate::evm::erc20::ERC20;
 use alloy::eips::BlockId;
 use alloy::primitives::BlockNumber;
 use alloy::{
@@ -547,94 +546,6 @@ impl Watcher {
         self: Arc<Self>,
         refresh_queue: BalanceRefreshQueueHandle,
     ) {
-        let session = self.session;
-        let base = Filter::new().event_signature(ERC20::Transfer::SIGNATURE_HASH);
-        let from = base.clone().topic1(Topic::from(session.owner));
-        let to = base.clone().topic2(Topic::from(session.owner));
-
-        Arc::clone(&self)
-            .spawn_erc20_transfer_listener_with_filter(refresh_queue.clone(), from)
-            .await;
-        Arc::clone(&self)
-            .spawn_erc20_transfer_listener_with_filter(refresh_queue.clone(), to)
-            .await;
         self.spawn_weth9_events_listener(refresh_queue).await;
-    }
-
-    async fn spawn_erc20_transfer_listener_with_filter(
-        self: Arc<Self>,
-        refresh_queue: BalanceRefreshQueueHandle,
-        filter: Filter,
-    ) {
-        let session = self.session;
-        let sub = Arc::clone(&self.sub);
-
-        let this = Arc::clone(&self);
-        self.task_tracker.spawn(async move {
-            let _ = Arc::clone(&this)
-                .run_log_subscription_loop(
-                    filter,
-                    move |log: Log| {
-                        tracing::debug!(?log, "received erc20 transfer event");
-                        this.metrics.erc20_event_received_total.increment(1);
-                        let refresh_queue = refresh_queue.clone();
-
-                        let this = Arc::clone(&this);
-                        Box::pin(async move {
-                            this.parse_transfer_event_and_fetch_balance(refresh_queue, &log)
-                                .await;
-                        })
-                    },
-                    move || {
-                        sub.send_event(
-                            BalanceEvent::Error {
-                                code: 503,
-                                message: "WebSocket connection lost permanently".to_string(),
-                            },
-                            session,
-                        );
-                    },
-                )
-                .await;
-        });
-    }
-
-    async fn parse_transfer_event_and_fetch_balance(
-        self: Arc<Self>,
-        refresh_queue: BalanceRefreshQueueHandle,
-        log: &Log,
-    ) {
-        let block_number = log.block_number;
-
-        let decoded_log: Log<ERC20::Transfer> = match log.log_decode() {
-            Ok(log) => log,
-            Err(err) => {
-                self.metrics.parse_erc20_log_errors_total.increment(1);
-                tracing::error!(
-                    error = %err,
-                    owner = %self.session.owner,
-                    "failed to decode erc20 transfer log",
-                );
-                return;
-            }
-        };
-
-        // service listens to all transfer events
-        // skip all tokens that are not in the watched token list
-        let token_address = decoded_log.address();
-        if !self.sub.is_watched(&token_address).await {
-            tracing::debug!(
-                token_address = %token_address,
-                "token is not watched, skip"
-            );
-            return;
-        }
-
-        tracing::debug!(
-            token = %token_address,
-            block_number = block_number,
-            "erc20 event is parsed, send it to fetch queue"
-        );
-        refresh_queue.enqueue(token_address, block_number).await;
     }
 }
