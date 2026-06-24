@@ -24,7 +24,6 @@ use crate::services::rpc_client::BalancesWithBlock;
 use crate::services::subscription_manager::{Balance, BalanceSnapshot};
 use alloy::primitives::Address;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, Notify, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -34,7 +33,6 @@ pub struct Subscription {
     balances_snapshot: RwLock<BalanceSnapshot>,
     sender: broadcast::Sender<BalanceEvent>,
     tokens: RwLock<HashSet<Address>>,
-    watchers_spawned: AtomicBool,
     cancellation_token: CancellationToken,
     snapshot_refresh_notify: Arc<Notify>,
     metrics: Arc<Metrics>,
@@ -54,7 +52,6 @@ impl Subscription {
             balances_snapshot: RwLock::new(HashMap::new()),
             cancellation_token,
             tokens: RwLock::new(tokens),
-            watchers_spawned: AtomicBool::new(false),
             // wakes the snapshot updater on any of: cold-start WS subscribe,
             // WS resubscribe after disconnect, watched-token list extension.
             snapshot_refresh_notify: Arc::new(Notify::new()),
@@ -82,15 +79,6 @@ impl Subscription {
     /// Cloned token that watchers `.cancelled().await` on.
     pub fn cancellable(&self) -> CancellationToken {
         self.cancellation_token.clone()
-    }
-
-    /// Atomic claim — the first caller flips the flag from `false` to `true`
-    /// and gets `true` back. Used by `SessionManager::upsert` to spawn
-    /// watchers exactly once per session lifetime.
-    pub fn try_mark_watchers_spawned(&self) -> bool {
-        self.watchers_spawned
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
     }
 
     /// Snapshot copy of the watched set.

@@ -36,7 +36,7 @@ use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
 use crate::metrics::Metrics;
-use crate::services::calls_queue::BalanceRefreshQueueHandle;
+use crate::services::balance_refresh_queue::BalanceRefreshQueueHandle;
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use crate::services::subscription::Subscription;
 use crate::services::ws_connection_pool::WsConnectionPool;
@@ -74,7 +74,6 @@ pub struct Watcher {
     session: Session,
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
-    refresh_queue: BalanceRefreshQueueHandle,
     rpc_client: Arc<RpcClient>,
     metrics: Arc<Metrics>,
 }
@@ -86,7 +85,6 @@ impl Watcher {
         task_tracker: TaskTracker,
         rpc_client: Arc<RpcClient>,
         subscription: Arc<Subscription>,
-        refresh_queue: BalanceRefreshQueueHandle,
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         session: Session,
@@ -94,7 +92,6 @@ impl Watcher {
         Self {
             task_tracker,
             session,
-            refresh_queue,
             sub: subscription,
             rpc_client,
             ws_connection_pool,
@@ -112,18 +109,28 @@ impl Watcher {
     /// - **queue result receiver** — drains `BalanceRefreshQueue` results
     ///   into the broadcast stream.
     ///
+    /// `refresh_queue` is the producer side of the refresh queue, owned upstream
+    /// by [`crate::services::subscription_manager`] — Watcher holds it only to
+    /// let its WS listeners enqueue refreshes. It is a transient dependency
+    /// that disappears once the shared `EventDispatcher` takes over routing in
+    /// a later migration phase.
+    ///
     /// Idempotent at the session level via
-    /// [`Subscription::try_mark_watchers_spawned`] — `SessionManager` calls
-    /// this exactly once per session lifetime.
+    /// [`crate::services::subscription_manager::SubscriptionManager::upsert`],
+    /// which hands back the queue endpoints only on first creation —
+    /// `SessionManager` calls this exactly once per session lifetime.
     pub async fn spawn_watchers(
         self: Arc<Self>,
         rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
+        refresh_queue: BalanceRefreshQueueHandle,
         interval_secs: usize,
     ) {
         Arc::clone(&self)
             .spawn_snapshot_updater(interval_secs)
             .await;
-        Arc::clone(&self).spawn_erc20_transfer_listeners().await;
+        Arc::clone(&self)
+            .spawn_erc20_transfer_listeners(refresh_queue)
+            .await;
         Arc::clone(&self).spawn_queue_result_receiver(rx).await;
     }
 
@@ -309,7 +316,10 @@ impl Watcher {
      *
      * Need to sync wrap/unwrap txs to handle wrapped token balance
      */
-    async fn spawn_weth9_events_listener(self: Arc<Self>) {
+    async fn spawn_weth9_events_listener(
+        self: Arc<Self>,
+        refresh_queue: BalanceRefreshQueueHandle,
+    ) {
         let session = self.session;
         let weth9_address = session.network.weth9_address();
 
@@ -332,9 +342,12 @@ impl Watcher {
                     filter,
                     move |log: Log| {
                         let this = Arc::clone(&this_on_log);
+                        let refresh_queue = refresh_queue.clone();
+
                         Box::pin(async move {
                             this.metrics.weth9_events_received_total.increment(1);
-                            this.parse_weth9_logs_and_fetch_balance(&log).await;
+                            this.parse_weth9_logs_and_fetch_balance(refresh_queue, &log)
+                                .await;
                         })
                     },
                     move || {
@@ -429,7 +442,11 @@ impl Watcher {
         }
     }
 
-    async fn parse_weth9_logs_and_fetch_balance(self: Arc<Self>, log: &Log) {
+    async fn parse_weth9_logs_and_fetch_balance(
+        self: Arc<Self>,
+        refresh_queue: BalanceRefreshQueueHandle,
+        log: &Log,
+    ) {
         tracing::debug!("got weth9 log: {:?}", log);
 
         let Ok(parsed_log) = Self::parse_weth9_logs(log) else {
@@ -449,9 +466,7 @@ impl Watcher {
             block_number = block_number,
             "weth9 log is parsed, send fetching balance request to a queue"
         );
-        self.refresh_queue
-            .enqueue(weth9_address, block_number)
-            .await;
+        refresh_queue.enqueue(weth9_address, block_number).await;
     }
 
     // parse WETH logs, search DEPOSIT/WITHDRAWAL events
@@ -528,22 +543,29 @@ impl Watcher {
     // Infura both impose one, in the low thousands), and keeps the WS
     // subscription set bounded — three per session, regardless of how large the
     // watched-token list grows.
-    async fn spawn_erc20_transfer_listeners(self: Arc<Self>) {
+    async fn spawn_erc20_transfer_listeners(
+        self: Arc<Self>,
+        refresh_queue: BalanceRefreshQueueHandle,
+    ) {
         let session = self.session;
         let base = Filter::new().event_signature(ERC20::Transfer::SIGNATURE_HASH);
         let from = base.clone().topic1(Topic::from(session.owner));
         let to = base.clone().topic2(Topic::from(session.owner));
 
         Arc::clone(&self)
-            .spawn_erc20_transfer_listener_with_filter(from)
+            .spawn_erc20_transfer_listener_with_filter(refresh_queue.clone(), from)
             .await;
         Arc::clone(&self)
-            .spawn_erc20_transfer_listener_with_filter(to)
+            .spawn_erc20_transfer_listener_with_filter(refresh_queue.clone(), to)
             .await;
-        self.spawn_weth9_events_listener().await;
+        self.spawn_weth9_events_listener(refresh_queue).await;
     }
 
-    async fn spawn_erc20_transfer_listener_with_filter(self: Arc<Self>, filter: Filter) {
+    async fn spawn_erc20_transfer_listener_with_filter(
+        self: Arc<Self>,
+        refresh_queue: BalanceRefreshQueueHandle,
+        filter: Filter,
+    ) {
         let session = self.session;
         let sub = Arc::clone(&self.sub);
 
@@ -555,10 +577,12 @@ impl Watcher {
                     move |log: Log| {
                         tracing::debug!(?log, "received erc20 transfer event");
                         this.metrics.erc20_event_received_total.increment(1);
+                        let refresh_queue = refresh_queue.clone();
 
                         let this = Arc::clone(&this);
                         Box::pin(async move {
-                            this.parse_transfer_event_and_fetch_balance(&log).await;
+                            this.parse_transfer_event_and_fetch_balance(refresh_queue, &log)
+                                .await;
                         })
                     },
                     move || {
@@ -575,7 +599,11 @@ impl Watcher {
         });
     }
 
-    async fn parse_transfer_event_and_fetch_balance(self: Arc<Self>, log: &Log) {
+    async fn parse_transfer_event_and_fetch_balance(
+        self: Arc<Self>,
+        refresh_queue: BalanceRefreshQueueHandle,
+        log: &Log,
+    ) {
         let block_number = log.block_number;
 
         let decoded_log: Log<ERC20::Transfer> = match log.log_decode() {
@@ -607,8 +635,6 @@ impl Watcher {
             block_number = block_number,
             "erc20 event is parsed, send it to fetch queue"
         );
-        self.refresh_queue
-            .enqueue(token_address, block_number)
-            .await;
+        refresh_queue.enqueue(token_address, block_number).await;
     }
 }

@@ -1,9 +1,11 @@
 //! Server-side registry of live SSE sessions, keyed by [`Session`]
-//! (`(owner, network)`). Owns every [`Subscription`] the process holds and
+//! (`(owner, network)`). Owns every [`Subscription`] the process holds,
+//! spawns its [`BalanceRefreshQueue`] worker on first creation, and
 //! arbitrates between HTTP handlers and a background cleanup task.
 //!
-//! - [`upsert`](SubscriptionManager::upsert) — create a session, or
-//!   PUT-replace its watched-token set via
+//! - [`upsert`](SubscriptionManager::upsert) — create a session (spawning a
+//!   fresh refresh-queue worker and returning [`RefreshQueueEndpoints`] to the
+//!   caller), or PUT-replace its watched-token set via
 //!   [`Subscription::set_watched_tokens`]. Forces a fresh multicall via
 //!   [`Subscription::emit_balance_snapshot_refresh`] only when the set
 //!   actually changed, so re-PUT'ing the same list is a no-op.
@@ -16,8 +18,9 @@
 //! - [`spawn_cleanup`](SubscriptionManager::spawn_cleanup) — background task
 //!   ticking every `SESSION_TTL`. Drops sessions with zero clients idle past
 //!   the TTL, cancelling their per-session token (which unwinds every
-//!   watcher worker in [`crate::services::watcher`]). On shutdown, broadcasts
-//!   a 503 close event to every client and clears the map.
+//!   watcher worker in [`crate::services::watcher`] and, transitively, the
+//!   refresh-queue worker once its last handle is gone). On shutdown,
+//!   broadcasts a 503 close event to every client and clears the map.
 //!
 //! `SubWithCounter` is the per-session bookkeeping cell — `clients`,
 //! `idle_since`, `Arc<Subscription>` — that the registry inspects to decide
@@ -25,12 +28,14 @@
 
 use crate::domain::{BalanceEvent, Session};
 use crate::metrics::Metrics;
+use crate::services::balance_refresh_queue::{BalanceRefreshQueue, BalanceRefreshQueueHandle};
+use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, BlockNumber, U256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
@@ -52,6 +57,23 @@ struct SubWithCounter {
     pub clients: u32,
     pub subscription: Arc<Subscription>,
     pub idle_since: Option<Instant>,
+    // todo will be implemented in the next pr when EventDispatcher will be implemented
+    // pub refresh_queue: BalanceRefreshQueueHandle,
+}
+
+/// The two endpoints of a per-session [`BalanceRefreshQueue`], handed back by
+/// [`SubscriptionManager::upsert`] when it spawns a fresh worker:
+///
+/// - `refresh_queue` — the producer-side handle that listeners clone and call
+///   `enqueue` on.
+/// - `result_rx` — the consumer-side receiver that drains completed multicall
+///   results into the broadcast stream.
+///
+/// Returned only on the create branch; an update to an existing session
+/// returns `None` because the worker is already running.
+pub struct RefreshQueueEndpoints {
+    pub result_rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
+    pub refresh_queue: BalanceRefreshQueueHandle,
 }
 
 #[derive(Debug, Clone)]
@@ -67,6 +89,7 @@ pub struct SubscriptionManager {
     task_tracker: TaskTracker,
     shutdown_token: CancellationToken,
     metrics: Arc<Metrics>,
+    rpc_client: Arc<RpcClient>,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
@@ -76,17 +99,29 @@ impl SubscriptionManager {
         task_tracker: TaskTracker,
         shutdown_token: CancellationToken,
         metrics: Arc<Metrics>,
+        rpc_client: Arc<RpcClient>,
     ) -> Self {
         Self {
             subscriptions: RwLock::new(HashMap::new()),
             task_tracker,
             shutdown_token,
             metrics,
+            rpc_client,
         }
     }
 
-    // create or update subscriptions clients count and watched token list
-    pub async fn upsert(&self, session: Session, tokens: HashSet<Address>) -> Arc<Subscription> {
+    /// Create or update a session.
+    ///
+    /// On **create**: spawns a fresh [`BalanceRefreshQueue`] worker and returns
+    /// `Some(RefreshQueueEndpoints)` so the caller can wire up its `Watcher`.
+    /// On **update** (the session already exists): replaces the watched-token
+    /// set, optionally forces a snapshot refresh, and returns `None` in the
+    /// second slot — the worker is already running.
+    pub async fn upsert(
+        &self,
+        session: Session,
+        tokens: HashSet<Address>,
+    ) -> (Arc<Subscription>, Option<RefreshQueueEndpoints>) {
         let tokens_len = tokens.len();
         let maybe_sub = {
             let subs = self.subscriptions.read().await;
@@ -111,7 +146,7 @@ impl SubscriptionManager {
                 sub.emit_balance_snapshot_refresh();
             }
 
-            return sub;
+            return (sub, None);
         }
 
         let shutdown_token = self.shutdown_token.clone();
@@ -121,10 +156,19 @@ impl SubscriptionManager {
             Arc::clone(&self.metrics),
         ));
 
+        let (refresh_queue, result_rx) = BalanceRefreshQueue::new(
+            self.task_tracker.clone(),
+            session.owner,
+            Arc::clone(&self.rpc_client),
+        )
+        .spawn();
+
         let sub_with_counter = SubWithCounter {
             clients: 0,
             subscription: Arc::clone(&subscription),
             idle_since: Some(Instant::now()),
+            // see todo
+            // refresh_queue: refresh_queue.clone(),
         };
 
         self.subscriptions
@@ -140,7 +184,13 @@ impl SubscriptionManager {
             "session is created"
         );
 
-        subscription
+        (
+            subscription,
+            Some(RefreshQueueEndpoints {
+                result_rx,
+                refresh_queue,
+            }),
+        )
     }
 
     pub async fn subscribe(

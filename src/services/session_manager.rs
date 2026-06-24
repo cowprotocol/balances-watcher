@@ -1,7 +1,6 @@
 use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::metrics::Metrics;
-use crate::services::calls_queue::BalanceRefreshQueue;
 use crate::services::cleanup_stream;
 use crate::services::rpc_client::RpcClient;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
@@ -124,6 +123,7 @@ impl SessionManager {
             task_tracker.clone(),
             shutdown_token,
             Arc::clone(&metrics),
+            Arc::clone(&rpc_client),
         ));
         Arc::clone(&sub_manager).spawn_cleanup();
 
@@ -163,36 +163,33 @@ impl SessionManager {
             ));
         }
 
-        let sub = self.sub_manager.upsert(session, new_watched_tokens).await;
+        let (sub, maybe_queue_endpoints) =
+            self.sub_manager.upsert(session, new_watched_tokens).await;
 
-        // if there aren't spawners yet - spawn them and create a first subscription
-        let should_spawn_watchers = sub.try_mark_watchers_spawned();
-
-        if should_spawn_watchers {
+        // `upsert` returns the queue endpoints only for a brand-new session —
+        // re-PUT'ing tokens for an already-live session yields `None` here,
+        // so we spawn the per-session watchers exactly once over its lifetime.
+        if let Some(queue_endpoints) = maybe_queue_endpoints {
             tracing::info!(
                 session = %session,
                 "upsert: spawning watchers"
             );
 
-            let (refresh_queue, result_rx) = BalanceRefreshQueue::new(
-                self.task_tracker.clone(),
-                session.owner,
-                Arc::clone(&rpc_client),
-            )
-            .spawn();
-
             let watcher = Arc::new(Watcher::new(
                 self.task_tracker.clone(),
                 rpc_client,
                 sub,
-                refresh_queue,
                 ws_pool,
                 Arc::clone(&self.metrics),
                 session,
             ));
 
             watcher
-                .spawn_watchers(result_rx, self.config.snapshot_interval)
+                .spawn_watchers(
+                    queue_endpoints.result_rx,
+                    queue_endpoints.refresh_queue,
+                    self.config.snapshot_interval,
+                )
                 .await;
 
             tracing::info!(
