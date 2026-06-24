@@ -1,15 +1,15 @@
 use crate::config::network_config::NetworkConfig;
 use crate::config::ws_pool_config::WsPoolConfig;
 use crate::domain::EvmNetwork;
+use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::RpcClient;
 use crate::services::session_manager::{SessionConfig, SessionManager};
 use crate::services::ws_connection_pool::WsConnectionPool;
+use crate::ws_connection::WsConnection;
 use alloy::providers::{Provider, ProviderBuilder};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 /// Application state for the single-network instance.
 ///
@@ -32,8 +32,7 @@ impl AppState {
         ws_pool_config: WsPoolConfig,
         metrics: Arc<Metrics>,
         block_watcher: Arc<BlockWatcher>,
-        task_tracker: TaskTracker,
-        shutdown_token: CancellationToken,
+        life_cycle: LifeCycle,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let network = network_config.network;
 
@@ -47,21 +46,27 @@ impl AppState {
         ));
         tracing::info!(%network, "http provider connected");
 
+        let ws_url = ws_pool_config.ws_url.clone();
         let ws_pool = Arc::new(WsConnectionPool::new(ws_pool_config, Arc::clone(&metrics)));
         tracing::info!(%network, "ws connection pool ready");
 
-        let session_manager = Arc::new(SessionManager::new(
+        let session_manager = SessionManager::spawn(
             rpc_client,
             ws_pool,
             Arc::clone(&metrics),
-            task_tracker,
-            shutdown_token,
+            life_cycle.clone(),
             SessionConfig {
                 snapshot_interval: network_config.snapshot_interval,
                 token_limit: network_config.max_watched_tokens_limit,
                 active_network: network,
             },
-        ));
+            // todo remove when all ws logs subscriptions will be moved to EventDispatcher
+            WsConnection::new(
+                ws_url,
+                Arc::clone(&metrics),
+                life_cycle.cancel_token.clone(),
+            ),
+        );
 
         Ok(Arc::new(Self {
             session_manager,

@@ -68,8 +68,7 @@ pub async fn create_session(
         custom_tokens: body.custom_tokens,
     };
 
-    let result = state
-        .session_manager
+    let result = Arc::clone(&state.session_manager)
         .upsert(ctx)
         .await
         .map_err(AppError::from);

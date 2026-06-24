@@ -14,7 +14,7 @@ use crate::app_state::AppState;
     ),
 )]
 pub async fn health_handler(State(state): State<Arc<AppState>>) -> StatusCode {
-    if state.block_watcher.is_healthy() {
+    if state.block_watcher.is_healthy() && state.session_manager.is_healthy() {
         StatusCode::OK
     } else {
         tracing::error!("/health failed");

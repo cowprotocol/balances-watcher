@@ -1,7 +1,8 @@
 use tokio::{signal, signal::unix::SignalKind};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
-pub fn get_token() -> CancellationToken {
+pub fn spawn_shutdown_token() -> CancellationToken {
     let shutdown_token = CancellationToken::new();
 
     let shutdown_token_cloned = shutdown_token.clone();
@@ -23,6 +24,21 @@ async fn shutdown_signal() {
         },
         _ = sigterm.recv() => {
             tracing::info!("sigterm received");
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct LifeCycle {
+    pub task_tracker: TaskTracker,
+    pub cancel_token: CancellationToken,
+}
+
+impl LifeCycle {
+    pub fn spawn() -> LifeCycle {
+        Self {
+            task_tracker: TaskTracker::new(),
+            cancel_token: spawn_shutdown_token(),
         }
     }
 }

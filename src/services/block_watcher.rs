@@ -15,6 +15,7 @@
 //! first header received, `false` on disconnect, stall, or shutdown.
 
 use crate::domain::EvmNetwork;
+use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::ws_connection::{ManagedWsSubscription, WsConnection};
 use alloy::rpc::types::Header;
@@ -23,7 +24,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 const MIN_STALL_DURATION: Duration = Duration::from_secs(2);
 const STALL_TIMEOUT_BLOCKS: u32 = 3;
@@ -43,8 +43,7 @@ impl BlockWatcher {
     pub fn spawn(
         network: EvmNetwork,
         metrics: Arc<Metrics>,
-        task_tracker: TaskTracker,
-        cancellation_token: CancellationToken,
+        lifecycle: LifeCycle,
         ws_connection: WsConnection,
     ) -> Arc<Self> {
         let watcher = Arc::new(Self {
@@ -54,9 +53,9 @@ impl BlockWatcher {
         });
 
         let watcher_for_spawn = Arc::clone(&watcher);
-        task_tracker.spawn(async move {
+        lifecycle.task_tracker.spawn(async move {
             watcher_for_spawn
-                .run(cancellation_token, &ws_connection)
+                .run(lifecycle.cancel_token, &ws_connection)
                 .await;
         });
 
@@ -110,11 +109,10 @@ impl BlockWatcher {
                         Ok(Some(_)) => self.record_connected(),
                         Ok(None) => {
                             self.metrics.ws_provider_disconnected_total.increment(1);
-                            tracing::warn!("stream terminated, subscription closed by server");
+                            tracing::warn!("block stream terminated, subscription closed by server");
                             return;
                         },
                         Err(_) => {
-                            self.metrics.ws_provider_disconnected_total.increment(1);
                             tracing::warn!(stall_timeout_s = stall_timeout.as_secs(), "stream stalled");
                             return;
                         }

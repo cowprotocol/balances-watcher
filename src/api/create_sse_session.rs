@@ -34,8 +34,7 @@ pub async fn create_sse_connection(
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
     let (_, owner) = path.0;
-    state
-        .session_manager
+    Arc::clone(&state.session_manager)
         .create_sse_connection(owner, network)
         .await
 }

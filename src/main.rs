@@ -13,6 +13,7 @@ mod ws_connection;
 
 use crate::api::create_router;
 use crate::args::Args;
+use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::tracing::init_tracing::init_tracing;
@@ -25,7 +26,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
-use tokio_util::task::TaskTracker;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -48,20 +48,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics_handler = PrometheusBuilder::new().install_recorder()?;
     let metrics = Arc::new(Metrics::install());
 
-    let shutdown_token = graceful_shutdown::get_token();
-    let task_tracker = TaskTracker::new();
+    let lifecycle = LifeCycle::spawn();
 
     let ws_connection = WsConnection::new(
         ws_pool_cfg.ws_url.clone(),
         Arc::clone(&metrics),
-        shutdown_token.clone(),
+        lifecycle.cancel_token.clone(),
     );
 
     let block_watcher = BlockWatcher::spawn(
         network_cfg.network,
         Arc::clone(&metrics),
-        task_tracker.clone(),
-        shutdown_token.clone(),
+        lifecycle.clone(),
         ws_connection,
     );
 
@@ -70,8 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_pool_cfg,
         Arc::clone(&metrics),
         block_watcher,
-        task_tracker.clone(),
-        shutdown_token.clone(),
+        lifecycle.clone(),
     )
     .await?;
 
@@ -82,16 +79,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = TcpListener::bind(address).await?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(async move { shutdown_token.cancelled().await })
+        .with_graceful_shutdown(async move { lifecycle.cancel_token.cancelled().await })
         .await?;
 
-    task_tracker.close();
+    lifecycle.task_tracker.close();
 
-    let _ = tokio::time::timeout(Duration::from_secs(10), task_tracker.wait())
+    let _ = tokio::time::timeout(Duration::from_secs(10), lifecycle.task_tracker.wait())
         .await
         .map_err(|_| {
             ::tracing::warn!(
-                pending = task_tracker.len(),
+                pending = lifecycle.task_tracker.len(),
                 "graceful shutdown timed out, killing remaining tasks"
             )
         });

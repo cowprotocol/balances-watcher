@@ -27,6 +27,7 @@
 //! "is anyone still listening?" without touching subscription internals.
 
 use crate::domain::{BalanceEvent, Session};
+use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::balance_refresh_queue::{BalanceRefreshQueue, BalanceRefreshQueueHandle};
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
@@ -36,8 +37,6 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, RwLock};
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 /// Errors surfaced by [`SubscriptionManager`].
 #[derive(Debug, Clone, thiserror::Error)]
@@ -57,8 +56,7 @@ struct SubWithCounter {
     pub clients: u32,
     pub subscription: Arc<Subscription>,
     pub idle_since: Option<Instant>,
-    // todo will be implemented in the next pr when EventDispatcher will be implemented
-    // pub refresh_queue: BalanceRefreshQueueHandle,
+    pub refresh_queue: BalanceRefreshQueueHandle,
 }
 
 /// The two endpoints of a per-session [`BalanceRefreshQueue`], handed back by
@@ -86,25 +84,18 @@ pub type BalanceSnapshot = HashMap<Address, Balance>;
 
 pub struct SubscriptionManager {
     subscriptions: RwLock<HashMap<Session, SubWithCounter>>,
-    task_tracker: TaskTracker,
-    shutdown_token: CancellationToken,
     metrics: Arc<Metrics>,
     rpc_client: Arc<RpcClient>,
+    lifecycle: LifeCycle,
 }
 
 const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
-    pub fn new(
-        task_tracker: TaskTracker,
-        shutdown_token: CancellationToken,
-        metrics: Arc<Metrics>,
-        rpc_client: Arc<RpcClient>,
-    ) -> Self {
+    pub fn new(metrics: Arc<Metrics>, rpc_client: Arc<RpcClient>, lifecycle: LifeCycle) -> Self {
         Self {
             subscriptions: RwLock::new(HashMap::new()),
-            task_tracker,
-            shutdown_token,
+            lifecycle,
             metrics,
             rpc_client,
         }
@@ -149,7 +140,7 @@ impl SubscriptionManager {
             return (sub, None);
         }
 
-        let shutdown_token = self.shutdown_token.clone();
+        let shutdown_token = self.lifecycle.cancel_token.clone();
         let subscription = Arc::new(Subscription::new(
             tokens,
             shutdown_token.child_token(),
@@ -157,7 +148,7 @@ impl SubscriptionManager {
         ));
 
         let (refresh_queue, result_rx) = BalanceRefreshQueue::new(
-            self.task_tracker.clone(),
+            self.lifecycle.task_tracker.clone(),
             session.owner,
             Arc::clone(&self.rpc_client),
         )
@@ -167,8 +158,7 @@ impl SubscriptionManager {
             clients: 0,
             subscription: Arc::clone(&subscription),
             idle_since: Some(Instant::now()),
-            // see todo
-            // refresh_queue: refresh_queue.clone(),
+            refresh_queue: refresh_queue.clone(),
         };
 
         self.subscriptions
@@ -220,6 +210,21 @@ impl SubscriptionManager {
         Err(SubscriptionError::SessionNotRegistered)
     }
 
+    // todo ONLY FOR TESTING, session will be rewritten in next pr
+    pub async fn get_owned_queue(&self, owner: &Address) -> Option<BalanceRefreshQueueHandle> {
+        self.subscriptions
+            .read()
+            .await
+            .iter()
+            .find_map(|(session, sub)| {
+                if session.owner == *owner {
+                    Some(sub.refresh_queue.clone())
+                } else {
+                    None
+                }
+            })
+    }
+
     // true - if it was the last client
     pub async fn unsubscribe(&self, session: &Session) -> Result<bool, SubscriptionError> {
         let mut subs = self.subscriptions.write().await;
@@ -256,11 +261,11 @@ impl SubscriptionManager {
     }
 
     pub fn spawn_cleanup(self: Arc<Self>) {
-        Arc::clone(&self).task_tracker.spawn(async move {
+        Arc::clone(&self).lifecycle.task_tracker.spawn(async move {
             let mut interval = tokio::time::interval(SESSION_TTL);
             loop {
                 tokio::select! {
-                    _ = self.shutdown_token.cancelled() => {
+                    _ = self.lifecycle.cancel_token.cancelled() => {
                         tracing::info!("shutdown cleanup_subs");
                         self.close_sse_connections().await;
                         break;
