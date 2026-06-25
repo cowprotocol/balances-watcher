@@ -157,7 +157,7 @@ impl SnapshotUpdater {
             // Wait for node ws connection is being established
             let mut rx_connected = self.block_watcher.watch_connected();
             loop {
-                if !*rx_connected.borrow() {
+                if !*rx_connected.borrow_and_update() {
                     tracing::debug!(owner = %owner, "snapshot updater blocked, waiting for BlockWatcher connection");
 
                     tokio::select! {
@@ -189,12 +189,11 @@ impl SnapshotUpdater {
         let interval_duration = Duration::from_secs(interval_secs as u64);
         let mut interval = interval(interval_duration);
         let mut rx_connected = self.block_watcher.watch_connected();
+        let refresh_balance_notifier = self.sub.snapshot_refresh_notifier();
+        let owner = self.session.owner;
 
         loop {
             let this = Arc::clone(&self);
-            let sub = Arc::clone(&self.sub);
-            let owner = this.session.owner;
-            let refresh_balance_notifier = sub.snapshot_refresh_notifier();
 
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -205,7 +204,7 @@ impl SnapshotUpdater {
                     break;
                 }
                 _ = rx_connected.changed() => {
-                    if !*rx_connected.borrow() {
+                    if !*rx_connected.borrow_and_update() {
                         tracing::debug!("BlockWatcher disconnected, exiting interval");
                         return;
                     }
