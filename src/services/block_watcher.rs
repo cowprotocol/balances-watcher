@@ -22,6 +22,7 @@ use alloy::rpc::types::Header;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -35,6 +36,8 @@ pub struct BlockWatcher {
     network: EvmNetwork,
     metrics: Arc<Metrics>,
     connected: AtomicBool,
+    ws_connection: WsConnection,
+    on_connect_tx: watch::Sender<bool>,
 }
 
 impl BlockWatcher {
@@ -46,17 +49,19 @@ impl BlockWatcher {
         lifecycle: LifeCycle,
         ws_connection: WsConnection,
     ) -> Arc<Self> {
+        let (on_connect_tx, _) = watch::channel(false);
+
         let watcher = Arc::new(Self {
             network,
             metrics,
             connected: AtomicBool::new(false),
+            ws_connection,
+            on_connect_tx,
         });
 
         let watcher_for_spawn = Arc::clone(&watcher);
         lifecycle.task_tracker.spawn(async move {
-            watcher_for_spawn
-                .run(lifecycle.cancel_token, &ws_connection)
-                .await;
+            watcher_for_spawn.run(lifecycle.cancel_token).await;
         });
 
         watcher
@@ -68,20 +73,29 @@ impl BlockWatcher {
         self.connected.load(Ordering::Relaxed)
     }
 
-    async fn run(self: Arc<Self>, cancel: CancellationToken, ws_connection: &WsConnection) {
+    pub fn watch_connected(&self) -> watch::Receiver<bool> {
+        self.on_connect_tx.subscribe()
+    }
+
+    async fn run(self: Arc<Self>, cancel: CancellationToken) {
         loop {
             if cancel.is_cancelled() {
                 break;
             }
 
-            let Some(sub) = ws_connection.subscribe_blocks().await else {
+            let Some(sub) = self.ws_connection.subscribe_blocks().await else {
                 tracing::info!("block subscription cancelled, exiting");
                 break;
             };
+
+            // todo handle error
             tracing::info!("block subscription established, waiting for first header");
+            let _ = self.on_connect_tx.send(true);
 
             self.consume_until_disconnect(sub, &cancel).await;
             self.connected.store(false, Ordering::Relaxed);
+            // todo handle error
+            let _ = self.on_connect_tx.send(false);
 
             tracing::info!(
                 delay_ms = POST_DISCONNECT_DELAY.as_millis() as u64,

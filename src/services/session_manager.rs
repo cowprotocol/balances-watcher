@@ -2,12 +2,13 @@ use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
+use crate::services::block_watcher::BlockWatcher;
 use crate::services::cleanup_stream;
 use crate::services::event_dispatcher::{Erc20TransferEvent, EventDispatcher};
 use crate::services::rpc_client::RpcClient;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
 use crate::services::token_list_fetcher::{FetcherError, TokenListFetcher};
-use crate::services::watcher::Watcher;
+use crate::services::watcher::SnapshotUpdater;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use crate::ws_connection::WsConnection;
 use alloy::primitives::Address;
@@ -52,6 +53,7 @@ pub struct SessionManager {
     ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
     event_dispatcher: Arc<EventDispatcher>,
+    block_watcher: Arc<BlockWatcher>,
     lifecycle: LifeCycle,
     metrics: Arc<Metrics>,
     config: SessionConfig,
@@ -113,7 +115,7 @@ impl SessionManager {
         metrics: Arc<Metrics>,
         lifecycle: LifeCycle,
         config: SessionConfig,
-        ws_connection: WsConnection,
+        ws_url: String,
     ) -> Arc<Self> {
         let token_list_fetcher = TokenListFetcher::new(
             TOKEN_LIST_CACHE_TTL,
@@ -129,14 +131,31 @@ impl SessionManager {
         ));
         Arc::clone(&sub_manager).spawn_cleanup();
 
+        // Dedicated WS sockets — per "one socket per logical signal" rule.
+        let block_ws = WsConnection::new(
+            ws_url.clone(),
+            Arc::clone(&metrics),
+            lifecycle.cancel_token.clone(),
+        );
+        let transfer_ws =
+            WsConnection::new(ws_url, Arc::clone(&metrics), lifecycle.cancel_token.clone());
+
+        let block_watcher = BlockWatcher::spawn(
+            config.active_network,
+            Arc::clone(&metrics),
+            lifecycle.clone(),
+            block_ws,
+        );
+
         let (tx, rx) = mpsc::channel::<Erc20TransferEvent>(256);
-        let dispatcher =
-            EventDispatcher::spawn(Arc::clone(&metrics), ws_connection, lifecycle.clone(), tx);
+        let event_dispatcher =
+            EventDispatcher::spawn(Arc::clone(&metrics), transfer_ws, lifecycle.clone(), tx);
 
         let manager = Arc::new(Self {
             sub_manager: Arc::clone(&sub_manager),
             ws_connection_pool,
-            event_dispatcher: dispatcher,
+            event_dispatcher,
+            block_watcher,
             fetcher: Arc::new(token_list_fetcher),
             rpc_client,
             lifecycle,
@@ -186,13 +205,14 @@ impl SessionManager {
                 "upsert: spawning watchers"
             );
 
-            let watcher = Arc::new(Watcher::new(
+            let watcher = Arc::new(SnapshotUpdater::new(
                 self.lifecycle.task_tracker.clone(),
                 rpc_client,
                 sub,
                 ws_pool,
                 Arc::clone(&self.metrics),
                 session,
+                Arc::clone(&self.block_watcher),
             ));
 
             watcher
@@ -213,7 +233,7 @@ impl SessionManager {
     }
 
     pub fn is_healthy(&self) -> bool {
-        self.event_dispatcher.is_healthy()
+        self.block_watcher.is_healthy() && self.event_dispatcher.is_healthy()
     }
 
     fn spawn_erc20_transfer_listener(

@@ -3,11 +3,9 @@ use crate::config::ws_pool_config::WsPoolConfig;
 use crate::domain::EvmNetwork;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
-use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::RpcClient;
 use crate::services::session_manager::{SessionConfig, SessionManager};
 use crate::services::ws_connection_pool::WsConnectionPool;
-use crate::ws_connection::WsConnection;
 use alloy::providers::{Provider, ProviderBuilder};
 use std::sync::Arc;
 
@@ -23,7 +21,6 @@ pub struct AppState {
     /// addressed to a different chain.
     pub network: EvmNetwork,
     pub metrics: Arc<Metrics>,
-    pub block_watcher: Arc<BlockWatcher>,
 }
 
 impl AppState {
@@ -31,7 +28,6 @@ impl AppState {
         network_config: NetworkConfig,
         ws_pool_config: WsPoolConfig,
         metrics: Arc<Metrics>,
-        block_watcher: Arc<BlockWatcher>,
         life_cycle: LifeCycle,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let network = network_config.network;
@@ -60,19 +56,13 @@ impl AppState {
                 token_limit: network_config.max_watched_tokens_limit,
                 active_network: network,
             },
-            // todo remove when all ws logs subscriptions will be moved to EventDispatcher
-            WsConnection::new(
-                ws_url,
-                Arc::clone(&metrics),
-                life_cycle.cancel_token.clone(),
-            ),
+            ws_url,
         );
 
         Ok(Arc::new(Self {
             session_manager,
             network,
             metrics,
-            block_watcher,
         }))
     }
 }

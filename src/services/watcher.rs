@@ -31,11 +31,13 @@ use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
 use crate::metrics::Metrics;
 use crate::services::balance_refresh_queue::BalanceRefreshQueueHandle;
+use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use crate::services::subscription::Subscription;
 use crate::services::ws_connection_pool::WsConnectionPool;
@@ -68,16 +70,17 @@ pub enum ParseWeb3LogsError {
 
 /// Per-session worker. Wraps the session-scoped state and RPC handles, and
 /// spawns the background tasks via [`Self::spawn_watchers`].
-pub struct Watcher {
+pub struct SnapshotUpdater {
     task_tracker: TaskTracker,
     session: Session,
     sub: Arc<Subscription>,
     ws_connection_pool: Arc<WsConnectionPool>,
     rpc_client: Arc<RpcClient>,
     metrics: Arc<Metrics>,
+    block_watcher: Arc<BlockWatcher>,
 }
 
-impl Watcher {
+impl SnapshotUpdater {
     /// Construct a watcher. Does not start any background tasks — call
     /// [`Self::spawn_watchers`] for that.
     pub fn new(
@@ -87,6 +90,7 @@ impl Watcher {
         ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         session: Session,
+        block_watcher: Arc<BlockWatcher>,
     ) -> Self {
         Self {
             task_tracker,
@@ -95,6 +99,7 @@ impl Watcher {
             rpc_client,
             ws_connection_pool,
             metrics,
+            block_watcher,
         }
     }
 
@@ -146,54 +151,76 @@ impl Watcher {
     async fn spawn_snapshot_updater(self: Arc<Self>, interval_secs: usize) {
         let sub = Arc::clone(&self.sub);
         let cancel = sub.cancellable();
-        let refresh_notifier = sub.snapshot_refresh_notifier();
         let owner = self.session.owner;
 
         Arc::clone(&self).task_tracker.spawn(async move {
-            // Wait for the first refresh request before starting the interval.
-            // The interval is intentionally created AFTER this wait so its
-            // deadline is anchored to the moment the loop actually starts,
-            // not to spawn time.
-            tokio::select! {
-                _ = cancel.cancelled() => return,
-                _ = refresh_notifier.notified() => {}
-            }
-            tracing::debug!(
-                owner = %owner,
-                "snapshot updater unblocked, starting periodic refresh loop"
-            );
-
-            let interval_duration = Duration::from_secs(interval_secs as u64);
-            let mut interval = interval(interval_duration);
-
-            let this = Arc::clone(&self);
-
+            // Wait for node ws connection is being established
+            let mut rx_connected = self.block_watcher.watch_connected();
             loop {
-                let this = Arc::clone(&this);
-                tokio::select! {
-                    _ = cancel.cancelled() => {
-                        tracing::debug!(
-                            owner = %owner,
-                            "snapshot updater cancelled"
-                        );
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        this.metrics.snapshot_updater_runs_total.increment(1);
-                        this.fetch_balances_and_broadcast().await;
-                    }
-                    _ = refresh_notifier.notified() => {
-                        interval.reset();
-                        tracing::debug!(
-                            owner = %owner,
-                            "snapshot refresh requested"
-                        );
-                        this.metrics.snapshot_updater_runs_total.increment(1);
-                        this.fetch_balances_and_broadcast().await;
+                if !*rx_connected.borrow() {
+                    tracing::debug!(owner = %owner, "snapshot updater blocked, waiting for BlockWatcher connection");
+
+                    tokio::select! {
+                        _ = cancel.cancelled() => return,
+                        res = rx_connected.changed() => {
+                            if let Err(err) = res {
+                                tracing::error!(err = ?err, "rx_connected change failed");
+                                return;
+                            }
+                        }
                     }
                 }
+
+                tracing::debug!(
+                    owner = %owner,
+                    "snapshot updater unblocked, starting periodic refresh loop"
+                );
+
+                Arc::clone(&self).run_snapshot_update_by_interval(&cancel, interval_secs).await;
             }
         });
+    }
+
+    async fn run_snapshot_update_by_interval(
+        self: Arc<Self>,
+        cancel: &CancellationToken,
+        interval_secs: usize,
+    ) {
+        let interval_duration = Duration::from_secs(interval_secs as u64);
+        let mut interval = interval(interval_duration);
+        let mut rx_connected = self.block_watcher.watch_connected();
+
+        loop {
+            let this = Arc::clone(&self);
+            let sub = Arc::clone(&self.sub);
+            let owner = this.session.owner;
+            let refresh_balance_notifier = sub.snapshot_refresh_notifier();
+
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    tracing::debug!(
+                        owner = %owner,
+                        "snapshot updater cancelled"
+                    );
+                    break;
+                }
+                _ = rx_connected.changed() => {
+                    if !*rx_connected.borrow() {
+                        tracing::debug!("BlockWatcher disconnected, exiting interval");
+                        return;
+                    }
+                }
+                _ = interval.tick() => {
+                    this.metrics.snapshot_updater_runs_total.increment(1);
+                    this.fetch_balances_and_broadcast().await;
+                },
+                _ = refresh_balance_notifier.notified() => {
+                    interval.reset();
+                    this.metrics.snapshot_updater_runs_total.increment(1);
+                    this.fetch_balances_and_broadcast().await;
+                }
+            }
+        }
     }
 
     async fn spawn_queue_result_receiver(

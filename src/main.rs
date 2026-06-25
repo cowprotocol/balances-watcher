@@ -15,9 +15,7 @@ use crate::api::create_router;
 use crate::args::Args;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
-use crate::services::block_watcher::BlockWatcher;
 use crate::tracing::init_tracing::init_tracing;
-use crate::ws_connection::WsConnection;
 use app_state::AppState;
 use config::network_config::NetworkConfig;
 use config::ws_pool_config::WsPoolConfig;
@@ -50,24 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lifecycle = LifeCycle::spawn();
 
-    let ws_connection = WsConnection::new(
-        ws_pool_cfg.ws_url.clone(),
-        Arc::clone(&metrics),
-        lifecycle.cancel_token.clone(),
-    );
-
-    let block_watcher = BlockWatcher::spawn(
-        network_cfg.network,
-        Arc::clone(&metrics),
-        lifecycle.clone(),
-        ws_connection,
-    );
-
     let app_state = AppState::build(
         network_cfg,
         ws_pool_cfg,
         Arc::clone(&metrics),
-        block_watcher,
         lifecycle.clone(),
     )
     .await?;
