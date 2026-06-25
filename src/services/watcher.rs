@@ -29,7 +29,7 @@ use futures::future::BoxFuture;
 use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -176,7 +176,9 @@ impl SnapshotUpdater {
                     "snapshot updater unblocked, starting periodic refresh loop"
                 );
 
-                Arc::clone(&self).run_snapshot_update_by_interval(&cancel, interval_secs).await;
+                Arc::clone(&self)
+                    .run_snapshot_update_by_interval(&cancel, &mut rx_connected, interval_secs)
+                    .await;
             }
         });
     }
@@ -184,11 +186,11 @@ impl SnapshotUpdater {
     async fn run_snapshot_update_by_interval(
         self: Arc<Self>,
         cancel: &CancellationToken,
+        rx_connected: &mut watch::Receiver<bool>,
         interval_secs: usize,
     ) {
         let interval_duration = Duration::from_secs(interval_secs as u64);
         let mut interval = interval(interval_duration);
-        let mut rx_connected = self.block_watcher.watch_connected();
         let refresh_balance_notifier = self.sub.snapshot_refresh_notifier();
         let owner = self.session.owner;
 
