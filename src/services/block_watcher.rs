@@ -18,6 +18,7 @@ use crate::domain::EvmNetwork;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::ws_connection::{ManagedWsSubscription, WsConnection};
+use alloy::primitives::BlockNumber;
 use alloy::rpc::types::Header;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -38,6 +39,7 @@ pub struct BlockWatcher {
     connected: AtomicBool,
     ws_connection: WsConnection,
     on_connect_tx: watch::Sender<bool>,
+    latest_block_tx: watch::Sender<Option<BlockNumber>>,
 }
 
 impl BlockWatcher {
@@ -50,6 +52,7 @@ impl BlockWatcher {
         ws_connection: WsConnection,
     ) -> Arc<Self> {
         let (on_connect_tx, _) = watch::channel(false);
+        let (latest_block_tx, _) = watch::channel(None);
 
         let watcher = Arc::new(Self {
             network,
@@ -57,6 +60,7 @@ impl BlockWatcher {
             connected: AtomicBool::new(false),
             ws_connection,
             on_connect_tx,
+            latest_block_tx,
         });
 
         let watcher_for_spawn = Arc::clone(&watcher);
@@ -75,6 +79,13 @@ impl BlockWatcher {
 
     pub fn watch_connected(&self) -> watch::Receiver<bool> {
         self.on_connect_tx.subscribe()
+    }
+
+    /// Emits the block number of every received `newHeads` notification.
+    /// Initial value is `None` until the first header lands; on disconnect
+    /// the latest observed number is retained.
+    pub fn watch_latest_block(&self) -> watch::Receiver<Option<BlockNumber>> {
+        self.latest_block_tx.subscribe()
     }
 
     async fn run(self: Arc<Self>, cancel: CancellationToken) {
@@ -118,7 +129,7 @@ impl BlockWatcher {
                 _ = cancel.cancelled() => return,
                 next = tokio::time::timeout(stall_timeout, stream.next()) => {
                     match next {
-                        Ok(Some(_)) => self.record_connected(),
+                        Ok(Some(header)) => self.record_connected(header.number),
                         Ok(None) => {
                             self.metrics.ws_provider_disconnected_total.increment(1);
                             tracing::warn!("block stream terminated, subscription closed by server");
@@ -134,9 +145,10 @@ impl BlockWatcher {
         }
     }
 
-    fn record_connected(&self) {
+    fn record_connected(&self, block_number: BlockNumber) {
         self.metrics.block_accepted_total.increment(1);
         self.connected.store(true, Ordering::Relaxed);
+        self.latest_block_tx.send_replace(Some(block_number));
     }
 
     fn stall_timeout(block_time: Duration) -> Duration {

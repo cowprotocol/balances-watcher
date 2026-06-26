@@ -16,8 +16,9 @@ use crate::metrics::Metrics;
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, BlockNumber, U256};
-use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError};
-use alloy::sol_types::SolCall;
+use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError, Provider};
+use alloy::rpc::types::{Filter, Log};
+use alloy::sol_types::{SolCall, SolEvent};
 use backon::{ExponentialBuilder, Retryable};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -52,6 +53,26 @@ impl RpcClient {
             request_semaphore: tokio::sync::Semaphore::new(MULTICALL_PERMITS_COUNT),
             metrics,
         }
+    }
+
+    /// Fetch every ERC20 `Transfer` log emitted in `block_number`. Uses HTTP
+    /// `eth_getLogs` (server-side topic filter); returns 100% of matching
+    /// logs in the block, in contrast to WS `eth_subscribe` whose internal
+    /// buffer drops the tail of burst blocks.
+    pub async fn fetch_transfer_logs_for_block(
+        &self,
+        block_number: BlockNumber,
+    ) -> Result<Vec<Log>, RpcError> {
+        let _permit = self.request_semaphore.acquire().await;
+        let filter = Filter::new()
+            .from_block(block_number)
+            .to_block(block_number)
+            .event_signature(ERC20::Transfer::SIGNATURE_HASH);
+
+        self.provider
+            .get_logs(&filter)
+            .await
+            .map_err(|err| RpcError::Exhausted(err.to_string()))
     }
 
     /// Read ERC20 balances for `owner` at `block_id`, one Multicall3

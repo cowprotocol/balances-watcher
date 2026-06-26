@@ -131,13 +131,8 @@ impl SessionManager {
         ));
         Arc::clone(&sub_manager).spawn_cleanup();
 
-        // Dedicated WS sockets — per "one socket per logical signal" rule.
-        let block_ws = WsConnection::new(
-            ws_url.clone(),
-            Arc::clone(&metrics),
-            lifecycle.cancel_token.clone(),
-        );
-        let transfer_ws =
+        // dedicated WS socket for `newHeads`
+        let block_ws =
             WsConnection::new(ws_url, Arc::clone(&metrics), lifecycle.cancel_token.clone());
 
         let block_watcher = BlockWatcher::spawn(
@@ -148,8 +143,13 @@ impl SessionManager {
         );
 
         let (tx, rx) = mpsc::channel::<Erc20TransferEvent>(256);
-        let event_dispatcher =
-            EventDispatcher::spawn(Arc::clone(&metrics), transfer_ws, lifecycle.clone(), tx);
+        let event_dispatcher = EventDispatcher::spawn(
+            Arc::clone(&metrics),
+            Arc::clone(&rpc_client),
+            Arc::clone(&block_watcher),
+            lifecycle.clone(),
+            tx,
+        );
 
         let manager = Arc::new(Self {
             sub_manager: Arc::clone(&sub_manager),

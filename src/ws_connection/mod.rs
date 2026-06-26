@@ -18,7 +18,7 @@
 use crate::metrics::Metrics;
 use alloy::providers::{DynProvider, Provider, ProviderBuilder, WsConnect};
 use alloy::pubsub::SubscriptionStream;
-use alloy::rpc::types::{Filter, Header, Log};
+use alloy::rpc::types::Header;
 use backon::{ExponentialBuilder, Retryable};
 use serde::de::DeserializeOwned;
 use std::future::Future;
@@ -87,17 +87,6 @@ impl WsConnection {
     pub async fn subscribe_blocks(&self) -> Option<ManagedWsSubscription<Header>> {
         self.with_retry(|provider| async move {
             let sub = provider.subscribe_blocks().await?;
-            Ok(ManagedWsSubscription {
-                _provider: provider,
-                stream: sub.into_stream(),
-            })
-        })
-        .await
-    }
-
-    pub async fn subscribe_logs(&self, filter: &Filter) -> Option<ManagedWsSubscription<Log>> {
-        self.with_retry(|provider| async move {
-            let sub = provider.subscribe_logs(filter).await?;
             Ok(ManagedWsSubscription {
                 _provider: provider,
                 stream: sub.into_stream(),
