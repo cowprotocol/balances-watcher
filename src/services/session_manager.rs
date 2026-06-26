@@ -4,11 +4,11 @@ use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::cleanup_stream;
-use crate::services::event_dispatcher::{Erc20TransferEvent, EventDispatcher};
+use crate::services::event_dispatcher::{Erc20TransferEvent, Erc20TransferEventDispatcher};
 use crate::services::rpc_client::RpcClient;
+use crate::services::snapshot_updater::SnapshotUpdater;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
 use crate::services::token_list_fetcher::{FetcherError, TokenListFetcher};
-use crate::services::watcher::SnapshotUpdater;
 use crate::services::ws_connection_pool::WsConnectionPool;
 use crate::ws_connection::WsConnection;
 use alloy::primitives::Address;
@@ -52,7 +52,7 @@ pub struct SessionManager {
     rpc_client: Arc<RpcClient>,
     ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
-    event_dispatcher: Arc<EventDispatcher>,
+    event_dispatcher: Arc<Erc20TransferEventDispatcher>,
     block_watcher: Arc<BlockWatcher>,
     lifecycle: LifeCycle,
     metrics: Arc<Metrics>,
@@ -143,7 +143,7 @@ impl SessionManager {
         );
 
         let (tx, rx) = mpsc::channel::<Erc20TransferEvent>(256);
-        let event_dispatcher = EventDispatcher::spawn(
+        let event_dispatcher = Erc20TransferEventDispatcher::spawn(
             Arc::clone(&metrics),
             Arc::clone(&rpc_client),
             Arc::clone(&block_watcher),

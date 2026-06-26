@@ -35,7 +35,7 @@ pub struct Erc20TransferEvent {
     pub block: Option<BlockNumber>,
 }
 
-pub struct EventDispatcher {
+pub struct Erc20TransferEventDispatcher {
     cancel_token: CancellationToken,
     metrics: Arc<Metrics>,
     rpc_client: Arc<RpcClient>,
@@ -44,7 +44,7 @@ pub struct EventDispatcher {
     transfer_tx_out: mpsc::Sender<Erc20TransferEvent>,
 }
 
-impl EventDispatcher {
+impl Erc20TransferEventDispatcher {
     pub fn spawn(
         metrics: Arc<Metrics>,
         rpc_client: Arc<RpcClient>,
