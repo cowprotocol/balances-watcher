@@ -42,6 +42,7 @@ pub struct Erc20TransferEventDispatcher {
     block_watcher: Arc<BlockWatcher>,
     is_active: AtomicBool,
     transfer_tx_out: mpsc::Sender<Erc20TransferEvent>,
+    weth9_address: Address,
 }
 
 impl Erc20TransferEventDispatcher {
@@ -51,6 +52,7 @@ impl Erc20TransferEventDispatcher {
         block_watcher: Arc<BlockWatcher>,
         lifecycle: LifeCycle,
         transfer_tx_out: mpsc::Sender<Erc20TransferEvent>,
+        weth9_address: Address,
     ) -> Arc<Self> {
         let dispatcher = Arc::new(Self {
             metrics,
@@ -59,6 +61,7 @@ impl Erc20TransferEventDispatcher {
             cancel_token: lifecycle.cancel_token,
             is_active: AtomicBool::new(false),
             transfer_tx_out,
+            weth9_address,
         });
 
         let dispatcher_for_spawn = Arc::clone(&dispatcher);
@@ -92,7 +95,11 @@ impl Erc20TransferEventDispatcher {
                     let Some(block_number) = *rx.borrow_and_update() else {
                         continue;
                     };
-                    self.process_block(block_number).await;
+
+                    let _ = tokio::join!(
+                        self.fetch_erc20_transfer_logs_and_process_block(block_number),
+                        self.fetch_and_process_weth9_logs(block_number),
+                    );
                 }
             }
         }
@@ -100,7 +107,39 @@ impl Erc20TransferEventDispatcher {
         self.is_active.store(false, Ordering::Relaxed);
     }
 
-    async fn process_block(&self, block_number: BlockNumber) {
+    async fn fetch_and_process_weth9_logs(&self, block_number: BlockNumber) {
+        tracing::debug!(
+            block = block_number,
+            "event dispatcher: fetching weth9 logs for block"
+        );
+
+        match self
+            .rpc_client
+            .fetch_weth9_logs_for_block(block_number)
+            .await
+        {
+            Ok(logs) => {
+                tracing::debug!(
+                    block = block_number,
+                    count = logs.len(),
+                    "event dispatcher: got weth9 logs for block",
+                );
+
+                for log in logs {
+                    self.on_weth9_log(log).await;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    block = block_number,
+                    error = %err,
+                    "event dispatcher: eth_getLogs for weth9 failed, will retry on next block"
+                );
+            }
+        }
+    }
+
+    async fn fetch_erc20_transfer_logs_and_process_block(&self, block_number: BlockNumber) {
         tracing::info!(
             block = block_number,
             "event dispatcher: fetching logs for block"
@@ -130,9 +169,43 @@ impl Erc20TransferEventDispatcher {
         }
     }
 
+    async fn on_weth9_log(&self, log: Log) {
+        let Some(owner) = self.weth9_owner(&log) else {
+            return;
+        };
+
+        self.metrics.weth9_events_received_total.increment(1);
+
+        let _ = self
+            .transfer_tx_out
+            .send(Erc20TransferEvent {
+                token: log.address(),
+                block: log.block_number,
+                owner,
+            })
+            .await;
+    }
+
+    fn weth9_owner(&self, log: &Log) -> Option<Address> {
+        if log.address() != self.weth9_address {
+            tracing::debug!(weth9_address = %self.weth9_address, "not tracked weth9 DEPOSIT/WITHDRAWAL log, skip");
+            return None;
+        }
+
+        let topics = log.topics();
+        if topics.len() < 2 {
+            tracing::debug!("not weth9 DEPOSIT/WITHDRAWAL log, skip");
+            return None;
+        }
+
+        Some(Address::from_word(topics[1]))
+    }
+
     async fn on_erc20_log(&self, log: Log) {
         let topics = log.topics();
         if topics.len() != ERC20_TRANSFER_TOPICS_LEN {
+            // skip erc720 transfer events
+            tracing::debug!("not erc20 log transfer, skip");
             return;
         }
 

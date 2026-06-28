@@ -6,10 +6,8 @@
 //! consume-loop: a stall watchdog
 //! (`block_time × STALL_TIMEOUT_BLOCKS`, floored at `MIN_STALL_DURATION`)
 //! that forces a fresh subscription when headers stop arriving, and the
-//! single-bit health flag. The WS provider is **not** shared with the
-//! per-session pool ([`crate::services::ws_connection_pool`]) — a
-//! dedicated socket keeps the health signal isolated from data-plane
-//! churn (event load, session reconnect storms).
+//! single-bit health flag. The dedicated WS socket also keeps `newHeads`
+//! isolated from any future per-session WS churn.
 //!
 //! Health is a single [`std::sync::atomic::AtomicBool`]: flipped `true` on the
 //! first header received, `false` on disconnect, stall, or shutdown.

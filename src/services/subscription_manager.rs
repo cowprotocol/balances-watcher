@@ -59,21 +59,6 @@ struct SubWithCounter {
     pub refresh_queue: BalanceRefreshQueueHandle,
 }
 
-/// The two endpoints of a per-session [`BalanceRefreshQueue`], handed back by
-/// [`SubscriptionManager::upsert`] when it spawns a fresh worker:
-///
-/// - `refresh_queue` — the producer-side handle that listeners clone and call
-///   `enqueue` on.
-/// - `result_rx` — the consumer-side receiver that drains completed multicall
-///   results into the broadcast stream.
-///
-/// Returned only on the create branch; an update to an existing session
-/// returns `None` because the worker is already running.
-pub struct RefreshQueueEndpoints {
-    pub result_rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
-    pub refresh_queue: BalanceRefreshQueueHandle,
-}
-
 #[derive(Debug, Clone)]
 pub struct Balance {
     pub amount: U256,
@@ -112,7 +97,10 @@ impl SubscriptionManager {
         &self,
         session: Session,
         tokens: HashSet<Address>,
-    ) -> (Arc<Subscription>, Option<RefreshQueueEndpoints>) {
+    ) -> (
+        Arc<Subscription>,
+        Option<mpsc::Receiver<Result<BalancesWithBlock, RpcError>>>,
+    ) {
         let tokens_len = tokens.len();
         let maybe_sub = {
             let subs = self.subscriptions.read().await;
@@ -174,13 +162,7 @@ impl SubscriptionManager {
             "session is created"
         );
 
-        (
-            subscription,
-            Some(RefreshQueueEndpoints {
-                result_rx,
-                refresh_queue,
-            }),
-        )
+        (subscription, Some(result_rx))
     }
 
     pub async fn subscribe(

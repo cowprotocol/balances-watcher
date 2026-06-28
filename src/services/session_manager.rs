@@ -4,12 +4,11 @@ use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::cleanup_stream;
-use crate::services::erc20_event_dispatcher::{Erc20TransferEvent, Erc20TransferEventDispatcher};
+use crate::services::event_dispatcher::{Erc20TransferEvent, Erc20TransferEventDispatcher};
 use crate::services::rpc_client::RpcClient;
 use crate::services::snapshot_updater::SnapshotUpdater;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
 use crate::services::token_list_fetcher::{FetcherError, TokenListFetcher};
-use crate::services::ws_connection_pool::WsConnectionPool;
 use crate::ws_connection::WsConnection;
 use alloy::primitives::Address;
 use alloy::transports::http::reqwest::StatusCode;
@@ -50,7 +49,6 @@ pub struct SessionConfig {
 pub struct SessionManager {
     sub_manager: Arc<SubscriptionManager>,
     rpc_client: Arc<RpcClient>,
-    ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
     event_dispatcher: Arc<Erc20TransferEventDispatcher>,
     block_watcher: Arc<BlockWatcher>,
@@ -111,7 +109,6 @@ pub enum SessionError {
 impl SessionManager {
     pub fn spawn(
         rpc_client: Arc<RpcClient>,
-        ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         lifecycle: LifeCycle,
         config: SessionConfig,
@@ -149,11 +146,11 @@ impl SessionManager {
             Arc::clone(&block_watcher),
             lifecycle.clone(),
             tx,
+            config.active_network.weth9_address(),
         );
 
         let manager = Arc::new(Self {
             sub_manager: Arc::clone(&sub_manager),
-            ws_connection_pool,
             event_dispatcher,
             block_watcher,
             fetcher: Arc::new(token_list_fetcher),
@@ -174,7 +171,6 @@ impl SessionManager {
         // Single-network instance: the fetcher & ws pool are pre-bound. No
         // session-time lookup, no "provider not defined" branch.
         let rpc_client = Arc::clone(&self.rpc_client);
-        let ws_pool = Arc::clone(&self.ws_connection_pool);
 
         let new_watched_tokens = Arc::clone(&self)
             .fetch_and_extend_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
@@ -193,34 +189,28 @@ impl SessionManager {
             ));
         }
 
-        let (sub, maybe_queue_endpoints) =
-            self.sub_manager.upsert(session, new_watched_tokens).await;
+        let (sub, maybe_queue_rx_out) = self.sub_manager.upsert(session, new_watched_tokens).await;
 
         // `upsert` returns the queue endpoints only for a brand-new session —
         // re-PUT'ing tokens for an already-live session yields `None` here,
         // so we spawn the per-session watchers exactly once over its lifetime.
-        if let Some(queue_endpoints) = maybe_queue_endpoints {
+        if let Some(queue_result_rx) = maybe_queue_rx_out {
             tracing::info!(
                 session = %session,
                 "upsert: spawning watchers"
             );
 
-            let watcher = Arc::new(SnapshotUpdater::new(
+            let snapshot_updater = Arc::new(SnapshotUpdater::new(
                 self.lifecycle.task_tracker.clone(),
                 rpc_client,
                 sub,
-                ws_pool,
                 Arc::clone(&self.metrics),
                 session,
                 Arc::clone(&self.block_watcher),
             ));
 
-            watcher
-                .spawn_watchers(
-                    queue_endpoints.result_rx,
-                    queue_endpoints.refresh_queue,
-                    self.config.snapshot_interval,
-                )
+            snapshot_updater
+                .spawn_watchers(queue_result_rx, self.config.snapshot_interval)
                 .await;
 
             tracing::info!(

@@ -12,6 +12,7 @@
 
 use crate::config::constants::MULTICALL_PERMITS_COUNT;
 use crate::evm::erc20::ERC20;
+use crate::evm::wrapped::WrappedToken;
 use crate::metrics::Metrics;
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
@@ -63,12 +64,33 @@ impl RpcClient {
         &self,
         block_number: BlockNumber,
     ) -> Result<Vec<Log>, RpcError> {
-        let _permit = self.request_semaphore.acquire().await;
         let filter = Filter::new()
             .from_block(block_number)
             .to_block(block_number)
             .event_signature(ERC20::Transfer::SIGNATURE_HASH);
 
+        // todo implement backoff
+        self.provider
+            .get_logs(&filter)
+            .await
+            .map_err(|err| RpcError::Exhausted(err.to_string()))
+    }
+
+    pub async fn fetch_weth9_logs_for_block(
+        &self,
+        block_number: BlockNumber,
+    ) -> Result<Vec<Log>, RpcError> {
+        let event_signatures = vec![
+            WrappedToken::Deposit::SIGNATURE_HASH,
+            WrappedToken::Withdrawal::SIGNATURE_HASH,
+        ];
+
+        let filter = Filter::new()
+            .from_block(block_number)
+            .to_block(block_number)
+            .event_signature(event_signatures);
+
+        // todo implement backoff
         self.provider
             .get_logs(&filter)
             .await

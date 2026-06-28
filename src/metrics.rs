@@ -36,35 +36,16 @@ pub struct Metrics {
     pub erc20_event_received_total: Counter,
     /// weth9 deposit or withdrawal log received
     pub weth9_events_received_total: Counter,
-    /// weth9 log decode failed
-    pub parse_weth9_logs_failed_total: Counter,
 
     /// ws stream ended, will resubscribe
     pub ws_provider_disconnected_total: Counter,
     /// ws resubscribe attempted
     pub ws_reconnect_attempts_total: Counter,
-    /// ws subscribe call errored (per retry)
-    pub ws_subscribe_errors_total: Counter,
-    /// ws subscribe gave up after backoff exhausted
-    pub ws_subscribe_is_down_total: Counter,
     /// time spent in backoff between a failed ws connect/subscribe attempt and the next retry
     pub ws_reconnect_attempt_duration_ms: Histogram,
 
     /// blocks accepted from the ws subscription. Rate ≈ chain block rate when healthy
     pub block_accepted_total: Counter,
-
-    /// ws resubscribe
-    pub ws_resubscribed_total: Counter,
-
-    /// time waited for a WS subscribe permit before the actual `eth_subscribe`.
-    /// Long tails here mean the cap is being hit — sessions are queueing.
-    pub ws_subscribe_permit_wait_ms: Histogram,
-    /// in-flight `subscribe()` calls (permits currently held).
-    /// Stable at the cap → cap too small or upstream too slow.
-    pub ws_subscribes_in_flight: Gauge,
-    /// live WS provider pipes in the pool right now (one per
-    /// `WsPoolConfig::max_clients_per_ws_connection` sessions).
-    pub ws_pool_connections: Gauge,
 
     /// token list fetched ok
     pub token_list_loaded_total: Counter,
@@ -104,18 +85,10 @@ impl Metrics {
 
             erc20_event_received_total: counter!("erc20_event_received_total"),
             weth9_events_received_total: counter!("weth9_events_received_total"),
-            parse_weth9_logs_failed_total: counter!("parse_weth9_logs_failed_total"),
 
             ws_provider_disconnected_total: counter!("ws_provider_disconnected_total"),
             ws_reconnect_attempts_total: counter!("ws_reconnect_attempts_total"),
-            ws_subscribe_errors_total: counter!("ws_subscribe_errors_total"),
-            ws_subscribe_is_down_total: counter!("ws_subscribe_is_down_total"),
-            ws_resubscribed_total: counter!("ws_resubscribed_total"),
             ws_reconnect_attempt_duration_ms: histogram!("ws_reconnect_attempt_duration_ms"),
-
-            ws_subscribe_permit_wait_ms: histogram!("ws_subscribe_permit_wait_ms"),
-            ws_subscribes_in_flight: gauge!("ws_subscribes_in_flight"),
-            ws_pool_connections: gauge!("ws_pool_connections"),
 
             block_accepted_total: counter!("block_accepted_total"),
 

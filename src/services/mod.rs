@@ -9,5 +9,4 @@ pub mod token_list_fetcher;
 pub mod rpc_client;
 
 pub mod block_watcher;
-pub mod erc20_event_dispatcher;
-pub mod ws_connection_pool;
+pub mod event_dispatcher;

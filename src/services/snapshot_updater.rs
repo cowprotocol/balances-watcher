@@ -19,14 +19,7 @@
 //! ```
 
 use alloy::eips::BlockId;
-use alloy::primitives::BlockNumber;
-use alloy::{
-    primitives::Address,
-    rpc::types::{Filter, Log, Topic},
-    sol_types::SolEvent,
-};
-use futures::future::BoxFuture;
-use futures::StreamExt;
+use alloy::primitives::Address;
 use std::{sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::sync::{mpsc, watch};
@@ -35,21 +28,11 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
 use crate::domain::Session;
+use crate::domain::{BalanceEvent, EvmNetwork};
 use crate::metrics::Metrics;
-use crate::services::balance_refresh_queue::BalanceRefreshQueueHandle;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use crate::services::subscription::Subscription;
-use crate::services::ws_connection_pool::WsConnectionPool;
-use crate::{
-    domain::{BalanceEvent, EvmNetwork},
-    evm::wrapped::WrappedToken,
-};
-
-enum WethEvents {
-    Deposit(Option<BlockNumber>),
-    Withdrawal(Option<BlockNumber>),
-}
 
 /// Errors surfaced from the watcher's RPC interactions.
 #[derive(Error, Debug, Clone)]
@@ -58,23 +41,12 @@ pub enum WatcherError {
     GettingBalance(Address, EvmNetwork, String),
 }
 
-/// Errors from decoding raw `Log` items into known event shapes.
-#[derive(Error, Debug, Clone)]
-pub enum ParseWeb3LogsError {
-    #[error("log.topic0() is none")]
-    Topic0IsNone,
-
-    #[error("event HASH_SIGNATURE is not expected")]
-    UnexpectedHashSignature,
-}
-
 /// Per-session worker. Wraps the session-scoped state and RPC handles, and
 /// spawns the background tasks via [`Self::spawn_watchers`].
 pub struct SnapshotUpdater {
     task_tracker: TaskTracker,
     session: Session,
     sub: Arc<Subscription>,
-    ws_connection_pool: Arc<WsConnectionPool>,
     rpc_client: Arc<RpcClient>,
     metrics: Arc<Metrics>,
     block_watcher: Arc<BlockWatcher>,
@@ -87,7 +59,6 @@ impl SnapshotUpdater {
         task_tracker: TaskTracker,
         rpc_client: Arc<RpcClient>,
         subscription: Arc<Subscription>,
-        ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
         session: Session,
         block_watcher: Arc<BlockWatcher>,
@@ -97,7 +68,6 @@ impl SnapshotUpdater {
             session,
             sub: subscription,
             rpc_client,
-            ws_connection_pool,
             metrics,
             block_watcher,
         }
@@ -126,14 +96,10 @@ impl SnapshotUpdater {
     pub async fn spawn_watchers(
         self: Arc<Self>,
         rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
-        refresh_queue: BalanceRefreshQueueHandle,
         interval_secs: usize,
     ) {
         Arc::clone(&self)
             .spawn_snapshot_updater(interval_secs)
-            .await;
-        Arc::clone(&self)
-            .spawn_erc20_transfer_listeners(refresh_queue)
             .await;
         Arc::clone(&self).spawn_queue_result_receiver(rx).await;
     }
@@ -338,58 +304,6 @@ impl SnapshotUpdater {
             .map_err(|e| WatcherError::GettingBalance(owner, self.session.network, e.to_string()))
     }
 
-    /**
-     * Listen Deposit/Withdrawal events
-     *
-     * Need to sync wrap/unwrap txs to handle wrapped token balance
-     */
-    async fn spawn_weth9_events_listener(
-        self: Arc<Self>,
-        refresh_queue: BalanceRefreshQueueHandle,
-    ) {
-        let session = self.session;
-        let weth9_address = session.network.weth9_address();
-
-        let event_signatures = vec![
-            WrappedToken::Deposit::SIGNATURE_HASH,
-            WrappedToken::Withdrawal::SIGNATURE_HASH,
-        ];
-        let filter = Filter::new()
-            .address(weth9_address)
-            .event_signature(event_signatures)
-            .topic1(Topic::from(session.owner));
-
-        let this = Arc::clone(&self);
-        self.task_tracker.spawn(async move {
-            let this_on_log = Arc::clone(&this);
-            let this_on_drop = Arc::clone(&this);
-
-            let _ = Arc::clone(&this_on_log)
-                .run_log_subscription_loop(
-                    filter,
-                    move |log: Log| {
-                        let this = Arc::clone(&this_on_log);
-                        let refresh_queue = refresh_queue.clone();
-
-                        Box::pin(async move {
-                            this.metrics.weth9_events_received_total.increment(1);
-                            this.parse_weth9_logs_and_fetch_balance(refresh_queue, &log)
-                                .await;
-                        })
-                    },
-                    move || {
-                        let event = Some(BalanceEvent::Error {
-                            code: 503,
-                            message: "WebSocket connection lost permanently".to_string(),
-                        });
-                        let this = Arc::clone(&this_on_drop);
-                        this.send_balance_update_event(event);
-                    },
-                )
-                .await;
-        });
-    }
-
     fn send_balance_update_event(self: Arc<Self>, event: Option<BalanceEvent>) {
         let Some(event) = event else {
             tracing::info!(owner = %self.session.owner, "no balance update to send (empty diff)");
@@ -397,183 +311,5 @@ impl SnapshotUpdater {
         };
 
         self.sub.send_event(event, self.session);
-    }
-
-    // create a subscription to ws provider and run a loop to listen to logs
-    // if log is received - call on_log callback
-    // if ws provider disconnects - reconnect and continue listening
-    async fn run_log_subscription_loop(
-        self: Arc<Self>,
-        filter: Filter,
-        mut on_web3_log_received: impl FnMut(Log) -> BoxFuture<'static, ()> + Send + Sync + 'static,
-        mut on_drop: impl FnMut() + Send + 'static,
-    ) {
-        let cancel = self.sub.cancellable();
-
-        let mut is_reconnect = false;
-
-        let this = self.clone();
-        'ws_connection_loop: loop {
-            let this = Arc::clone(&this);
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    tracing::debug!("log subscription cancelled");
-                    break 'ws_connection_loop;
-                },
-                _ = async {
-                    match Arc::clone(&this.ws_connection_pool).subscribe(&filter).await {
-                        Ok(sub) => {
-                            // notify to refresh full snapshot
-                            this.sub.emit_balance_snapshot_refresh();
-                            if is_reconnect {
-                                this.metrics.ws_resubscribed_total.increment(1);
-                            }
-
-                            is_reconnect = true;
-                            tracing::debug!("ws subscribed");
-
-                            let mut stream = sub.ws_sub.into_stream();
-                             'web3_logs_loop: loop {
-                                tokio::select! {
-                                    _ = cancel.cancelled() => {
-                                        tracing::debug!("cancelled log subscription");
-                                        return;
-                                    },
-                                    item = stream.next() => {
-                                        match item {
-                                            Some(log) => {
-                                                on_web3_log_received(log).await;
-                                            },
-                                            None => {
-                                                this.metrics.ws_provider_disconnected_total.increment(1);
-                                                tracing::warn!("ws stream ended (disconnect). will resubscribe");
-                                                break 'web3_logs_loop;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        },
-                        Err(err) => {
-                            this.metrics.ws_subscribe_is_down_total.increment(1);
-                            tracing::error!(error = %err, "ws subscribe exhausted retries, cancelling");
-                            on_drop();
-                            cancel.cancel();
-                            return;
-                        }
-                    }
-
-                    this.metrics.ws_reconnect_attempts_total.increment(1);
-                } => {}
-            }
-        }
-    }
-
-    async fn parse_weth9_logs_and_fetch_balance(
-        self: Arc<Self>,
-        refresh_queue: BalanceRefreshQueueHandle,
-        log: &Log,
-    ) {
-        tracing::debug!("got weth9 log: {:?}", log);
-
-        let Ok(parsed_log) = Self::parse_weth9_logs(log) else {
-            self.metrics.parse_weth9_logs_failed_total.increment(1);
-            return;
-        };
-
-        let block_number = match parsed_log {
-            Some(WethEvents::Deposit(block_id)) => block_id,
-            Some(WethEvents::Withdrawal(block_id)) => block_id,
-            _ => None,
-        };
-
-        let weth9_address = self.session.network.weth9_address();
-        tracing::debug!(
-            token = %weth9_address,
-            block_number = block_number,
-            "weth9 log is parsed, send fetching balance request to a queue"
-        );
-        refresh_queue.enqueue(weth9_address, block_number).await;
-    }
-
-    // parse WETH logs, search DEPOSIT/WITHDRAWAL events
-    // if there is no DEPOSIT/WITHDRAWAL event signature in a log - return Error
-    // otherwise return parsed event data
-    fn parse_weth9_logs(log: &Log) -> Result<Option<WethEvents>, ParseWeb3LogsError> {
-        let topic0 = match log.topic0() {
-            Some(topic0) => topic0,
-            None => {
-                tracing::warn!("topic0 is None for log(WETH event): {:#?}", log);
-                return Err(ParseWeb3LogsError::Topic0IsNone);
-            }
-        };
-
-        let block_number = log.block_number.or_else(|| {
-            // Falls back to `BlockId::latest()` at fetch time — recoverable, but
-            // worth flagging since pinned-block refresh is preferable.
-            tracing::warn!(
-                ?log,
-                "weth9 event log has no block_number, will refresh at latest"
-            );
-            None
-        });
-
-        if *topic0 == WrappedToken::Deposit::SIGNATURE_HASH {
-            let result = log
-                .log_decode::<WrappedToken::Deposit>()
-                .inspect_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        "error when decode DEPOSIT event"
-                    );
-                })
-                .map(|log| {
-                    let data = log.inner.data;
-                    tracing::debug!(dst = %data.dst, wad = %data.wad, "weth9 deposit event");
-
-                    WethEvents::Deposit(block_number)
-                })
-                .ok();
-
-            return Ok(result);
-        }
-
-        if *topic0 == WrappedToken::Withdrawal::SIGNATURE_HASH {
-            let result = log
-                .log_decode::<WrappedToken::Withdrawal>()
-                .inspect_err(|err| {
-                    tracing::error!(
-                        error = %err,
-                        "error when decode Withdrawal event"
-                    );
-                })
-                .map(|log| {
-                    let data = log.inner.data;
-                    tracing::debug!(src = %data.src, wad = %data.wad, "weth9 withdrawal event");
-                    WethEvents::Withdrawal(block_number)
-                })
-                .ok();
-
-            return Ok(result);
-        };
-
-        tracing::error!("unexpected topic0(WETH9 event): {:#?}", topic0);
-        Err(ParseWeb3LogsError::UnexpectedHashSignature)
-    }
-
-    // Two WS subscriptions — Transfer(from=owner) and Transfer(to=owner) — plus
-    // the WETH9 listener. The filter is **address-less** by design: we match on
-    // `event_signature(Transfer)` + the owner topic, then drop unwatched tokens
-    // client-side in `parse_transfer_event` via `Subscription::is_watched`.
-    //
-    // This sidesteps any provider-side cap on addresses-per-filter (Alchemy and
-    // Infura both impose one, in the low thousands), and keeps the WS
-    // subscription set bounded — three per session, regardless of how large the
-    // watched-token list grows.
-    async fn spawn_erc20_transfer_listeners(
-        self: Arc<Self>,
-        refresh_queue: BalanceRefreshQueueHandle,
-    ) {
-        self.spawn_weth9_events_listener(refresh_queue).await;
     }
 }

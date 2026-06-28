@@ -1,11 +1,9 @@
 use crate::config::network_config::NetworkConfig;
-use crate::config::ws_pool_config::WsPoolConfig;
 use crate::domain::EvmNetwork;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::rpc_client::RpcClient;
 use crate::services::session_manager::{SessionConfig, SessionManager};
-use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::providers::{Provider, ProviderBuilder};
 use std::sync::Arc;
 
@@ -26,7 +24,7 @@ pub struct AppState {
 impl AppState {
     pub async fn build(
         network_config: NetworkConfig,
-        ws_pool_config: WsPoolConfig,
+        ws_url: String,
         metrics: Arc<Metrics>,
         life_cycle: LifeCycle,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
@@ -42,13 +40,8 @@ impl AppState {
         ));
         tracing::info!(%network, "http provider connected");
 
-        let ws_url = ws_pool_config.ws_url.clone();
-        let ws_pool = Arc::new(WsConnectionPool::new(ws_pool_config, Arc::clone(&metrics)));
-        tracing::info!(%network, "ws connection pool ready");
-
         let session_manager = SessionManager::spawn(
             rpc_client,
-            ws_pool,
             Arc::clone(&metrics),
             life_cycle.clone(),
             SessionConfig {
