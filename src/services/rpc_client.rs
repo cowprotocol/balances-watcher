@@ -78,6 +78,7 @@ impl RpcClient {
 
     pub async fn fetch_weth9_logs_for_block(
         &self,
+        weth9_address: Address,
         block_number: BlockNumber,
     ) -> Result<Vec<Log>, RpcError> {
         let event_signatures = vec![
@@ -88,6 +89,7 @@ impl RpcClient {
         let filter = Filter::new()
             .from_block(block_number)
             .to_block(block_number)
+            .address(weth9_address)
             .event_signature(event_signatures);
 
         // todo implement backoff

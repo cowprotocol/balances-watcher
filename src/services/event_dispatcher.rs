@@ -115,7 +115,7 @@ impl Erc20TransferEventDispatcher {
 
         match self
             .rpc_client
-            .fetch_weth9_logs_for_block(block_number)
+            .fetch_weth9_logs_for_block(self.weth9_address, block_number)
             .await
         {
             Ok(logs) => {
