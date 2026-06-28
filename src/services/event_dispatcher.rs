@@ -1,27 +1,30 @@
-//! Process-wide ERC20 Transfer dispatcher driven by `newHeads` notifications
-//! and HTTP `eth_getLogs` — replaces the previous WS `eth_subscribe`-based
-//! design because WS subscriptions silently drop tail events on burst
-//! blocks (mainnet block-bursts of 500+ Transfer logs in <100ms overflow
-//! both alloy's broadcast buffer and the upstream reth subscription queue;
-//! measured ~95% delivery on direct WS, dropping to ~70% through the
-//! cluster proxy).
+//! Process-wide balance-change event dispatcher driven by `newHeads`
+//! notifications and HTTP `eth_getLogs`
+//!
+//! Two log sources are fetched **in parallel** per block:
+//! 1. ERC20 `Transfer` (global, topic-filter only) — covers most token
+//!    balance changes.
+//! 2. WETH9 `Deposit` / `Withdrawal` (address-filtered on the WETH9
+//!    contract) — covers wrap/unwrap, which the canonical WETH9 impl
+//!    does NOT emit a Transfer for, so they'd be invisible to source #1.
 //!
 //! Flow:
 //!     BlockWatcher --(watch::Receiver<Option<BlockNumber>>)--> Dispatcher
-//!         Dispatcher --(per-block eth_getLogs)--> RpcClient
+//!         Dispatcher --(per-block eth_getLogs × 2)--> RpcClient
 //!         Dispatcher --(Erc20TransferEvent)--> SessionManager router
 //!
-//! Each new block triggers exactly one `eth_getLogs` call with a
-//! single-block range and the Transfer topic filter, so the cost is fixed
-//! per block (~one HTTP RPC per ~12s on mainnet) regardless of active
-//! session count. Delivery is 100% — `eth_getLogs` returns the full set.
+//! Each new block triggers exactly two `eth_getLogs` calls with a
+//! single-block range, so the cost is fixed per block (~two HTTP RPCs
+//! per ~12s on mainnet) regardless of active session count.
 
+use crate::evm::wrapped::WrappedToken;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::RpcClient;
 use alloy::primitives::{Address, BlockNumber};
 use alloy::rpc::types::Log;
+use alloy::sol_types::SolEvent;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -140,9 +143,9 @@ impl Erc20TransferEventDispatcher {
     }
 
     async fn fetch_erc20_transfer_logs_and_process_block(&self, block_number: BlockNumber) {
-        tracing::info!(
+        tracing::debug!(
             block = block_number,
-            "event dispatcher: fetching logs for block"
+            "event dispatcher: fetching erc20 transfer logs for block"
         );
         match self
             .rpc_client
@@ -150,10 +153,10 @@ impl Erc20TransferEventDispatcher {
             .await
         {
             Ok(logs) => {
-                tracing::info!(
+                tracing::debug!(
                     block = block_number,
                     count = logs.len(),
-                    "event dispatcher: got logs"
+                    "event dispatcher: got erc20 transfer logs for block"
                 );
                 for log in logs {
                     self.on_erc20_log(log).await;
@@ -163,7 +166,7 @@ impl Erc20TransferEventDispatcher {
                 tracing::warn!(
                     block = block_number,
                     error = %err,
-                    "event dispatcher: eth_getLogs failed, will retry on next block"
+                    "event dispatcher: eth_getLogs for erc20 failed, will retry on next block"
                 );
             }
         }
@@ -188,13 +191,22 @@ impl Erc20TransferEventDispatcher {
 
     fn weth9_owner(&self, log: &Log) -> Option<Address> {
         if log.address() != self.weth9_address {
-            tracing::debug!(weth9_address = %self.weth9_address, "not tracked weth9 DEPOSIT/WITHDRAWAL log, skip");
             return None;
         }
 
         let topics = log.topics();
         if topics.len() < 2 {
-            tracing::debug!("not weth9 DEPOSIT/WITHDRAWAL log, skip");
+            return None;
+        }
+
+        // Defensive topic0 check — guards against unexpected 2+ topic events
+        // emitted by the WETH9 contract itself (none in canonical impl, but
+        // some forks have admin events). Both Deposit(indexed dst, wad) and
+        // Withdrawal(indexed src, wad) carry the owner in topic1.
+        let topic0 = topics[0];
+        if topic0 != WrappedToken::Deposit::SIGNATURE_HASH
+            && topic0 != WrappedToken::Withdrawal::SIGNATURE_HASH
+        {
             return None;
         }
 
@@ -204,8 +216,10 @@ impl Erc20TransferEventDispatcher {
     async fn on_erc20_log(&self, log: Log) {
         let topics = log.topics();
         if topics.len() != ERC20_TRANSFER_TOPICS_LEN {
-            // skip erc720 transfer events
-            tracing::debug!("not erc20 log transfer, skip");
+            // ERC721 also emits `Transfer(from, to, tokenId)` but with
+            // `tokenId` as a third indexed topic (4 topics total). Skip those
+            // — `balanceOf(owner)` on an ERC721 returns a count, not a token
+            // balance, and we have no schema to make sense of it here.
             return;
         }
 
