@@ -4,7 +4,7 @@ use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::cleanup_stream;
-use crate::services::event_dispatcher::{Erc20TransferEvent, Erc20TransferEventDispatcher};
+use crate::services::erc20_event_dispatcher::{Erc20TransferEvent, Erc20TransferEventDispatcher};
 use crate::services::rpc_client::RpcClient;
 use crate::services::snapshot_updater::SnapshotUpdater;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
