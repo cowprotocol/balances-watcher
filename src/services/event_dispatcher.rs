@@ -25,12 +25,13 @@ use crate::services::rpc_client::RpcClient;
 use alloy::primitives::{Address, BlockNumber};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const ERC20_TRANSFER_TOPICS_LEN: usize = 3;
+const MAX_BLOCK_LAG: u64 = 10;
 
 pub struct Erc20TransferEvent {
     pub owner: Address,
@@ -45,6 +46,7 @@ pub struct Erc20TransferEventDispatcher {
     block_watcher: Arc<BlockWatcher>,
     is_active: AtomicBool,
     transfer_tx_out: mpsc::Sender<Erc20TransferEvent>,
+    latest_processed_block: AtomicU64,
     weth9_address: Address,
 }
 
@@ -53,6 +55,7 @@ impl Erc20TransferEventDispatcher {
         metrics: Arc<Metrics>,
         rpc_client: Arc<RpcClient>,
         block_watcher: Arc<BlockWatcher>,
+        block_number_rx: mpsc::Receiver<BlockNumber>,
         lifecycle: LifeCycle,
         transfer_tx_out: mpsc::Sender<Erc20TransferEvent>,
         weth9_address: Address,
@@ -65,11 +68,12 @@ impl Erc20TransferEventDispatcher {
             is_active: AtomicBool::new(false),
             transfer_tx_out,
             weth9_address,
+            latest_processed_block: AtomicU64::new(0),
         });
 
         let dispatcher_for_spawn = Arc::clone(&dispatcher);
         lifecycle.task_tracker.spawn(async move {
-            dispatcher_for_spawn.run().await;
+            dispatcher_for_spawn.run(block_number_rx).await;
         });
 
         dispatcher
@@ -79,30 +83,53 @@ impl Erc20TransferEventDispatcher {
     /// Goes to `false` only on full process shutdown; per-block fetch
     /// failures don't toggle it (they're logged but the loop continues).
     pub fn is_healthy(&self) -> bool {
-        self.is_active.load(Ordering::Relaxed)
+        if !self.is_active.load(Ordering::Relaxed) {
+            return false;
+        }
+
+        let current_head = self.block_watcher.latest_block();
+        if current_head == 0 {
+            // warm up
+            return true;
+        }
+
+        let latest_processed_block = self.latest_processed_block.load(Ordering::Relaxed);
+        if latest_processed_block == 0 {
+            return true;
+        }
+
+        let lag = current_head.saturating_sub(latest_processed_block);
+        let is_lag = lag > MAX_BLOCK_LAG;
+        if is_lag {
+            tracing::warn!(
+                current_head = current_head,
+                lag,
+                latest_processed_block,
+                "event dispatcher: lag exceeded threshold, dispatcher unhealthy"
+            );
+        }
+        !is_lag
     }
 
-    async fn run(&self) {
-        let mut rx = self.block_watcher.watch_latest_block();
+    async fn run(&self, mut block_number_rx: mpsc::Receiver<BlockNumber>) {
         self.is_active.store(true, Ordering::Relaxed);
         tracing::info!("event dispatcher: subscribed to block_watcher, awaiting blocks");
 
         loop {
             tokio::select! {
                 _ = self.cancel_token.cancelled() => break,
-                changed = rx.changed() => {
-                    if changed.is_err() {
-                        tracing::warn!("event dispatcher: block_watcher channel closed");
-                        break;
-                    }
-                    let Some(block_number) = *rx.borrow_and_update() else {
-                        continue;
+                maybe_latest_block = block_number_rx.recv() => {
+                    let Some(block_number) = maybe_latest_block else {
+                        tracing::info!("event dispatcher: block_number_rx senders are dropped, stop dispatcher");
+                        return;
                     };
 
                     let _ = tokio::join!(
                         self.fetch_erc20_transfer_logs_and_process_block(block_number),
                         self.fetch_and_process_weth9_logs(block_number),
                     );
+
+                    self.latest_processed_block.store(block_number, Ordering::Relaxed);
                 }
             }
         }

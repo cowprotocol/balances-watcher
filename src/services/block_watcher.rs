@@ -18,10 +18,10 @@ use crate::metrics::Metrics;
 use crate::ws_connection::{ManagedWsSubscription, WsConnection};
 use alloy::primitives::BlockNumber;
 use alloy::rpc::types::Header;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio_stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -29,15 +29,18 @@ const MIN_STALL_DURATION: Duration = Duration::from_secs(2);
 const STALL_TIMEOUT_BLOCKS: u32 = 3;
 const POST_DISCONNECT_DELAY: Duration = Duration::from_millis(200);
 
+const BLOCK_CHANNEL_CAP: usize = 256;
+
 /// Process-wide WS subscription to `newHeads`. See module docs for the reconnect
 /// strategy and the rationale for a dedicated provider.
 pub struct BlockWatcher {
     network: EvmNetwork,
     metrics: Arc<Metrics>,
     connected: AtomicBool,
+    latest_block: AtomicU64,
     ws_connection: WsConnection,
     on_connect_tx: watch::Sender<bool>,
-    latest_block_tx: watch::Sender<Option<BlockNumber>>,
+    latest_block_tx: mpsc::Sender<BlockNumber>,
 }
 
 impl BlockWatcher {
@@ -48,14 +51,15 @@ impl BlockWatcher {
         metrics: Arc<Metrics>,
         lifecycle: LifeCycle,
         ws_connection: WsConnection,
-    ) -> Arc<Self> {
+    ) -> (Arc<Self>, mpsc::Receiver<BlockNumber>) {
         let (on_connect_tx, _) = watch::channel(false);
-        let (latest_block_tx, _) = watch::channel(None);
+        let (latest_block_tx, latest_block_rx) = mpsc::channel::<BlockNumber>(BLOCK_CHANNEL_CAP);
 
         let watcher = Arc::new(Self {
             network,
             metrics,
             connected: AtomicBool::new(false),
+            latest_block: AtomicU64::new(0),
             ws_connection,
             on_connect_tx,
             latest_block_tx,
@@ -66,7 +70,7 @@ impl BlockWatcher {
             watcher_for_spawn.run(lifecycle.cancel_token).await;
         });
 
-        watcher
+        (watcher, latest_block_rx)
     }
 
     /// `true` iff the watcher has received at least one header since the most
@@ -80,10 +84,9 @@ impl BlockWatcher {
     }
 
     /// Emits the block number of every received `newHeads` notification.
-    /// Initial value is `None` until the first header lands; on disconnect
-    /// the latest observed number is retained.
-    pub fn watch_latest_block(&self) -> watch::Receiver<Option<BlockNumber>> {
-        self.latest_block_tx.subscribe()
+    /// Initial value is 0 until the first header lands;
+    pub fn latest_block(&self) -> BlockNumber {
+        self.latest_block.load(Ordering::Relaxed)
     }
 
     async fn run(self: Arc<Self>, cancel: CancellationToken) {
@@ -146,7 +149,20 @@ impl BlockWatcher {
     fn record_connected(&self, block_number: BlockNumber) {
         self.metrics.block_accepted_total.increment(1);
         self.connected.store(true, Ordering::Relaxed);
-        self.latest_block_tx.send_replace(Some(block_number));
+        self.latest_block.store(block_number, Ordering::Relaxed);
+        match self.latest_block_tx.try_send(block_number) {
+            Ok(_) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                tracing::error!(
+                    block = block_number,
+                    cap = BLOCK_CHANNEL_CAP,
+                    "block channel overflow — dispatcher catastrophically behind, dropping"
+                )
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!("block stream closed");
+            }
+        }
     }
 
     fn stall_timeout(block_time: Duration) -> Duration {

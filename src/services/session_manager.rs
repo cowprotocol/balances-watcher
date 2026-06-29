@@ -132,7 +132,7 @@ impl SessionManager {
         let block_ws =
             WsConnection::new(ws_url, Arc::clone(&metrics), lifecycle.cancel_token.clone());
 
-        let block_watcher = BlockWatcher::spawn(
+        let (block_watcher, block_head_rx) = BlockWatcher::spawn(
             config.active_network,
             Arc::clone(&metrics),
             lifecycle.clone(),
@@ -144,6 +144,7 @@ impl SessionManager {
             Arc::clone(&metrics),
             Arc::clone(&rpc_client),
             Arc::clone(&block_watcher),
+            block_head_rx,
             lifecycle.clone(),
             tx,
             config.active_network.weth9_address(),
