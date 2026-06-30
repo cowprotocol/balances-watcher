@@ -21,9 +21,13 @@ use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, Multical
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::{SolCall, SolEvent};
 use backon::{ExponentialBuilder, Retryable};
+use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_stream::Stream;
+
+const MULTICALL_CHUNK_SIZE: usize = 500;
 
 /// `(token → balance, block_number_the_batch_was_read_at)`.
 pub type BalancesWithBlock = (HashMap<Address, U256>, BlockNumber);
@@ -187,6 +191,109 @@ impl RpcClient {
         Ok((balances, block_number))
     }
 
+    pub fn fetch_balances(
+        self: Arc<Self>,
+        owner: Address,
+        tokens: &[Address],
+        block_id: BlockId,
+    ) -> impl Stream<Item = Result<BalancesWithBlock, RpcError>> {
+        let chunks = {
+            let mut sorted = tokens.to_vec();
+            sorted.sort();
+            sorted
+                .chunks(MULTICALL_CHUNK_SIZE)
+                .map(|chunk| chunk.to_vec())
+                .collect::<Vec<_>>()
+        };
+
+        chunks
+            .into_iter()
+            .map(move |chunk| {
+                let this = Arc::clone(&self);
+
+                async move {
+                    let _permit = this.request_semaphore.acquire().await;
+                    let t0 = Instant::now();
+                    let metrics = Arc::clone(&this.metrics);
+
+                    let (block_number, call_result) = this
+                        .try_block_and_aggregate_with_retries(|| {
+                            Self::build_balance_of_multicall(
+                                &this.provider,
+                                &chunk,
+                                block_id,
+                                owner,
+                            )
+                        })
+                        .await
+                        .inspect(move |_| {
+                            let metrics = Arc::clone(&metrics);
+                            metrics.multicall_total.increment(1);
+                            metrics
+                                .multicall_duration_ms
+                                .record(t0.elapsed().as_millis() as f64);
+                        })
+                        .inspect_err(|_| {
+                            this.metrics
+                                .provider_exhausted_with_retries_total
+                                .increment(1);
+                        })?;
+
+                    tracing::info!(
+                        time_ms = t0.elapsed().as_millis(),
+                        "tryBlockAndAggregate balances complete"
+                    );
+
+                    let balances_map = this.map_balance_result(&chunk, call_result);
+                    Ok((balances_map, block_number))
+                }
+            })
+            .collect::<FuturesUnordered<_>>()
+    }
+
+    fn map_balance_result(
+        &self,
+        erc20_tokens_chunk: &[Address],
+        subcalls_result: Vec<Result<U256, Failure>>,
+    ) -> HashMap<Address, U256> {
+        let mut balances: HashMap<Address, U256> = HashMap::new();
+
+        // We call multicall with `requireSuccess=false`, so per-subcall failures
+        // are expected and non-fatal: dead/migrated/proxy-broken ERC20s appear
+        // routinely in large token lists. Log, count, and skip the offending
+        // token; the rest of the batch still flows to the client. A full-batch
+        // failure is a different path — handled above by `provider_exhausted_with_retries_total`.
+        for (i, erc20_token) in erc20_tokens_chunk.iter().enumerate() {
+            let Some(sub_call_result) = subcalls_result.get(i) else {
+                self.metrics.multicall_subcall_failed_total.increment(1);
+                tracing::warn!(
+                    token = %erc20_token,
+                    index = i,
+                    "multicall response is not matched to current token list size"
+                );
+                continue;
+            };
+
+            match sub_call_result {
+                Ok(balance) => {
+                    balances.insert(*erc20_token, *balance);
+                }
+                Err(failure) => {
+                    self.metrics.multicall_subcall_failed_total.increment(1);
+                    // `Failure` covers both subcall revert and abi-decode mismatch;
+                    // distinguish heuristically via return_data length when triaging.
+                    tracing::warn!(
+                        token = %erc20_token,
+                        return_data_len = failure.return_data.len(),
+                        "multicall subcall failed, skipping token"
+                    );
+                }
+            }
+        }
+
+        balances
+    }
+
     /// Build a `MulticallBuilder` of `balanceOf(owner)` for every `token`,
     /// pinned to `block_id`.
     fn build_balance_of_multicall(
@@ -215,7 +322,7 @@ impl RpcClient {
     async fn try_block_and_aggregate_with_retries<D, F>(
         &self,
         build_multicall: F,
-    ) -> Result<(u64, Vec<Result<D::Return, Failure>>), RpcError>
+    ) -> Result<(BlockNumber, Vec<Result<D::Return, Failure>>), RpcError>
     where
         D: SolCall + Send + Sync + Unpin + 'static,
         F: Fn() -> DynMulticallBuilder<D> + Clone + Send + Sync,

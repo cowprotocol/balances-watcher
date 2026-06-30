@@ -19,27 +19,19 @@
 //! ```
 
 use alloy::eips::BlockId;
-use alloy::primitives::Address;
+use futures::StreamExt;
 use std::{sync::Arc, time::Duration};
-use thiserror::Error;
 use tokio::sync::{mpsc, watch};
 use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::domain::BalanceEvent;
 use crate::domain::Session;
-use crate::domain::{BalanceEvent, EvmNetwork};
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::{BalancesWithBlock, RpcClient, RpcError};
 use crate::services::subscription::Subscription;
-
-/// Errors surfaced from the watcher's RPC interactions.
-#[derive(Error, Debug, Clone)]
-pub enum WatcherError {
-    #[error("unable to get balance for owner{0} in network{1}: {2}")]
-    GettingBalance(Address, EvmNetwork, String),
-}
 
 /// Per-session worker. Wraps the session-scoped state and RPC handles, and
 /// spawns the background tasks via [`Self::spawn_watchers`].
@@ -179,12 +171,12 @@ impl SnapshotUpdater {
                 }
                 _ = interval.tick() => {
                     this.metrics.snapshot_updater_runs_total.increment(1);
-                    this.fetch_balances_and_broadcast().await;
+                    this.fetch_balances_and_broadcast(cancel).await;
                 },
                 _ = refresh_balance_notifier.notified() => {
                     interval.reset();
                     this.metrics.snapshot_updater_runs_total.increment(1);
-                    this.fetch_balances_and_broadcast().await;
+                    this.fetch_balances_and_broadcast(cancel).await;
                 }
             }
         }
@@ -255,7 +247,7 @@ impl SnapshotUpdater {
     }
 
     // request all balances for a list of watched tokens via multicall and broadcast them to clients
-    async fn fetch_balances_and_broadcast(self: Arc<Self>) {
+    async fn fetch_balances_and_broadcast(self: Arc<Self>, cancel: &CancellationToken) {
         let tokens = {
             self.sub
                 .clone_watched_tokens()
@@ -263,45 +255,48 @@ impl SnapshotUpdater {
                 .into_iter()
                 .collect::<Vec<_>>()
         };
+
         tracing::info!(
             tokens_count = tokens.len(),
             "snapshot updater fetching balances"
         );
-        let result = Arc::clone(&self)
-            .get_tokens_balance(&tokens, BlockId::latest())
-            .await;
 
-        match result {
-            Ok(balances) => {
-                self.update_balances_and_send_event(balances).await;
+        let mut results = Arc::clone(&self.rpc_client).fetch_balances(
+            self.session.owner,
+            &tokens,
+            BlockId::latest(),
+        );
+
+        loop {
+            let this = Arc::clone(&self);
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    break;
+                },
+                maybe_result = results.next() => {
+                    let Some(result) = maybe_result else { return; };
+                    match result {
+                        Ok(balances) => {
+                            this.update_balances_and_send_event(balances).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                owner = %self.session.owner,
+                                error = %e,
+                                "failed to get balances"
+                            );
+
+                            let event = Some(BalanceEvent::Error {
+                                code: 500,
+                                message: "Error when make multicall3 request".to_string(),
+                            });
+
+                            this.send_balance_update_event(event)
+                        }
+                    }
+                }
             }
-            Err(e) => {
-                tracing::error!(
-                    owner = %self.session.owner,
-                    error = %e,
-                    "failed to get balances"
-                );
-
-                let event = Some(BalanceEvent::Error {
-                    code: 500,
-                    message: "Error when make multicall3 request".to_string(),
-                });
-                self.send_balance_update_event(event)
-            }
-        };
-    }
-
-    // request balances via multicall for a list of tokens and map error
-    async fn get_tokens_balance(
-        self: Arc<Self>,
-        tokens: &[Address],
-        block_id: BlockId,
-    ) -> Result<BalancesWithBlock, WatcherError> {
-        let owner = self.session.owner;
-        self.rpc_client
-            .fetch_balances_via_multicall(owner, tokens, block_id)
-            .await
-            .map_err(|e| WatcherError::GettingBalance(owner, self.session.network, e.to_string()))
+        }
     }
 
     fn send_balance_update_event(self: Arc<Self>, event: Option<BalanceEvent>) {
