@@ -47,13 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let lifecycle = LifeCycle::spawn();
 
-    let app_state = AppState::build(
-        network_cfg,
-        ws_url,
-        Arc::clone(&metrics),
-        lifecycle.clone(),
-    )
-    .await?;
+    let app_state =
+        AppState::build(network_cfg, ws_url, Arc::clone(&metrics), lifecycle.clone()).await?;
 
     let app = create_router(app_state, metrics_handler);
 
