@@ -1,21 +1,33 @@
-//! Per-session background workers. One `Watcher` owns a tree of spawned
+//! Per-session background workers. One `SnapshotUpdater` owns two spawned
 //! Tokio tasks that keep balances in sync for a single `(owner, network)`:
 //!
 //! - **Snapshot updater** — periodic full multicall + on-demand resync on
-//!   cold-start, WS reconnect, and watched-token-list extension.
-//! - **ERC20 / WETH9 log listeners** — WS subscriptions that filter events
-//!   client-side and enqueue refresh requests into `BalanceRefreshQueue`.
-//! - **Queue result receiver** — drains multicall results from the queue
-//!   into the broadcast stream feeding SSE clients.
+//!   cold-start, BlockWatcher reconnect, and watched-token-list changes.
+//!   Streams balances chunk-by-chunk via [`RpcClient::fetch_balances`] and
+//!   broadcasts a partial diff per chunk as it completes.
+//! - **Queue result receiver** — drains event-triggered multicall results
+//!   from the per-session [`BalanceRefreshQueue`] into the broadcast stream
+//!   feeding SSE clients.
+//!
+//! Event-driven refreshes (ERC20 Transfer + WETH9 Deposit/Withdrawal) are
+//! **not** driven from here anymore — a process-wide
+//! [`crate::services::event_dispatcher::Erc20TransferEventDispatcher`] pulls
+//! logs via HTTP `eth_getLogs` per block and fans matched (owner, token) pairs
+//! into each session's [`BalanceRefreshQueue`].
 //!
 //! Lifecycle is gated by the per-session `CancellationToken` carried inside
-//! [`Subscription`]. All workers exit when that token fires.
+//! [`Subscription`]. Both tasks exit when that token fires.
 //!
 //! ```text
-//!     WS pool                              snapshot loop
-//!        │                                       ▲
-//!        ▼                                       │ Notify::notify_one
-//!     log listeners ─► BalanceRefreshQueue ─► queue receiver ─► broadcast
+//!     BlockWatcher.watch_connected ─► snapshot loop (interval + notifier)
+//!                                          │
+//!                                          ▼
+//!                              RpcClient::fetch_balances (Stream)
+//!                                          │
+//!                                          ▼
+//!                        update_balances_and_take_diff → broadcast
+//!
+//!     BalanceRefreshQueue.result_rx ─► queue receiver ─► broadcast
 //! ```
 
 use alloy::eips::BlockId;
@@ -65,25 +77,18 @@ impl SnapshotUpdater {
         }
     }
 
-    /// Spawn the three background tasks that keep balances in sync for the
+    /// Spawn the two background tasks that keep balances in sync for the
     /// session:
     ///
     /// - **snapshot updater** — periodic full multicall + reconnect-driven
-    ///   resync (see [`Self::spawn_snapshot_updater`]).
-    /// - **ERC20 transfer listeners** — WS subscriptions for `Transfer` /
-    ///   WETH9 events.
-    /// - **queue result receiver** — drains `BalanceRefreshQueue` results
-    ///   into the broadcast stream.
-    ///
-    /// `refresh_queue` is the producer side of the refresh queue, owned upstream
-    /// by [`crate::services::subscription_manager`] — Watcher holds it only to
-    /// let its WS listeners enqueue refreshes. It is a transient dependency
-    /// that disappears once the shared `EventDispatcher` takes over routing in
-    /// a later migration phase.
+    ///   resync (see [`Self::spawn_snapshot_updater`]). Uses chunked
+    ///   streaming to broadcast partial diffs as each chunk lands.
+    /// - **queue result receiver** — drains event-triggered
+    ///   [`BalanceRefreshQueue`] results into the broadcast stream.
     ///
     /// Idempotent at the session level via
     /// [`crate::services::subscription_manager::SubscriptionManager::upsert`],
-    /// which hands back the queue endpoints only on first creation —
+    /// which hands back the queue receiver only on first creation —
     /// `SessionManager` calls this exactly once per session lifetime.
     pub async fn spawn_watchers(
         self: Arc<Self>,
@@ -170,10 +175,12 @@ impl SnapshotUpdater {
                     }
                 }
                 _ = interval.tick() => {
+                    tracing::debug!(owner = %owner, trigger = "interval", "snapshot refresh");
                     this.metrics.snapshot_updater_runs_total.increment(1);
                     this.fetch_balances_and_broadcast(cancel).await;
                 },
                 _ = refresh_balance_notifier.notified() => {
+                    tracing::debug!(owner = %owner, trigger = "notifier", "snapshot refresh");
                     interval.reset();
                     this.metrics.snapshot_updater_runs_total.increment(1);
                     this.fetch_balances_and_broadcast(cancel).await;
@@ -238,7 +245,7 @@ impl SnapshotUpdater {
             if !diff.is_empty() {
                 Some(BalanceEvent::BalanceUpdate(diff))
             } else {
-                tracing::info!(owner = %self.session.owner, "diff is empty, skipping broadcast");
+                tracing::debug!(owner = %self.session.owner, "diff is empty, skipping broadcast");
                 None
             }
         };
@@ -256,7 +263,7 @@ impl SnapshotUpdater {
                 .collect::<Vec<_>>()
         };
 
-        tracing::info!(
+        tracing::debug!(
             tokens_count = tokens.len(),
             "snapshot updater fetching balances"
         );
@@ -280,6 +287,7 @@ impl SnapshotUpdater {
                             this.update_balances_and_send_event(balances).await;
                         }
                         Err(e) => {
+                            this.metrics.snapshot_chunk_failed_total.increment(1);
                             tracing::error!(
                                 owner = %self.session.owner,
                                 error = %e,
@@ -301,7 +309,7 @@ impl SnapshotUpdater {
 
     fn send_balance_update_event(self: Arc<Self>, event: Option<BalanceEvent>) {
         let Some(event) = event else {
-            tracing::info!(owner = %self.session.owner, "no balance update to send (empty diff)");
+            tracing::debug!(owner = %self.session.owner, "no balance update to send (empty diff)");
             return;
         };
 

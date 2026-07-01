@@ -13,4 +13,4 @@ pub const CALL_QUEUE_DELAY: Duration = Duration::from_millis(300);
 pub const MAX_QUEUE_SIZE: usize = 256;
 
 /// Concurrency cap on `RpcClient::fetch_balances_via_multicall`.
-pub const MULTICALL_PERMITS_COUNT: usize = 300;
+pub const MULTICALL_PERMITS_COUNT: usize = 600;

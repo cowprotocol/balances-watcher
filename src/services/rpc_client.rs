@@ -1,14 +1,28 @@
-//! HTTP-side RPC client: batched balance reads (Multicall3), concurrency cap,
-//! retry with transient/permanent classification, per-subcall failure
-//! isolation.
+//! HTTP-side RPC client. Two roles:
 //!
-//! ```text
-//!     fetch_balances_via_multicall
-//!         → semaphore permit
-//!         → try_block_and_aggregate_with_retries (backon + is_multicall_retryable)
-//!             → build_balance_of_multicall (rebuilt per attempt, MulticallBuilder is !Clone)
-//!             → alloy → eth_call → RPC provider
-//! ```
+//! 1. **Balance reads via Multicall3** — two public entrypoints:
+//!    - [`RpcClient::fetch_balances_via_multicall`] — all-or-nothing single-shot,
+//!      used by [`crate::services::balance_refresh_queue`] where event-driven
+//!      batches are small (debounced coalesce).
+//!    - [`RpcClient::fetch_balances`] — chunked streaming, used by
+//!      [`crate::services::snapshot_updater`]. Splits the token list into
+//!      [`MULTICALL_CHUNK_SIZE`]-sized chunks and yields each chunk's result
+//!      as an [`impl Stream`] as it completes — so partial diffs can flow to
+//!      SSE clients without waiting for the whole snapshot.
+//!
+//!    Both share the same per-chunk pipeline:
+//!    ```text
+//!        semaphore permit
+//!            → try_block_and_aggregate_with_retries (backon + is_multicall_retryable)
+//!                → build_balance_of_multicall (rebuilt per attempt, MulticallBuilder is !Clone)
+//!                    → alloy → eth_call → RPC provider
+//!    ```
+//!
+//! 2. **Log fetches for the process-wide event dispatcher** —
+//!    [`RpcClient::fetch_transfer_logs_for_block`] (ERC20 Transfer, global topic
+//!    filter) and [`RpcClient::fetch_weth9_logs_for_block`] (WETH9 Deposit /
+//!    Withdrawal, address-filtered). Called once per block by
+//!    [`crate::services::event_dispatcher::Erc20TransferEventDispatcher`].
 
 use crate::config::constants::MULTICALL_PERMITS_COUNT;
 use crate::evm::erc20::ERC20;
@@ -148,7 +162,7 @@ impl RpcClient {
             })?
         };
 
-        tracing::info!(
+        tracing::debug!(
             time_ms = t0.elapsed().as_millis(),
             "tryBlockAndAggregate balances complete"
         );
@@ -239,9 +253,12 @@ impl RpcClient {
                                 .increment(1);
                         })?;
 
-                    tracing::info!(
+                    tracing::debug!(
                         time_ms = t0.elapsed().as_millis(),
-                        "tryBlockAndAggregate balances complete"
+                        owner = %owner,
+                        chunk_size = chunk.len(),
+                        block = block_number,
+                        "tryBlockAndAggregate chunk complete"
                     );
 
                     let balances_map = this.map_balance_result(&chunk, call_result);

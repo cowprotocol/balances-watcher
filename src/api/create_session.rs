@@ -60,7 +60,6 @@ pub async fn create_session(
 
     let session = Session { network, owner };
     let t0 = Instant::now();
-    tracing::info!(session = %session, "handler: create_session START");
 
     let ctx = SessionContext {
         session,

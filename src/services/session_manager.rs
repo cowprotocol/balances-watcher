@@ -196,7 +196,7 @@ impl SessionManager {
         // re-PUT'ing tokens for an already-live session yields `None` here,
         // so we spawn the per-session watchers exactly once over its lifetime.
         if let Some(queue_result_rx) = maybe_queue_rx_out {
-            tracing::info!(
+            tracing::debug!(
                 session = %session,
                 "upsert: spawning watchers"
             );
@@ -214,7 +214,7 @@ impl SessionManager {
                 .spawn_watchers(queue_result_rx, self.config.snapshot_interval)
                 .await;
 
-            tracing::info!(
+            tracing::debug!(
                 session = %session,
                 "upsert: watchers spawned"
             );
@@ -322,13 +322,13 @@ impl SessionManager {
         // Build an initial stream that delivers the snapshot directly to this client only,
         // avoiding a broadcast that would redundantly push to all existing subscribers.
         let initial_stream = if balance_snapshot.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 session = %session,
                 "balance snapshot is empty"
             );
             stream::iter(vec![])
         } else {
-            tracing::info!(
+            tracing::debug!(
                 session = %session,
                 "sending first balance snapshot to new sse connection (full)"
             );

@@ -130,6 +130,12 @@ impl Erc20TransferEventDispatcher {
                     );
 
                     self.latest_processed_block.store(block_number, Ordering::Relaxed);
+                    self.metrics.event_dispatcher_blocks_processed_total.increment(1);
+
+                    // update dispatcher lag gauge
+                    let latest_head = self.block_watcher.latest_block();
+                    let lag = latest_head.saturating_sub(block_number);
+                    self.metrics.event_dispatcher_lag_blocks.set(lag as f64);
                 }
             }
         }
@@ -143,15 +149,19 @@ impl Erc20TransferEventDispatcher {
             "event dispatcher: fetching weth9 logs for block"
         );
 
+        let t0 = std::time::Instant::now();
         match self
             .rpc_client
             .fetch_weth9_logs_for_block(self.weth9_address, block_number)
             .await
         {
             Ok(logs) => {
+                let elapsed_ms = t0.elapsed().as_millis() as f64;
+                self.metrics.eth_get_logs_duration_ms.record(elapsed_ms);
                 tracing::debug!(
                     block = block_number,
                     count = logs.len(),
+                    duration_ms = elapsed_ms as u64,
                     "event dispatcher: got weth9 logs for block",
                 );
 
@@ -160,6 +170,7 @@ impl Erc20TransferEventDispatcher {
                 }
             }
             Err(err) => {
+                self.metrics.eth_get_logs_failed_total.increment(1);
                 tracing::warn!(
                     block = block_number,
                     error = %err,
@@ -174,15 +185,20 @@ impl Erc20TransferEventDispatcher {
             block = block_number,
             "event dispatcher: fetching erc20 transfer logs for block"
         );
+
+        let t0 = std::time::Instant::now();
         match self
             .rpc_client
             .fetch_transfer_logs_for_block(block_number)
             .await
         {
             Ok(logs) => {
+                let elapsed_ms = t0.elapsed().as_millis() as f64;
+                self.metrics.eth_get_logs_duration_ms.record(elapsed_ms);
                 tracing::debug!(
                     block = block_number,
                     count = logs.len(),
+                    duration_ms = elapsed_ms as u64,
                     "event dispatcher: got erc20 transfer logs for block"
                 );
                 for log in logs {
@@ -190,6 +206,7 @@ impl Erc20TransferEventDispatcher {
                 }
             }
             Err(err) => {
+                self.metrics.eth_get_logs_failed_total.increment(1);
                 tracing::warn!(
                     block = block_number,
                     error = %err,

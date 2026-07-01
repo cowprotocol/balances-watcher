@@ -1,16 +1,28 @@
-//! WebSocket health canary: a dedicated `eth_subscribe("newHeads")` subscription
-//! that powers `/health` via [`BlockWatcher::is_healthy`].
+//! Process-wide WS subscription to `newHeads`. Serves three roles:
+//!
+//! 1. **Health canary** — [`BlockWatcher::is_healthy`] backs `/health`. A
+//!    single [`std::sync::atomic::AtomicBool`] flipped `true` on first header,
+//!    `false` on disconnect/stall/shutdown. Downstream health checks
+//!    (dispatcher lag) also read `latest_block()` from here.
+//!
+//! 2. **Block distributor** — every accepted header is pushed into a bounded
+//!    [`tokio::sync::mpsc::Sender<BlockNumber>`] (capacity
+//!    [`BLOCK_CHANNEL_CAP`]) via `try_send`. The consumer is the
+//!    process-wide
+//!    [`crate::services::event_dispatcher::Erc20TransferEventDispatcher`]
+//!    which reads FIFO and fires per-block `eth_getLogs`.
+//!
+//! 3. **Reconnect trigger** — [`BlockWatcher::watch_connected`] exposes a
+//!    `watch::Receiver<bool>` observed by
+//!    [`crate::services::snapshot_updater`] to force a fresh snapshot when
+//!    the WS canary comes back up.
 //!
 //! Connect/subscribe and infinite-retry reconnect live in
-//! [`crate::ws_connection::WsConnection`]. This module only owns the
+//! [`crate::ws_connection::WsConnection`]. This module owns only the
 //! consume-loop: a stall watchdog
 //! (`block_time × STALL_TIMEOUT_BLOCKS`, floored at `MIN_STALL_DURATION`)
-//! that forces a fresh subscription when headers stop arriving, and the
-//! single-bit health flag. The dedicated WS socket also keeps `newHeads`
-//! isolated from any future per-session WS churn.
-//!
-//! Health is a single [`std::sync::atomic::AtomicBool`]: flipped `true` on the
-//! first header received, `false` on disconnect, stall, or shutdown.
+//! that forces a fresh subscription when headers stop arriving, plus the
+//! state atomics.
 
 use crate::domain::EvmNetwork;
 use crate::graceful_shutdown::LifeCycle;
@@ -83,8 +95,8 @@ impl BlockWatcher {
         self.on_connect_tx.subscribe()
     }
 
-    /// Emits the block number of every received `newHeads` notification.
-    /// Initial value is 0 until the first header lands;
+    /// Returns the latest block number observed via `newHeads`, or `0` if no
+    /// header has arrived yet.
     pub fn latest_block(&self) -> BlockNumber {
         self.latest_block.load(Ordering::Relaxed)
     }
@@ -153,6 +165,7 @@ impl BlockWatcher {
         match self.latest_block_tx.try_send(block_number) {
             Ok(_) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.metrics.block_channel_overflow_total.increment(1);
                 tracing::error!(
                     block = block_number,
                     cap = BLOCK_CHANNEL_CAP,
@@ -160,7 +173,7 @@ impl BlockWatcher {
                 )
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::warn!("block stream closed");
+                tracing::warn!("block channel receiver dropped — event dispatcher gone");
             }
         }
     }

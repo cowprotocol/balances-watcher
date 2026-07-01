@@ -112,7 +112,7 @@ impl Subscription {
         match self.sender.send(event) {
             Ok(receivers) => {
                 self.metrics.balance_updates_sent_total.increment(1);
-                tracing::info!(
+                tracing::debug!(
                     session = %session,
                     receivers,
                     "balance update sent"
