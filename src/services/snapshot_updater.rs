@@ -287,7 +287,6 @@ impl SnapshotUpdater {
                             this.update_balances_and_send_event(balances).await;
                         }
                         Err(e) => {
-                            this.metrics.snapshot_chunk_failed_total.increment(1);
                             tracing::error!(
                                 owner = %self.session.owner,
                                 error = %e,
