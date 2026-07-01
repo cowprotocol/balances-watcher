@@ -71,10 +71,6 @@ pub struct Metrics {
     /// non-zero rate.** Snapshot loop (60s cadence) is the recovery path.
     pub event_dispatcher_missed_block_logs_total: Counter,
 
-    /// snapshot chunk (streaming path) failed. Skipped silently — next snapshot
-    /// tick / event refresh picks up. Non-zero = flaky node or transient network.
-    pub snapshot_chunk_failed_total: Counter,
-
     /// token list fetched ok
     pub token_list_loaded_total: Counter,
     /// token list fetch failed after retries
@@ -130,8 +126,6 @@ impl Metrics {
             event_dispatcher_missed_block_logs_total: counter!(
                 "event_dispatcher_missed_block_logs_total"
             ),
-
-            snapshot_chunk_failed_total: counter!("snapshot_chunk_failed_total"),
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),

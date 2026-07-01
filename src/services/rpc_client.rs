@@ -254,7 +254,8 @@ impl RpcClient {
     /// **Failure isolation.** An `Err` item means that specific chunk's
     /// multicall exhausted retries or hit a permanent error — sibling chunks
     /// are unaffected. Callers decide whether to broadcast the failure or
-    /// silently skip. Counter: `snapshot_chunk_failed_total`.
+    /// silently skip. Counter: `provider_exhausted_with_retries_total`
+    /// (bumped inside the chunk future on final failure).
     ///
     /// **Concurrency cap.** Each chunk future acquires one permit from
     /// `request_semaphore` (capacity [`MULTICALL_PERMITS_COUNT`]) before
