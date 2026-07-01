@@ -192,9 +192,6 @@ impl SessionManager {
 
         let (sub, maybe_queue_rx_out) = self.sub_manager.upsert(session, new_watched_tokens).await;
 
-        // `upsert` returns the queue endpoints only for a brand-new session —
-        // re-PUT'ing tokens for an already-live session yields `None` here,
-        // so we spawn the per-session watchers exactly once over its lifetime.
         if let Some(queue_result_rx) = maybe_queue_rx_out {
             tracing::debug!(
                 session = %session,
