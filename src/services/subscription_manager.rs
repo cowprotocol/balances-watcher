@@ -192,7 +192,10 @@ impl SubscriptionManager {
         Err(SubscriptionError::SessionNotRegistered)
     }
 
-    // todo ONLY FOR TESTING, session will be rewritten in next pr
+    // check if there is an address(owner) which watches in subscriptions
+    // if there is - check that token is in watched list
+    // if token is watched - returns BalanceRefreshQueueHandle,
+    // otherwise - None
     pub async fn get_owned_queue_if_watched(
         &self,
         owner: &Address,
