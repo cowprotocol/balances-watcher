@@ -64,6 +64,12 @@ pub struct Metrics {
     /// eth_getLogs latency per block (dispatcher path). Sum across erc20 and
     /// weth9; tag with `kind = erc20 | weth9` when moving to labelled histograms.
     pub eth_get_logs_duration_ms: Histogram,
+    /// eth_getLogs for a block exhausted retries — that block's logs are
+    /// permanently lost (dispatcher still bumps `latest_processed_block` to
+    /// keep lag health honest). Sum across erc20 and weth9 paths; one failed
+    /// source on one block bumps by 1. **Data-loss counter — page on any
+    /// non-zero rate.** Snapshot loop (60s cadence) is the recovery path.
+    pub event_dispatcher_missed_block_logs_total: Counter,
 
     /// snapshot chunk (streaming path) failed. Skipped silently — next snapshot
     /// tick / event refresh picks up. Non-zero = flaky node or transient network.
@@ -121,6 +127,9 @@ impl Metrics {
             event_dispatcher_lag_blocks: gauge!("event_dispatcher_lag_blocks"),
             eth_get_logs_failed_total: counter!("eth_get_logs_failed_total"),
             eth_get_logs_duration_ms: histogram!("eth_get_logs_duration_ms"),
+            event_dispatcher_missed_block_logs_total: counter!(
+                "event_dispatcher_missed_block_logs_total"
+            ),
 
             snapshot_chunk_failed_total: counter!("snapshot_chunk_failed_total"),
 

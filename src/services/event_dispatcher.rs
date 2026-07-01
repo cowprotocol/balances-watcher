@@ -170,10 +170,13 @@ impl Erc20TransferEventDispatcher {
                 }
             }
             Err(err) => {
+                self.metrics
+                    .event_dispatcher_missed_block_logs_total
+                    .increment(1);
                 tracing::warn!(
                     block = block_number,
                     error = %err,
-                    "event dispatcher: eth_getLogs for weth9 failed, will retry on next block"
+                    "event dispatcher: eth_getLogs for weth9 exhausted retries, block logs lost"
                 );
             }
         }
@@ -205,10 +208,13 @@ impl Erc20TransferEventDispatcher {
                 }
             }
             Err(err) => {
+                self.metrics
+                    .event_dispatcher_missed_block_logs_total
+                    .increment(1);
                 tracing::warn!(
                     block = block_number,
                     error = %err,
-                    "event dispatcher: eth_getLogs for erc20 failed, will retry on next block"
+                    "event dispatcher: eth_getLogs for erc20 exhausted retries, block logs lost"
                 );
             }
         }
