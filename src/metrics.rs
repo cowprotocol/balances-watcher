@@ -56,8 +56,10 @@ pub struct Metrics {
     /// current dispatcher lag in blocks (`latest_block - last_processed`).
     /// Set on every processed block. Prod alerting can page on `> MAX_BLOCK_LAG`.
     pub event_dispatcher_lag_blocks: Gauge,
-    /// eth_getLogs call by event dispatcher failed (any transient / permanent).
-    /// Sum across erc20 and weth9 paths.
+    /// eth_getLogs attempt failed (per-attempt, bumped from the retry `.notify`
+    /// hook — same semantics as `multicall_failed_total`). Sum across erc20 and
+    /// weth9 paths. A single logical getLogs call can bump this up to N times
+    /// before the retry chain either succeeds or exhausts.
     pub eth_get_logs_failed_total: Counter,
     /// eth_getLogs latency per block (dispatcher path). Sum across erc20 and
     /// weth9; tag with `kind = erc20 | weth9` when moving to labelled histograms.

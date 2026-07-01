@@ -3,7 +3,7 @@
 //!
 //! - **Snapshot updater** — periodic full multicall + on-demand resync on
 //!   cold-start, BlockWatcher reconnect, and watched-token-list changes.
-//!   Streams balances chunk-by-chunk via [`RpcClient::fetch_balances`] and
+//!   Streams balances chunk-by-chunk via [`RpcClient::fetch_balances_by_chunks`] and
 //!   broadcasts a partial diff per chunk as it completes.
 //! - **Queue result receiver** — drains event-triggered multicall results
 //!   from the per-session [`BalanceRefreshQueue`] into the broadcast stream
@@ -268,7 +268,7 @@ impl SnapshotUpdater {
             "snapshot updater fetching balances"
         );
 
-        let mut results = Arc::clone(&self.rpc_client).fetch_balances(
+        let mut results = Arc::clone(&self.rpc_client).fetch_balances_by_chunks(
             self.session.owner,
             &tokens,
             BlockId::latest(),

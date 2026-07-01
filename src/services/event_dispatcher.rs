@@ -170,7 +170,6 @@ impl Erc20TransferEventDispatcher {
                 }
             }
             Err(err) => {
-                self.metrics.eth_get_logs_failed_total.increment(1);
                 tracing::warn!(
                     block = block_number,
                     error = %err,
@@ -206,7 +205,6 @@ impl Erc20TransferEventDispatcher {
                 }
             }
             Err(err) => {
-                self.metrics.eth_get_logs_failed_total.increment(1);
                 tracing::warn!(
                     block = block_number,
                     error = %err,

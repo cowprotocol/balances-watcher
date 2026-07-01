@@ -4,7 +4,7 @@
 //!    - [`RpcClient::fetch_balances_via_multicall`] — all-or-nothing single-shot,
 //!      used by [`crate::services::balance_refresh_queue`] where event-driven
 //!      batches are small (debounced coalesce).
-//!    - [`RpcClient::fetch_balances`] — chunked streaming, used by
+//!    - [`RpcClient::fetch_balances_by_chunks`] — chunked streaming, used by
 //!      [`crate::services::snapshot_updater`]. Splits the token list into
 //!      [`MULTICALL_CHUNK_SIZE`]-sized chunks and yields each chunk's result
 //!      as an [`impl Stream`] as it completes — so partial diffs can flow to
@@ -78,6 +78,9 @@ impl RpcClient {
     /// `eth_getLogs` (server-side topic filter); returns 100% of matching
     /// logs in the block, in contrast to WS `eth_subscribe` whose internal
     /// buffer drops the tail of burst blocks.
+    ///
+    /// Transient RPC failures are retried per [`Self::backoff`]; the final
+    /// `Err` surfaces as [`RpcError::Exhausted`].
     pub async fn fetch_transfer_logs_for_block(
         &self,
         block_number: BlockNumber,
@@ -87,13 +90,15 @@ impl RpcClient {
             .to_block(block_number)
             .event_signature(ERC20::Transfer::SIGNATURE_HASH);
 
-        // todo implement backoff
-        self.provider
-            .get_logs(&filter)
-            .await
-            .map_err(|err| RpcError::Exhausted(err.to_string()))
+        self.get_logs_with_retries(filter).await
     }
 
+    /// Fetch WETH9 `Deposit` and `Withdrawal` logs emitted in `block_number`,
+    /// address-filtered to the canonical WETH9 contract for this chain.
+    /// Needed alongside [`Self::fetch_transfer_logs_for_block`] because the
+    /// canonical WETH9 impl does not emit `Transfer` on wrap / unwrap.
+    ///
+    /// Same retry policy as [`Self::fetch_transfer_logs_for_block`].
     pub async fn fetch_weth9_logs_for_block(
         &self,
         weth9_address: Address,
@@ -110,11 +115,32 @@ impl RpcClient {
             .address(weth9_address)
             .event_signature(event_signatures);
 
-        // todo implement backoff
-        self.provider
-            .get_logs(&filter)
-            .await
-            .map_err(|err| RpcError::Exhausted(err.to_string()))
+        self.get_logs_with_retries(filter).await
+    }
+
+    /// Run `eth_getLogs` with retry/backoff. Retries every error unconditionally
+    /// — we construct all filters ourselves, so "permanent" errors (bad filter,
+    /// unknown topic) are not expected here. Real-world failures are transport
+    /// hiccups (5xx, connection reset, timeout) and "block not found" while
+    /// the node is briefly behind the head; both resolve within one backoff
+    /// window.
+    async fn get_logs_with_retries(&self, filter: Filter) -> Result<Vec<Log>, RpcError> {
+        let metrics = Arc::clone(&self.metrics);
+        (|| {
+            let filter = filter.clone();
+            async move { self.provider.get_logs(&filter).await }
+        })
+        .retry(Self::backoff())
+        .notify(move |err, duration| {
+            metrics.eth_get_logs_failed_total.increment(1);
+            tracing::warn!(
+                error = %err,
+                duration = ?duration,
+                "eth_getLogs attempt failed, will retry"
+            );
+        })
+        .await
+        .map_err(|err| RpcError::Exhausted(err.to_string()))
     }
 
     /// Read ERC20 balances for `owner` at `block_id`, one Multicall3
@@ -205,7 +231,35 @@ impl RpcClient {
         Ok((balances, block_number))
     }
 
-    pub fn fetch_balances(
+    /// Streaming variant of [`Self::fetch_balances_via_multicall`]: splits
+    /// `tokens` into [`MULTICALL_CHUNK_SIZE`]-sized chunks, fires one multicall
+    /// per chunk in parallel via [`FuturesUnordered`], and yields each chunk's
+    /// result as it lands.
+    ///
+    /// Enables partial-first delivery to SSE clients: the snapshot updater
+    /// broadcasts a diff after every chunk instead of waiting for the whole
+    /// token list to resolve. On a 1000-token list this drops
+    /// `session → first_snapshot` roughly by a factor of `ceil(N / chunk_size)`.
+    ///
+    /// **Ordering.** Chunks are `FuturesUnordered` — items arrive out of
+    /// submission order. Callers must not assume any particular chunk lands
+    /// first.
+    ///
+    /// **Block number per item.** Each chunk carries its own `block_number`
+    /// from `tryBlockAndAggregate`. Under normal head advancement two chunks
+    /// in the same call may land on adjacent blocks — the per-token diff
+    /// path in `Subscription::update_balances_and_take_diff` is block-guarded
+    /// (`current.block_number < new.block_number`), so this is safe.
+    ///
+    /// **Failure isolation.** An `Err` item means that specific chunk's
+    /// multicall exhausted retries or hit a permanent error — sibling chunks
+    /// are unaffected. Callers decide whether to broadcast the failure or
+    /// silently skip. Counter: `snapshot_chunk_failed_total`.
+    ///
+    /// **Concurrency cap.** Each chunk future acquires one permit from
+    /// `request_semaphore` (capacity [`MULTICALL_PERMITS_COUNT`]) before
+    /// issuing its multicall.
+    pub fn fetch_balances_by_chunks(
         self: Arc<Self>,
         owner: Address,
         tokens: &[Address],
