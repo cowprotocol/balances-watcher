@@ -106,18 +106,13 @@ impl Subscription {
         true
     }
 
-    /// Hot-path predicate for the ERC20 log handler. Read-only RwLock.
-    pub async fn is_watched(&self, token: &Address) -> bool {
-        self.tokens.read().await.contains(token)
-    }
-
     /// Fan out a balance event to all SSE subscribers. Disconnected clients
     /// are logged at debug and never escalate to error.
     pub fn send_event(&self, event: BalanceEvent, session: Session) {
         match self.sender.send(event) {
             Ok(receivers) => {
                 self.metrics.balance_updates_sent_total.increment(1);
-                tracing::info!(
+                tracing::debug!(
                     session = %session,
                     receivers,
                     "balance update sent"
@@ -131,6 +126,10 @@ impl Subscription {
                 );
             }
         }
+    }
+
+    pub async fn is_watched_token(&self, address: &Address) -> bool {
+        self.tokens.read().await.contains(address)
     }
 
     /// Attach a new SSE client to the broadcast stream.

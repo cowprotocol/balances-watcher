@@ -1,15 +1,11 @@
 use crate::config::network_config::NetworkConfig;
-use crate::config::ws_pool_config::WsPoolConfig;
 use crate::domain::EvmNetwork;
+use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
-use crate::services::block_watcher::BlockWatcher;
 use crate::services::rpc_client::RpcClient;
 use crate::services::session_manager::{SessionConfig, SessionManager};
-use crate::services::ws_connection_pool::WsConnectionPool;
 use alloy::providers::{Provider, ProviderBuilder};
 use std::sync::Arc;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 /// Application state for the single-network instance.
 ///
@@ -23,17 +19,14 @@ pub struct AppState {
     /// addressed to a different chain.
     pub network: EvmNetwork,
     pub metrics: Arc<Metrics>,
-    pub block_watcher: Arc<BlockWatcher>,
 }
 
 impl AppState {
     pub async fn build(
         network_config: NetworkConfig,
-        ws_pool_config: WsPoolConfig,
+        ws_url: String,
         metrics: Arc<Metrics>,
-        block_watcher: Arc<BlockWatcher>,
-        task_tracker: TaskTracker,
-        shutdown_token: CancellationToken,
+        life_cycle: LifeCycle,
     ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let network = network_config.network;
 
@@ -47,27 +40,22 @@ impl AppState {
         ));
         tracing::info!(%network, "http provider connected");
 
-        let ws_pool = Arc::new(WsConnectionPool::new(ws_pool_config, Arc::clone(&metrics)));
-        tracing::info!(%network, "ws connection pool ready");
-
-        let session_manager = Arc::new(SessionManager::new(
+        let session_manager = SessionManager::spawn(
             rpc_client,
-            ws_pool,
             Arc::clone(&metrics),
-            task_tracker,
-            shutdown_token,
+            life_cycle.clone(),
             SessionConfig {
                 snapshot_interval: network_config.snapshot_interval,
                 token_limit: network_config.max_watched_tokens_limit,
                 active_network: network,
             },
-        ));
+            ws_url,
+        );
 
         Ok(Arc::new(Self {
             session_manager,
             network,
             metrics,
-            block_watcher,
         }))
     }
 }

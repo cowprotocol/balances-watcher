@@ -60,7 +60,6 @@ pub async fn create_session(
 
     let session = Session { network, owner };
     let t0 = Instant::now();
-    tracing::info!(session = %session, "handler: create_session START");
 
     let ctx = SessionContext {
         session,
@@ -68,8 +67,7 @@ pub async fn create_session(
         custom_tokens: body.custom_tokens,
     };
 
-    let result = state
-        .session_manager
+    let result = Arc::clone(&state.session_manager)
         .upsert(ctx)
         .await
         .map_err(AppError::from);

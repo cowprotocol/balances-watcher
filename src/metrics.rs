@@ -36,37 +36,44 @@ pub struct Metrics {
     pub erc20_event_received_total: Counter,
     /// weth9 deposit or withdrawal log received
     pub weth9_events_received_total: Counter,
-    /// erc20 transfer log decode failed
-    pub parse_erc20_log_errors_total: Counter,
-    /// weth9 log decode failed
-    pub parse_weth9_logs_failed_total: Counter,
 
     /// ws stream ended, will resubscribe
     pub ws_provider_disconnected_total: Counter,
     /// ws resubscribe attempted
     pub ws_reconnect_attempts_total: Counter,
-    /// ws subscribe call errored (per retry)
-    pub ws_subscribe_errors_total: Counter,
-    /// ws subscribe gave up after backoff exhausted
-    pub ws_subscribe_is_down_total: Counter,
     /// time spent in backoff between a failed ws connect/subscribe attempt and the next retry
     pub ws_reconnect_attempt_duration_ms: Histogram,
 
     /// blocks accepted from the ws subscription. Rate ≈ chain block rate when healthy
     pub block_accepted_total: Counter,
+    /// block channel (BlockWatcher → EventDispatcher) overflowed on `try_send`.
+    /// Non-zero = dispatcher catastrophically behind, health should already be red.
+    pub block_channel_overflow_total: Counter,
 
-    /// ws resubscribe
-    pub ws_resubscribed_total: Counter,
+    /// event dispatcher successfully processed a block (both eth_getLogs calls
+    /// completed, results fanned out). Rate ≈ chain block rate when healthy.
+    pub event_dispatcher_blocks_processed_total: Counter,
+    /// current dispatcher lag in blocks (`latest_block - last_processed`).
+    /// Set on every processed block. Prod alerting can page on `> MAX_BLOCK_LAG`.
+    pub event_dispatcher_lag_blocks: Gauge,
+    /// eth_getLogs attempt failed (per-attempt, bumped from the retry `.notify`
+    /// hook — same semantics as `multicall_failed_total`). Sum across erc20 and
+    /// weth9 paths. A single logical getLogs call can bump this up to N times
+    /// before the retry chain either succeeds or exhausts.
+    pub eth_get_logs_failed_total: Counter,
+    /// eth_getLogs latency per block (dispatcher path). Sum across erc20 and
+    /// weth9; tag with `kind = erc20 | weth9` when moving to labelled histograms.
+    pub eth_get_logs_duration_ms: Histogram,
+    /// eth_getLogs for a block exhausted retries — that block's logs are
+    /// permanently lost (dispatcher still bumps `latest_processed_block` to
+    /// keep lag health honest). Sum across erc20 and weth9 paths; one failed
+    /// source on one block bumps by 1. **Data-loss counter — page on any
+    /// non-zero rate.** Snapshot loop (60s cadence) is the recovery path.
+    pub event_dispatcher_missed_block_logs_total: Counter,
 
-    /// time waited for a WS subscribe permit before the actual `eth_subscribe`.
-    /// Long tails here mean the cap is being hit — sessions are queueing.
-    pub ws_subscribe_permit_wait_ms: Histogram,
-    /// in-flight `subscribe()` calls (permits currently held).
-    /// Stable at the cap → cap too small or upstream too slow.
-    pub ws_subscribes_in_flight: Gauge,
-    /// live WS provider pipes in the pool right now (one per
-    /// `WsPoolConfig::max_clients_per_ws_connection` sessions).
-    pub ws_pool_connections: Gauge,
+    /// snapshot chunk (streaming path) failed. Skipped silently — next snapshot
+    /// tick / event refresh picks up. Non-zero = flaky node or transient network.
+    pub snapshot_chunk_failed_total: Counter,
 
     /// token list fetched ok
     pub token_list_loaded_total: Counter,
@@ -106,21 +113,25 @@ impl Metrics {
 
             erc20_event_received_total: counter!("erc20_event_received_total"),
             weth9_events_received_total: counter!("weth9_events_received_total"),
-            parse_erc20_log_errors_total: counter!("parse_erc20_log_errors_total"),
-            parse_weth9_logs_failed_total: counter!("parse_weth9_logs_failed_total"),
 
             ws_provider_disconnected_total: counter!("ws_provider_disconnected_total"),
             ws_reconnect_attempts_total: counter!("ws_reconnect_attempts_total"),
-            ws_subscribe_errors_total: counter!("ws_subscribe_errors_total"),
-            ws_subscribe_is_down_total: counter!("ws_subscribe_is_down_total"),
-            ws_resubscribed_total: counter!("ws_resubscribed_total"),
             ws_reconnect_attempt_duration_ms: histogram!("ws_reconnect_attempt_duration_ms"),
 
-            ws_subscribe_permit_wait_ms: histogram!("ws_subscribe_permit_wait_ms"),
-            ws_subscribes_in_flight: gauge!("ws_subscribes_in_flight"),
-            ws_pool_connections: gauge!("ws_pool_connections"),
-
             block_accepted_total: counter!("block_accepted_total"),
+            block_channel_overflow_total: counter!("block_channel_overflow_total"),
+
+            event_dispatcher_blocks_processed_total: counter!(
+                "event_dispatcher_blocks_processed_total"
+            ),
+            event_dispatcher_lag_blocks: gauge!("event_dispatcher_lag_blocks"),
+            eth_get_logs_failed_total: counter!("eth_get_logs_failed_total"),
+            eth_get_logs_duration_ms: histogram!("eth_get_logs_duration_ms"),
+            event_dispatcher_missed_block_logs_total: counter!(
+                "event_dispatcher_missed_block_logs_total"
+            ),
+
+            snapshot_chunk_failed_total: counter!("snapshot_chunk_failed_total"),
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),

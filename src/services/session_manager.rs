@@ -1,12 +1,15 @@
 use crate::config::back_off_config::get_token_list_fetcher_backoff;
 use crate::domain::{BalanceEvent, EvmNetwork, Session};
+use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
+use crate::services::block_watcher::BlockWatcher;
 use crate::services::cleanup_stream;
+use crate::services::event_dispatcher::{Erc20TransferEvent, Erc20TransferEventDispatcher};
 use crate::services::rpc_client::RpcClient;
+use crate::services::snapshot_updater::SnapshotUpdater;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
 use crate::services::token_list_fetcher::{FetcherError, TokenListFetcher};
-use crate::services::watcher::Watcher;
-use crate::services::ws_connection_pool::WsConnectionPool;
+use crate::ws_connection::WsConnection;
 use alloy::primitives::Address;
 use alloy::transports::http::reqwest::StatusCode;
 use axum::response::sse::{Event, KeepAlive};
@@ -20,9 +23,8 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
-use tokio_util::sync::CancellationToken;
-use tokio_util::task::TaskTracker;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
@@ -47,9 +49,10 @@ pub struct SessionConfig {
 pub struct SessionManager {
     sub_manager: Arc<SubscriptionManager>,
     rpc_client: Arc<RpcClient>,
-    ws_connection_pool: Arc<WsConnectionPool>,
     fetcher: Arc<TokenListFetcher>,
-    task_tracker: TaskTracker,
+    event_dispatcher: Arc<Erc20TransferEventDispatcher>,
+    block_watcher: Arc<BlockWatcher>,
+    lifecycle: LifeCycle,
     metrics: Arc<Metrics>,
     config: SessionConfig,
 }
@@ -104,14 +107,13 @@ pub enum SessionError {
 }
 
 impl SessionManager {
-    pub fn new(
+    pub fn spawn(
         rpc_client: Arc<RpcClient>,
-        ws_connection_pool: Arc<WsConnectionPool>,
         metrics: Arc<Metrics>,
-        task_tracker: TaskTracker,
-        shutdown_token: CancellationToken,
+        lifecycle: LifeCycle,
         config: SessionConfig,
-    ) -> Self {
+        ws_url: String,
+    ) -> Arc<Self> {
         let token_list_fetcher = TokenListFetcher::new(
             TOKEN_LIST_CACHE_TTL,
             get_token_list_fetcher_backoff(),
@@ -120,33 +122,58 @@ impl SessionManager {
         );
 
         let sub_manager = Arc::new(SubscriptionManager::new(
-            task_tracker.clone(),
-            shutdown_token,
             Arc::clone(&metrics),
             Arc::clone(&rpc_client),
+            lifecycle.clone(),
         ));
         Arc::clone(&sub_manager).spawn_cleanup();
 
-        Self {
+        // dedicated WS socket for `newHeads`
+        let block_ws =
+            WsConnection::new(ws_url, Arc::clone(&metrics), lifecycle.cancel_token.clone());
+
+        let (block_watcher, block_head_rx) = BlockWatcher::spawn(
+            config.active_network,
+            Arc::clone(&metrics),
+            lifecycle.clone(),
+            block_ws,
+        );
+
+        let (tx, rx) = mpsc::channel::<Erc20TransferEvent>(256);
+        let event_dispatcher = Erc20TransferEventDispatcher::spawn(
+            Arc::clone(&metrics),
+            Arc::clone(&rpc_client),
+            Arc::clone(&block_watcher),
+            block_head_rx,
+            lifecycle.clone(),
+            tx,
+            config.active_network.weth9_address(),
+        );
+
+        let manager = Arc::new(Self {
             sub_manager: Arc::clone(&sub_manager),
-            ws_connection_pool,
+            event_dispatcher,
+            block_watcher,
             fetcher: Arc::new(token_list_fetcher),
             rpc_client,
-            task_tracker,
+            lifecycle,
             metrics,
             config,
-        }
+        });
+
+        Arc::clone(&manager).spawn_erc20_transfer_listener(rx);
+
+        manager
     }
 
-    pub async fn upsert(&self, ctx: SessionContext) -> Result<(), SessionError> {
+    pub async fn upsert(self: Arc<Self>, ctx: SessionContext) -> Result<(), SessionError> {
         let session = ctx.session;
 
         // Single-network instance: the fetcher & ws pool are pre-bound. No
         // session-time lookup, no "provider not defined" branch.
         let rpc_client = Arc::clone(&self.rpc_client);
-        let ws_pool = Arc::clone(&self.ws_connection_pool);
 
-        let new_watched_tokens = self
+        let new_watched_tokens = Arc::clone(&self)
             .fetch_and_extend_tokens(session, ctx.tokens_lists_urls, ctx.custom_tokens)
             .await?;
 
@@ -163,36 +190,28 @@ impl SessionManager {
             ));
         }
 
-        let (sub, maybe_queue_endpoints) =
-            self.sub_manager.upsert(session, new_watched_tokens).await;
+        let (sub, maybe_queue_rx_out) = self.sub_manager.upsert(session, new_watched_tokens).await;
 
-        // `upsert` returns the queue endpoints only for a brand-new session —
-        // re-PUT'ing tokens for an already-live session yields `None` here,
-        // so we spawn the per-session watchers exactly once over its lifetime.
-        if let Some(queue_endpoints) = maybe_queue_endpoints {
-            tracing::info!(
+        if let Some(queue_result_rx) = maybe_queue_rx_out {
+            tracing::debug!(
                 session = %session,
                 "upsert: spawning watchers"
             );
 
-            let watcher = Arc::new(Watcher::new(
-                self.task_tracker.clone(),
+            let snapshot_updater = Arc::new(SnapshotUpdater::new(
+                self.lifecycle.task_tracker.clone(),
                 rpc_client,
                 sub,
-                ws_pool,
                 Arc::clone(&self.metrics),
                 session,
+                Arc::clone(&self.block_watcher),
             ));
 
-            watcher
-                .spawn_watchers(
-                    queue_endpoints.result_rx,
-                    queue_endpoints.refresh_queue,
-                    self.config.snapshot_interval,
-                )
+            snapshot_updater
+                .spawn_watchers(queue_result_rx, self.config.snapshot_interval)
                 .await;
 
-            tracing::info!(
+            tracing::debug!(
                 session = %session,
                 "upsert: watchers spawned"
             );
@@ -201,9 +220,39 @@ impl SessionManager {
         Ok(())
     }
 
+    pub fn is_healthy(&self) -> bool {
+        self.block_watcher.is_healthy() && self.event_dispatcher.is_healthy()
+    }
+
+    fn spawn_erc20_transfer_listener(
+        self: Arc<Self>,
+        mut receiver: mpsc::Receiver<Erc20TransferEvent>,
+    ) {
+        Arc::clone(&self).lifecycle.task_tracker.spawn(async move {
+            let this = Arc::clone(&self);
+            loop {
+                let this = Arc::clone(&this);
+
+                tokio::select! {
+                    _ = this.lifecycle.cancel_token.cancelled() => break,
+                    next = receiver.recv() => {
+                        match next {
+                            Some(event) => {
+                                if let Some(queue_handle) = this.sub_manager.get_owned_queue_if_watched(&event.owner, &event.token).await {
+                                    queue_handle.enqueue(event.token, event.block).await;
+                                }
+                            },
+                            None => break,
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // fetch tokens from lists and add weth9 as watched
     async fn fetch_and_extend_tokens(
-        &self,
+        self: Arc<Self>,
         session: Session,
         token_lists_urls: Vec<String>,
         custom_tokens: Vec<Address>,
@@ -255,7 +304,7 @@ impl SessionManager {
     }
 
     pub async fn create_sse_connection(
-        &self,
+        self: Arc<Self>,
         owner: Address,
         network: EvmNetwork,
     ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
@@ -270,13 +319,13 @@ impl SessionManager {
         // Build an initial stream that delivers the snapshot directly to this client only,
         // avoiding a broadcast that would redundantly push to all existing subscribers.
         let initial_stream = if balance_snapshot.is_empty() {
-            tracing::info!(
+            tracing::debug!(
                 session = %session,
                 "balance snapshot is empty"
             );
             stream::iter(vec![])
         } else {
-            tracing::info!(
+            tracing::debug!(
                 session = %session,
                 "sending first balance snapshot to new sse connection (full)"
             );

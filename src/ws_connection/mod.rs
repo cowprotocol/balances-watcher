@@ -61,6 +61,7 @@ where
 /// Suitable for the "one socket per logical signal" pattern — give every
 /// consumer its own `WsConnection` so failures and reconnect storms stay
 /// isolated.
+#[derive(Clone)]
 pub struct WsConnection {
     ws_url: String,
     metrics: Arc<Metrics>,

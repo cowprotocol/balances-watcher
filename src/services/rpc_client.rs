@@ -1,27 +1,47 @@
-//! HTTP-side RPC client: batched balance reads (Multicall3), concurrency cap,
-//! retry with transient/permanent classification, per-subcall failure
-//! isolation.
+//! HTTP-side RPC client. Two roles:
 //!
-//! ```text
-//!     fetch_balances_via_multicall
-//!         → semaphore permit
-//!         → try_block_and_aggregate_with_retries (backon + is_multicall_retryable)
-//!             → build_balance_of_multicall (rebuilt per attempt, MulticallBuilder is !Clone)
-//!             → alloy → eth_call → RPC provider
-//! ```
+//! 1. **Balance reads via Multicall3** — two public entrypoints:
+//!    - [`RpcClient::fetch_balances_via_multicall`] — all-or-nothing single-shot,
+//!      used by [`crate::services::balance_refresh_queue`] where event-driven
+//!      batches are small (debounced coalesce).
+//!    - [`RpcClient::fetch_balances_by_chunks`] — chunked streaming, used by
+//!      [`crate::services::snapshot_updater`]. Splits the token list into
+//!      [`MULTICALL_CHUNK_SIZE`]-sized chunks and yields each chunk's result
+//!      as an [`impl Stream`] as it completes — so partial diffs can flow to
+//!      SSE clients without waiting for the whole snapshot.
+//!
+//!    Both share the same per-chunk pipeline:
+//!    ```text
+//!        semaphore permit
+//!            → try_block_and_aggregate_with_retries (backon + is_multicall_retryable)
+//!                → build_balance_of_multicall (rebuilt per attempt, MulticallBuilder is !Clone)
+//!                    → alloy → eth_call → RPC provider
+//!    ```
+//!
+//! 2. **Log fetches for the process-wide event dispatcher** —
+//!    [`RpcClient::fetch_transfer_logs_for_block`] (ERC20 Transfer, global topic
+//!    filter) and [`RpcClient::fetch_weth9_logs_for_block`] (WETH9 Deposit /
+//!    Withdrawal, address-filtered). Called once per block by
+//!    [`crate::services::event_dispatcher::Erc20TransferEventDispatcher`].
 
 use crate::config::constants::MULTICALL_PERMITS_COUNT;
 use crate::evm::erc20::ERC20;
+use crate::evm::wrapped::WrappedToken;
 use crate::metrics::Metrics;
 use alloy::eips::BlockId;
 use alloy::network::Ethereum;
 use alloy::primitives::{Address, BlockNumber, U256};
-use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError};
-use alloy::sol_types::SolCall;
+use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError, Provider};
+use alloy::rpc::types::{Filter, Log};
+use alloy::sol_types::{SolCall, SolEvent};
 use backon::{ExponentialBuilder, Retryable};
+use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio_stream::Stream;
+
+const MULTICALL_CHUNK_SIZE: usize = 500;
 
 /// `(token → balance, block_number_the_batch_was_read_at)`.
 pub type BalancesWithBlock = (HashMap<Address, U256>, BlockNumber);
@@ -52,6 +72,75 @@ impl RpcClient {
             request_semaphore: tokio::sync::Semaphore::new(MULTICALL_PERMITS_COUNT),
             metrics,
         }
+    }
+
+    /// Fetch every ERC20 `Transfer` log emitted in `block_number`. Uses HTTP
+    /// `eth_getLogs` (server-side topic filter); returns 100% of matching
+    /// logs in the block, in contrast to WS `eth_subscribe` whose internal
+    /// buffer drops the tail of burst blocks.
+    ///
+    /// Transient RPC failures are retried per [`Self::backoff`]; the final
+    /// `Err` surfaces as [`RpcError::Exhausted`].
+    pub async fn fetch_transfer_logs_for_block(
+        &self,
+        block_number: BlockNumber,
+    ) -> Result<Vec<Log>, RpcError> {
+        let filter = Filter::new()
+            .from_block(block_number)
+            .to_block(block_number)
+            .event_signature(ERC20::Transfer::SIGNATURE_HASH);
+
+        self.get_logs_with_retries(filter).await
+    }
+
+    /// Fetch WETH9 `Deposit` and `Withdrawal` logs emitted in `block_number`,
+    /// address-filtered to the canonical WETH9 contract for this chain.
+    /// Needed alongside [`Self::fetch_transfer_logs_for_block`] because the
+    /// canonical WETH9 impl does not emit `Transfer` on wrap / unwrap.
+    ///
+    /// Same retry policy as [`Self::fetch_transfer_logs_for_block`].
+    pub async fn fetch_weth9_logs_for_block(
+        &self,
+        weth9_address: Address,
+        block_number: BlockNumber,
+    ) -> Result<Vec<Log>, RpcError> {
+        let event_signatures = vec![
+            WrappedToken::Deposit::SIGNATURE_HASH,
+            WrappedToken::Withdrawal::SIGNATURE_HASH,
+        ];
+
+        let filter = Filter::new()
+            .from_block(block_number)
+            .to_block(block_number)
+            .address(weth9_address)
+            .event_signature(event_signatures);
+
+        self.get_logs_with_retries(filter).await
+    }
+
+    /// Run `eth_getLogs` with retry/backoff. Retries every error unconditionally
+    /// — we construct all filters ourselves, so "permanent" errors (bad filter,
+    /// unknown topic) are not expected here. Real-world failures are transport
+    /// hiccups (5xx, connection reset, timeout) and "block not found" while
+    /// the node is briefly behind the head; both resolve within one backoff
+    /// window.
+    async fn get_logs_with_retries(&self, filter: Filter) -> Result<Vec<Log>, RpcError> {
+        let metrics = Arc::clone(&self.metrics);
+        (|| {
+            let filter = filter.clone();
+            async move { self.provider.get_logs(&filter).await }
+        })
+        .retry(Self::backoff())
+        .notify(move |err, duration| {
+            metrics.eth_get_logs_failed_total.increment(1);
+            tracing::warn!(
+                error = %err,
+                duration = ?duration,
+                "eth_getLogs attempt failed, will retry"
+            );
+        })
+        .await
+        .map_err(|err| RpcError::Exhausted(err.to_string()))
     }
 
     /// Read ERC20 balances for `owner` at `block_id`, one Multicall3
@@ -99,7 +188,7 @@ impl RpcClient {
             })?
         };
 
-        tracing::info!(
+        tracing::debug!(
             time_ms = t0.elapsed().as_millis(),
             "tryBlockAndAggregate balances complete"
         );
@@ -142,6 +231,140 @@ impl RpcClient {
         Ok((balances, block_number))
     }
 
+    /// Streaming variant of [`Self::fetch_balances_via_multicall`]: splits
+    /// `tokens` into [`MULTICALL_CHUNK_SIZE`]-sized chunks, fires one multicall
+    /// per chunk in parallel via [`FuturesUnordered`], and yields each chunk's
+    /// result as it lands.
+    ///
+    /// Enables partial-first delivery to SSE clients: the snapshot updater
+    /// broadcasts a diff after every chunk instead of waiting for the whole
+    /// token list to resolve. On a 1000-token list this drops
+    /// `session → first_snapshot` roughly by a factor of `ceil(N / chunk_size)`.
+    ///
+    /// **Ordering.** Chunks are `FuturesUnordered` — items arrive out of
+    /// submission order. Callers must not assume any particular chunk lands
+    /// first.
+    ///
+    /// **Block number per item.** Each chunk carries its own `block_number`
+    /// from `tryBlockAndAggregate`. Under normal head advancement two chunks
+    /// in the same call may land on adjacent blocks — the per-token diff
+    /// path in `Subscription::update_balances_and_take_diff` is block-guarded
+    /// (`current.block_number < new.block_number`), so this is safe.
+    ///
+    /// **Failure isolation.** An `Err` item means that specific chunk's
+    /// multicall exhausted retries or hit a permanent error — sibling chunks
+    /// are unaffected. Callers decide whether to broadcast the failure or
+    /// silently skip. Counter: `snapshot_chunk_failed_total`.
+    ///
+    /// **Concurrency cap.** Each chunk future acquires one permit from
+    /// `request_semaphore` (capacity [`MULTICALL_PERMITS_COUNT`]) before
+    /// issuing its multicall.
+    pub fn fetch_balances_by_chunks(
+        self: Arc<Self>,
+        owner: Address,
+        tokens: &[Address],
+        block_id: BlockId,
+    ) -> impl Stream<Item = Result<BalancesWithBlock, RpcError>> {
+        let chunks = {
+            let mut sorted = tokens.to_vec();
+            sorted.sort();
+            sorted
+                .chunks(MULTICALL_CHUNK_SIZE)
+                .map(|chunk| chunk.to_vec())
+                .collect::<Vec<_>>()
+        };
+
+        chunks
+            .into_iter()
+            .map(move |chunk| {
+                let this = Arc::clone(&self);
+
+                async move {
+                    let _permit = this.request_semaphore.acquire().await;
+                    let t0 = Instant::now();
+                    let metrics = Arc::clone(&this.metrics);
+
+                    let (block_number, call_result) = this
+                        .try_block_and_aggregate_with_retries(|| {
+                            Self::build_balance_of_multicall(
+                                &this.provider,
+                                &chunk,
+                                block_id,
+                                owner,
+                            )
+                        })
+                        .await
+                        .inspect(move |_| {
+                            let metrics = Arc::clone(&metrics);
+                            metrics.multicall_total.increment(1);
+                            metrics
+                                .multicall_duration_ms
+                                .record(t0.elapsed().as_millis() as f64);
+                        })
+                        .inspect_err(|_| {
+                            this.metrics
+                                .provider_exhausted_with_retries_total
+                                .increment(1);
+                        })?;
+
+                    tracing::debug!(
+                        time_ms = t0.elapsed().as_millis(),
+                        owner = %owner,
+                        chunk_size = chunk.len(),
+                        block = block_number,
+                        "tryBlockAndAggregate chunk complete"
+                    );
+
+                    let balances_map = this.map_balance_result(&chunk, call_result);
+                    Ok((balances_map, block_number))
+                }
+            })
+            .collect::<FuturesUnordered<_>>()
+    }
+
+    fn map_balance_result(
+        &self,
+        erc20_tokens_chunk: &[Address],
+        subcalls_result: Vec<Result<U256, Failure>>,
+    ) -> HashMap<Address, U256> {
+        let mut balances: HashMap<Address, U256> = HashMap::new();
+
+        // We call multicall with `requireSuccess=false`, so per-subcall failures
+        // are expected and non-fatal: dead/migrated/proxy-broken ERC20s appear
+        // routinely in large token lists. Log, count, and skip the offending
+        // token; the rest of the batch still flows to the client. A full-batch
+        // failure is a different path — handled above by `provider_exhausted_with_retries_total`.
+        for (i, erc20_token) in erc20_tokens_chunk.iter().enumerate() {
+            let Some(sub_call_result) = subcalls_result.get(i) else {
+                self.metrics.multicall_subcall_failed_total.increment(1);
+                tracing::warn!(
+                    token = %erc20_token,
+                    index = i,
+                    "multicall response is not matched to current token list size"
+                );
+                continue;
+            };
+
+            match sub_call_result {
+                Ok(balance) => {
+                    balances.insert(*erc20_token, *balance);
+                }
+                Err(failure) => {
+                    self.metrics.multicall_subcall_failed_total.increment(1);
+                    // `Failure` covers both subcall revert and abi-decode mismatch;
+                    // distinguish heuristically via return_data length when triaging.
+                    tracing::warn!(
+                        token = %erc20_token,
+                        return_data_len = failure.return_data.len(),
+                        "multicall subcall failed, skipping token"
+                    );
+                }
+            }
+        }
+
+        balances
+    }
+
     /// Build a `MulticallBuilder` of `balanceOf(owner)` for every `token`,
     /// pinned to `block_id`.
     fn build_balance_of_multicall(
@@ -170,7 +393,7 @@ impl RpcClient {
     async fn try_block_and_aggregate_with_retries<D, F>(
         &self,
         build_multicall: F,
-    ) -> Result<(u64, Vec<Result<D::Return, Failure>>), RpcError>
+    ) -> Result<(BlockNumber, Vec<Result<D::Return, Failure>>), RpcError>
     where
         D: SolCall + Send + Sync + Unpin + 'static,
         F: Fn() -> DynMulticallBuilder<D> + Clone + Send + Sync,

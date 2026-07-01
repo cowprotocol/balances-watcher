@@ -19,15 +19,24 @@ ingress — see [Deployment model](#deployment-model).
 
 - Real-time balance updates via **Server-Sent Events (SSE)**
 - **Multicall3** for efficient batch balance reads (one `balanceOf` per watched
-  token, coalesced into a single multicall round-trip)
-- **WebSocket subscriptions** for ERC20 `Transfer` events + WETH9 `Deposit`/`Withdrawal`
-  events, with automatic reconnect and resubscription
+  token, chunked into ≤ 500-token batches and streamed back partial-first)
+- **Chunked streaming initial snapshot** — first ~500 tokens land within
+  seconds, the rest follow as their chunks complete; SSE clients see partial
+  diffs immediately instead of waiting for the whole watched-list
+- **Process-wide HTTP-pull event dispatcher** — a single
+  `Erc20TransferEventDispatcher` runs one `eth_getLogs` per block for ERC20
+  `Transfer` and WETH9 `Deposit`/`Withdrawal`, then fans matched
+  `(owner, token)` pairs into per-session refresh queues. Cost is fixed per
+  block regardless of active session count.
 - **Event batching** via a 300 ms debounce queue — bursts of transfers collapse
   into a single multicall
 - **Block-aware diffing** — stale updates can't overwrite fresher ones
 - **Diff-only SSE events** after the initial snapshot (only changed balances are sent)
 - **Shared subscriptions** — N SSE clients watching the same wallet pay for one
   set of background watchers
+- **Block-lag health probe** — dispatcher goes unhealthy if it falls behind
+  chain head by more than `MAX_BLOCK_LAG` blocks; block delivery uses a
+  bounded FIFO channel with overflow detection
 - **Token-list caching** with 5 h TTL + concurrent-request deduplication
 - **Graceful shutdown** — `SIGTERM` cancels every spawned task via
   `CancellationToken`; in-flight work is awaited (up to 10 s) before exit
@@ -130,14 +139,21 @@ data: {"code":503,"message":"WebSocket connection lost permanently"}
 
 ### `GET /health` — health probe
 
-Passive WS-liveness probe. Returns `200 OK` if the process-wide `BlockWatcher`
-has an active `eth_subscribe("newHeads")` stream that has produced at least one
-header since the most recent reconnect, `503 Service Unavailable` otherwise.
+Returns `200 OK` iff **both** of the following are green:
 
-The handler is a pure atomic read — no RPC round-trip per probe. The flag is
-updated in the background by the watcher task, which uses exponential backoff
-with jitter (1s → 30s, infinite retries) and a stall watchdog (`block_time × 3`)
-that flips the flag red if no header arrives in the window.
+1. **BlockWatcher liveness** — the process-wide `eth_subscribe("newHeads")`
+   stream has produced at least one header since the last reconnect.
+   Backed by an infinite-retry reconnect loop (exponential backoff 1 s → 30 s
+   with jitter) and a stall watchdog (`block_time × 3`) that flips the flag
+   red if no header arrives in the window.
+2. **Event dispatcher lag** — the process-wide event dispatcher's
+   `last_processed_block` is within `MAX_BLOCK_LAG` (5) of the chain head.
+   Warm-up (no block seen yet, or no block processed yet) returns healthy
+   to avoid flapping during initial multicall storm.
+
+The handler is a pure atomic read — no RPC round-trip per probe. Both signals
+are updated in the background: `BlockWatcher` on every incoming header,
+dispatcher on every completed block.
 
 Used by Kubernetes `readinessProbe` + `livenessProbe`.
 
@@ -191,7 +207,10 @@ sequenceDiagram
     Server-->>Client: SSE: balance_update (full snapshot)
 
     loop ERC20 Transfer / WETH Deposit / Withdrawal
-        Blockchain-->>Server: Event detected (batched via queue, 300 ms debounce)
+        Blockchain-->>Server: newHeads notification (per-block WS)
+        Server->>Blockchain: eth_getLogs for Transfer + WETH9 (HTTP)
+        Blockchain-->>Server: logs for the block
+        Note over Server: Route matched (owner, token) into per-session queue<br/>coalesce for 300 ms<br/>then one multicall per queued owner
         Server-->>Client: SSE: balance_update (diff only)
     end
 
@@ -231,12 +250,15 @@ flowchart TB
         CT["CancellationToken"]
     end
 
+    subgraph ProcessWide["Process-wide (shared across sessions)"]
+        BW["BlockWatcher<br/>WS newHeads<br/>+ reconnect + stall watchdog"]
+        ED["Erc20TransferEventDispatcher<br/>per-block eth_getLogs × 2<br/>(Transfer + WETH9)"]
+        Router["SessionManager router<br/>get_owned_queue_if_watched()"]
+    end
+
     subgraph Watcher["Watcher tasks (per session)"]
-        T1["Snapshot updater<br/>periodic timer + sync_notify"]
-        T2a["ERC20 Transfer listener<br/>topic: from = owner"]
-        T2b["ERC20 Transfer listener<br/>topic: to = owner"]
-        T3["WETH9 listener<br/>Deposit / Withdrawal"]
-        T4["Queue result receiver"]
+        T1["Snapshot updater<br/>reconnect trigger + interval + notifier<br/>streamed chunked multicall"]
+        T4["Queue result receiver<br/>drains BalanceRefreshQueue"]
     end
 
     subgraph Queue["BalanceRefreshQueue (300 ms debounce)"]
@@ -245,9 +267,9 @@ flowchart TB
     end
 
     subgraph Blockchain["RPC Provider"]
-        WS["WebSocket provider<br/>log subscriptions<br/>+ pool + auto-reconnect"]
-        HTTP["HTTP provider<br/>multicall reads<br/>+ semaphore + backoff"]
-        MC["Multicall3<br/>tryBlockAndAggregate"]
+        WS["WebSocket provider<br/>newHeads only<br/>+ auto-reconnect"]
+        HTTP["HTTP provider<br/>eth_getLogs + multicall reads<br/>+ semaphore + backoff"]
+        MC["Multicall3<br/>tryBlockAndAggregate<br/>chunked (500 tokens/chunk)"]
     end
 
     FE -->|"POST/PUT"| EX
@@ -267,25 +289,25 @@ flowchart TB
     SubMgr -->|"create / update"| Session
     SM -->|"spawn once"| Watcher
 
-    T2a -->|"subscribe_logs"| WS
-    T2b -->|"subscribe_logs"| WS
-    T3 -->|"subscribe_logs"| WS
+    BW -->|"subscribe_blocks"| WS
+    BW -->|"mpsc BlockNumber"| ED
+    BW -->|"watch_connected"| T1
 
-    T2a -->|"upsert_delayed_call"| CQ
-    T2b -->|"upsert_delayed_call"| CQ
-    T3 -->|"upsert_delayed_call"| CQ
+    ED -->|"eth_getLogs per block"| HTTP
+    ED -->|"mpsc Erc20TransferEvent"| Router
+    Router -->|"enqueue"| CQ
 
     CQ -->|"300 ms debounce"| FL
     FL -->|"fetch_balances_via_multicall"| MC
     MC --> HTTP
 
-    FL -->|"QueueMessage"| T4
+    FL -->|"BalancesWithBlock"| T4
     T4 -->|"update_balances_and_take_diff"| Snap
     T4 -->|"broadcast diff"| BC
 
-    T1 -->|"fetch all balances"| MC
-    T1 -->|"update_balances_and_take_diff"| Snap
-    T1 -->|"broadcast diff"| BC
+    T1 -->|"fetch_balances (streamed chunks)"| MC
+    T1 -->|"per-chunk diff"| Snap
+    T1 -->|"per-chunk broadcast"| BC
 
     BC -->|"BalanceEvent"| SSE
 
@@ -378,7 +400,7 @@ docker-compose logs -f
 
 ## Limits & internal tunables
 
-These live in `src/config/constants.rs`:
+Compile-time in `src/config/constants.rs` (and a few module-local `const`s):
 
 | Limit | Value | Description |
 |-------|-------|-------------|
@@ -387,20 +409,39 @@ These live in `src/config/constants.rs`:
 | Session idle TTL | `5 s` | Sessions with no SSE clients are cancelled after this idle window. |
 | Broadcast channel capacity | `256` | Per-subscription buffer of pending events. |
 | Calls-queue debounce | `300 ms` | Window over which transfer events coalesce into a single multicall. |
-| Multicall concurrency | `200` permits | Semaphore around concurrent multicall requests. |
-| WS clients per connection | `300` | Cap for the WebSocket connection pool. |
+| Multicall concurrency | `300` permits | Semaphore around concurrent multicall requests. |
+| Multicall chunk size | `500` tokens | Watched list is split into chunks of this size for streaming. |
+| Block channel capacity | `256` | Bounded FIFO from `BlockWatcher` → `Erc20TransferEventDispatcher`; overflow drops + logs error + increments a counter. |
+| Max dispatcher lag | `5` blocks | `/health` flips red if the dispatcher is more than this many blocks behind the chain head after warm-up. |
+| BlockWatcher stall timeout | `block_time × 3` | Forces a fresh WS subscription if no header arrives in this window. |
 
 ## On-chain events watched
 
 | Event | Contract | Triggers |
 |---|---|---|
-| `Transfer(from indexed, to indexed, value)` | any ERC20 in the watched set | balance refresh for the token |
+| `Transfer(from indexed, to indexed, value)` | any ERC20 emitting this event | balance refresh for matched `(owner, token)` |
 | `Deposit(dst indexed, wad)` | WETH9 | balance refresh for WETH |
 | `Withdrawal(src indexed, wad)` | WETH9 | balance refresh for WETH |
 
-Filtering is done client-side (the subscription is `Transfer` topic + owner
-indexed), so transfers involving tokens outside the watched set are dropped
-before any RPC roundtrip.
+**Delivery** is HTTP-pull, not WS-push. On every new `newHeads`
+notification (delivered via the process-wide `BlockWatcher`), the shared
+`Erc20TransferEventDispatcher` runs exactly two `eth_getLogs` calls for that
+block:
+
+- **ERC20 Transfer** — `topics[0] = Transfer::SIGNATURE_HASH`, no address
+  filter (global). Client-side we route each log by `from` / `to` into the
+  matching session's queue via
+  `SubscriptionManager::get_owned_queue_if_watched(owner, token)`. Logs for
+  owners / tokens not in any watched set are dropped in-process.
+- **WETH9 Deposit / Withdrawal** — filtered node-side by `address = weth9`
+  and both event signatures. Canonical WETH9 does **not** emit a `Transfer`
+  on `deposit()` / `withdraw()`, so wrap/unwrap would be invisible to the
+  global Transfer path.
+
+This gives 100 % delivery (`eth_getLogs` returns the full set for the block,
+unlike WS subscriptions that silently drop tail events during block bursts)
+and fixed cost per block (two HTTP RPCs / ~12 s on mainnet) regardless of
+active session count.
 
 ## Project structure
 
@@ -437,14 +478,14 @@ src/
 │   └── wrapped.rs          WETH9 Deposit / Withdrawal
 │
 ├── services/
-│   ├── block_watcher.rs    process-wide WS newHeads subscription; backs /health via is_healthy()
-│   ├── session_manager.rs  per-network orchestrator: token lists, watchers, SSE bridge
+│   ├── block_watcher.rs    process-wide WS newHeads subscription; backs /health via is_healthy(); fans block numbers into a bounded FIFO consumed by the dispatcher
+│   ├── event_dispatcher.rs process-wide Erc20TransferEventDispatcher: per-block eth_getLogs (Transfer + WETH9 Deposit/Withdrawal), fans matched (owner, token) events into per-session queues
+│   ├── session_manager.rs  per-network orchestrator: token lists, watchers, SSE bridge, dispatcher router
 │   ├── subscription_manager.rs  session registry, shared subs, idle cleanup
 │   ├── subscription.rs     per-session state (snapshot, broadcast, watched set)
-│   ├── watcher.rs          spawns 5 background tasks per session (snapshot updater, 2× ERC20 listeners, WETH9, queue receiver)
-│   ├── calls_queue.rs      BalanceRefreshQueue: 300 ms debounce + coalesce-by-token
-│   ├── rpc_client.rs       HTTP RPC client: multicall (semaphore + retry) + healthcheck (get_block_number)
-│   ├── ws_connection_pool.rs  shared WS providers (max 300 subs each)
+│   ├── snapshot_updater.rs spawns 2 background tasks per session (snapshot updater — streamed chunked multicall + queue result receiver)
+│   ├── balance_refresh_queue.rs  BalanceRefreshQueue: 300 ms debounce + coalesce-by-token
+│   ├── rpc_client.rs       HTTP RPC client: multicall (chunked streaming + all-or-nothing paths) + log fetches for the dispatcher
 │   ├── token_list_fetcher.rs  HTTP + cache + singleflight dedup
 │   └── cleanup_stream.rs   Drop guard that unsubscribes when SSE stream is dropped
 │
