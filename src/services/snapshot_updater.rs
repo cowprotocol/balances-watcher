@@ -103,14 +103,13 @@ impl SnapshotUpdater {
 
     // Periodic full balance snapshot + on-demand resync.
     //
-    // Stays parked until the first refresh signal arrives (cold-start race
-    // closed: log subscriptions must be live before we issue a multicall —
-    // otherwise Transfer events between the multicall block and the WS
-    // subscribe handshake would be silently dropped). After the first
-    // signal:
+    // Stays parked until BlockWatcher connects (cold-start race closed: no
+    // point issuing a multicall before we have a live head — the dispatcher
+    // wouldn't be producing events yet, and the snapshot would be based on
+    // a block we cannot correlate with anything). After first connect:
     // - `interval.tick()` — periodic refresh every `interval_secs`.
-    // - notifier — on-demand resync (new tokens via `extend_tokens`, WS
-    //   resubscribe after disconnect, cold start).
+    // - notifier — on-demand resync (watched-token list change via
+    //   `set_watched_tokens`, BlockWatcher reconnect).
     async fn spawn_snapshot_updater(self: Arc<Self>, interval_secs: usize) {
         let sub = Arc::clone(&self.sub);
         let cancel = sub.cancellable();
@@ -201,7 +200,7 @@ impl SnapshotUpdater {
                 let this = Arc::clone(&this);
                 tokio::select! {
                     _ = cancel.cancelled() => {
-                        tracing::info!("cancelled spawn_queue_result_receiver watcher");
+                        tracing::info!("queue result receiver cancelled");
                         break;
                     },
                     msg = rx.recv() => {
