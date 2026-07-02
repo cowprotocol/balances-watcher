@@ -21,6 +21,7 @@ use crate::evm::wrapped::WrappedToken;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
+use crate::services::health::SubsystemHealth;
 use crate::services::rpc_client::RpcClient;
 use alloy::primitives::{Address, BlockNumber};
 use alloy::rpc::types::Log;
@@ -79,36 +80,42 @@ impl Erc20TransferEventDispatcher {
         dispatcher
     }
 
-    /// `true` once the dispatcher has seen its first block notification.
-    /// Goes to `false` only on full process shutdown; per-block fetch
-    /// failures don't toggle it (they're logged but the loop continues).
-    pub fn is_healthy(&self) -> bool {
+    /// Structured health for `/health`. Healthy from the moment the dispatcher
+    /// has seen its first block notification, unless block lag has climbed
+    /// past `MAX_BLOCK_LAG`. Per-block fetch failures do NOT toggle this —
+    /// they're logged and the loop continues; only sustained lag is unhealthy.
+    pub fn health_status(&self) -> SubsystemHealth {
         if !self.is_active.load(Ordering::Relaxed) {
-            return false;
+            return SubsystemHealth::Unhealthy(
+                "dispatcher not active yet (startup) or shut down".into(),
+            );
         }
 
         let current_head = self.block_watcher.latest_block();
         if current_head == 0 {
             // warm up
-            return true;
+            return SubsystemHealth::Healthy;
         }
 
         let latest_processed_block = self.latest_processed_block.load(Ordering::Relaxed);
         if latest_processed_block == 0 {
-            return true;
+            return SubsystemHealth::Healthy;
         }
 
         let lag = current_head.saturating_sub(latest_processed_block);
-        let is_lag = lag > MAX_BLOCK_LAG;
-        if is_lag {
+        if lag > MAX_BLOCK_LAG {
             tracing::warn!(
                 current_head = current_head,
                 lag,
                 latest_processed_block,
                 "event dispatcher: lag exceeded threshold, dispatcher unhealthy"
             );
+            return SubsystemHealth::Unhealthy(format!(
+                "block lag {lag} exceeds max {MAX_BLOCK_LAG} \
+                 (head={current_head}, latest_processed={latest_processed_block})"
+            ));
         }
-        !is_lag
+        SubsystemHealth::Healthy
     }
 
     async fn run(&self, mut block_number_rx: mpsc::Receiver<BlockNumber>) {
