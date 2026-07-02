@@ -1,6 +1,6 @@
 //! Process-wide WS subscription to `newHeads`. Serves three roles:
 //!
-//! 1. **Health canary** — [`BlockWatcher::is_healthy`] backs `/health`. A
+//! 1. **Health canary** — [`BlockWatcher::health_status`] backs `/health`. A
 //!    single [`std::sync::atomic::AtomicBool`] flipped `true` on first header,
 //!    `false` on disconnect/stall/shutdown. Downstream health checks
 //!    (dispatcher lag) also read `latest_block()` from here.
@@ -27,6 +27,7 @@
 use crate::domain::EvmNetwork;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
+use crate::services::health::SubsystemHealth;
 use crate::ws_connection::{ManagedWsSubscription, WsConnection};
 use alloy::primitives::BlockNumber;
 use alloy::rpc::types::Header;
@@ -85,10 +86,19 @@ impl BlockWatcher {
         (watcher, latest_block_rx)
     }
 
-    /// `true` iff the watcher has received at least one header since the most
-    /// recent reconnect and the stream has not since closed or stalled.
-    pub fn is_healthy(&self) -> bool {
-        self.connected.load(Ordering::Relaxed)
+    /// Structured health for `/health`. Healthy iff the watcher has received
+    /// at least one header since the most recent reconnect and the stream has
+    /// not since closed or stalled. The `Unhealthy` variant carries a concrete
+    /// reason string.
+    pub fn health_status(&self) -> SubsystemHealth {
+        if self.connected.load(Ordering::Relaxed) {
+            SubsystemHealth::Healthy
+        } else {
+            SubsystemHealth::Unhealthy(format!(
+                "ws newHeads disconnected (last observed block={})",
+                self.latest_block.load(Ordering::Relaxed)
+            ))
+        }
     }
 
     pub fn watch_connected(&self) -> watch::Receiver<bool> {

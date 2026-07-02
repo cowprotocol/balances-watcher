@@ -5,6 +5,7 @@ use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::cleanup_stream;
 use crate::services::event_dispatcher::{Erc20TransferEvent, Erc20TransferEventDispatcher};
+use crate::services::health::AppHealth;
 use crate::services::rpc_client::RpcClient;
 use crate::services::snapshot_updater::SnapshotUpdater;
 use crate::services::subscription_manager::{SubscriptionError, SubscriptionManager};
@@ -220,8 +221,13 @@ impl SessionManager {
         Ok(())
     }
 
-    pub fn is_healthy(&self) -> bool {
-        self.block_watcher.is_healthy() && self.event_dispatcher.is_healthy()
+    /// Aggregate health across all owned subsystems. Consumed by `/health`
+    /// to log the exact failing reason before returning 503.
+    pub fn health_status(&self) -> AppHealth {
+        AppHealth {
+            block_watcher: self.block_watcher.health_status(),
+            event_dispatcher: self.event_dispatcher.health_status(),
+        }
     }
 
     fn spawn_erc20_transfer_listener(
