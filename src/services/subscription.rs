@@ -9,11 +9,11 @@
 //! ```text
 //!         producers                     consumers
 //!     ┌──────────────────┐          ┌─────────────────────┐
-//!     │ extend_tokens    │──►       │ is_watched          │
+//!     │ set_watched…     │──►       │ is_watched          │
 //!     │ update_balances… │──►       │ current_snapshot    │
 //!     │ emit_refresh     │──Notify─►│ snapshot_updater    │
 //!     │ send_event       │─broadcast│ SSE clients         │
-//!     │ cancel           │─token───►│ all watcher tasks   │
+//!     │ cancel           │─token───►│ all worker tasks    │
 //!     └──────────────────┘          └─────────────────────┘
 //! ```
 
@@ -52,8 +52,9 @@ impl Subscription {
             balances_snapshot: RwLock::new(HashMap::new()),
             cancellation_token,
             tokens: RwLock::new(tokens),
-            // wakes the snapshot updater on any of: cold-start WS subscribe,
-            // WS resubscribe after disconnect, watched-token list extension.
+            // wakes the snapshot updater on any of: cold-start (first
+            // BlockWatcher connect), BlockWatcher reconnect, watched-token
+            // list change.
             snapshot_refresh_notify: Arc::new(Notify::new()),
             sender,
             metrics,

@@ -4,7 +4,7 @@
 //! arbitrates between HTTP handlers and a background cleanup task.
 //!
 //! - [`upsert`](SubscriptionManager::upsert) — create a session (spawning a
-//!   fresh refresh-queue worker and returning [`RefreshQueueEndpoints`] to the
+//!   fresh refresh-queue worker and returning its result receiver to the
 //!   caller), or PUT-replace its watched-token set via
 //!   [`Subscription::set_watched_tokens`]. Forces a fresh multicall via
 //!   [`Subscription::emit_balance_snapshot_refresh`] only when the set
@@ -18,8 +18,9 @@
 //! - [`spawn_cleanup`](SubscriptionManager::spawn_cleanup) — background task
 //!   ticking every `SESSION_TTL`. Drops sessions with zero clients idle past
 //!   the TTL, cancelling their per-session token (which unwinds every
-//!   watcher worker in [`crate::services::watcher`] and, transitively, the
-//!   refresh-queue worker once its last handle is gone). On shutdown,
+//!   snapshot updater worker in [`crate::services::snapshot_updater`] and,
+//!   transitively, the refresh-queue worker once its last handle is gone). On
+//!   shutdown,
 //!   broadcasts a 503 close event to every client and clears the map.
 //!
 //! `SubWithCounter` is the per-session bookkeeping cell — `clients`,
@@ -89,7 +90,8 @@ impl SubscriptionManager {
     /// Create or update a session.
     ///
     /// On **create**: spawns a fresh [`BalanceRefreshQueue`] worker and returns
-    /// `Some(RefreshQueueEndpoints)` so the caller can wire up its `Watcher`.
+    /// `Some(result_rx)` so the caller can wire up its
+    /// [`crate::services::snapshot_updater::SnapshotUpdater`].
     /// On **update** (the session already exists): replaces the watched-token
     /// set, optionally forces a snapshot refresh, and returns `None` in the
     /// second slot — the worker is already running.
