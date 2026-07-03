@@ -119,6 +119,10 @@ impl SnapshotUpdater {
             // Wait for node ws connection is being established
             let mut rx_connected = self.block_watcher.watch_connected();
             loop {
+                if cancel.is_cancelled() {
+                    return;
+                }
+
                 if !*rx_connected.borrow_and_update() {
                     tracing::debug!(owner = %owner, "snapshot updater blocked, waiting for BlockWatcher connection");
 
