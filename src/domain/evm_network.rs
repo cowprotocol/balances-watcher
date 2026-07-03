@@ -63,7 +63,13 @@ impl EvmNetwork {
             EvmNetwork::Arbitrum => Duration::from_millis(250),
             EvmNetwork::Avalanche => Duration::from_secs(2),
             EvmNetwork::Ink => Duration::from_secs(1),
-            EvmNetwork::Linea => Duration::from_secs(2),
+            // Linea's sequencer batches transactions and produces blocks in
+            // bursts rather than on a steady clock — gaps of 8-10s between
+            // blocks are routine (observed directly against the OVH node),
+            // well above a naive 2s estimate. Understating this starves the
+            // block_watcher stall timeout (block_time * STALL_TIMEOUT_BLOCKS),
+            // causing spurious "stream stalled" reconnects and /health flaps.
+            EvmNetwork::Linea => Duration::from_secs(5),
             EvmNetwork::Sepolia => Duration::from_secs(12),
         }
     }
