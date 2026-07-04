@@ -271,11 +271,12 @@ impl SnapshotUpdater {
             "snapshot updater fetching balances"
         );
 
-        let mut results = Arc::clone(&self.rpc_client).fetch_balances_by_chunks(
+        let results = Arc::clone(&self.rpc_client).fetch_balances_by_chunks(
             self.session.owner,
             &tokens,
             BlockId::latest(),
         );
+        tokio::pin!(results);
 
         loop {
             let this = Arc::clone(&self);
