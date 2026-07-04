@@ -285,12 +285,7 @@ impl RpcClient {
 
                 let (block_number, call_result) = this
                     .try_block_and_aggregate_with_retries(|| {
-                        Self::build_balance_of_multicall(
-                            &this.provider,
-                            &chunk,
-                            block_id,
-                            owner,
-                        )
+                        Self::build_balance_of_multicall(&this.provider, &chunk, block_id, owner)
                     })
                     .await
                     .inspect(move |_| {
