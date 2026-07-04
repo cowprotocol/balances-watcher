@@ -35,7 +35,7 @@ use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, Multical
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::{SolCall, SolEvent};
 use backon::{ExponentialBuilder, Retryable};
-use futures::stream::FuturesUnordered;
+use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -275,52 +275,44 @@ impl RpcClient {
                 .collect::<Vec<_>>()
         };
 
-        chunks
-            .into_iter()
-            .map(move |chunk| {
-                let this = Arc::clone(&self);
+        stream::iter(chunks).then(move |chunk| {
+            let this = Arc::clone(&self);
 
-                async move {
-                    let _permit = this.request_semaphore.acquire().await;
-                    let t0 = Instant::now();
-                    let metrics = Arc::clone(&this.metrics);
+            async move {
+                let _permit = this.request_semaphore.acquire().await;
+                let t0 = Instant::now();
+                let metrics = Arc::clone(&this.metrics);
 
-                    let (block_number, call_result) = this
-                        .try_block_and_aggregate_with_retries(|| {
-                            Self::build_balance_of_multicall(
-                                &this.provider,
-                                &chunk,
-                                block_id,
-                                owner,
-                            )
-                        })
-                        .await
-                        .inspect(move |_| {
-                            let metrics = Arc::clone(&metrics);
-                            metrics.multicall_total.increment(1);
-                            metrics
-                                .multicall_duration_ms
-                                .record(t0.elapsed().as_millis() as f64);
-                        })
-                        .inspect_err(|_| {
-                            this.metrics
-                                .provider_exhausted_with_retries_total
-                                .increment(1);
-                        })?;
+                let (block_number, call_result) = this
+                    .try_block_and_aggregate_with_retries(|| {
+                        Self::build_balance_of_multicall(&this.provider, &chunk, block_id, owner)
+                    })
+                    .await
+                    .inspect(move |_| {
+                        let metrics = Arc::clone(&metrics);
+                        metrics.multicall_total.increment(1);
+                        metrics
+                            .multicall_duration_ms
+                            .record(t0.elapsed().as_millis() as f64);
+                    })
+                    .inspect_err(|_| {
+                        this.metrics
+                            .provider_exhausted_with_retries_total
+                            .increment(1);
+                    })?;
 
-                    tracing::debug!(
-                        time_ms = t0.elapsed().as_millis(),
-                        owner = %owner,
-                        chunk_size = chunk.len(),
-                        block = block_number,
-                        "tryBlockAndAggregate chunk complete"
-                    );
+                tracing::debug!(
+                    time_ms = t0.elapsed().as_millis(),
+                    owner = %owner,
+                    chunk_size = chunk.len(),
+                    block = block_number,
+                    "tryBlockAndAggregate chunk complete"
+                );
 
-                    let balances_map = this.map_balance_result(&chunk, call_result);
-                    Ok((balances_map, block_number))
-                }
-            })
-            .collect::<FuturesUnordered<_>>()
+                let balances_map = this.map_balance_result(&chunk, call_result);
+                Ok((balances_map, block_number))
+            }
+        })
     }
 
     fn map_balance_result(
