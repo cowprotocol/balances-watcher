@@ -9,6 +9,7 @@ use std::time::Instant;
 use utoipa::ToSchema;
 
 use crate::api::chain_extractor::ChainId;
+use crate::api::client_id_extractor::ClientId;
 use crate::services::session_manager::SessionContext;
 use crate::{
     app_error::AppError,
@@ -48,6 +49,7 @@ pub struct CreateSessionRequest {
 pub async fn create_session(
     ChainId(network): ChainId,
     path: Path<(EvmNetwork, Address)>,
+    ClientId(client_id): ClientId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<(), AppError> {
@@ -58,7 +60,11 @@ pub async fn create_session(
         ));
     }
 
-    let session = Session { network, owner };
+    let session = Session {
+        client_id,
+        network,
+        owner,
+    };
     let t0 = Instant::now();
 
     let ctx = SessionContext {

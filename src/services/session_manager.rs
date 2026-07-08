@@ -26,6 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::BroadcastStream;
+use uuid::Uuid;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
 
@@ -313,8 +314,13 @@ impl SessionManager {
         self: Arc<Self>,
         owner: Address,
         network: EvmNetwork,
+        client_id: Uuid,
     ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
-        let session = Session { network, owner };
+        let session = Session {
+            network,
+            owner,
+            client_id,
+        };
         let (rx, subscription) = self.sub_manager.subscribe(session).await.map_err(|err| {
             let err = Self::map_subscription_error(err);
             StreamError::from(err)

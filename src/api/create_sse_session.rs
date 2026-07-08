@@ -1,4 +1,5 @@
 use crate::api::chain_extractor::ChainId;
+use crate::api::client_id_extractor::ClientId;
 use crate::app_state::AppState;
 use crate::domain::EvmNetwork;
 use crate::services::session_manager::StreamError;
@@ -30,11 +31,12 @@ use std::{convert::Infallible, sync::Arc};
 )]
 pub async fn create_sse_connection(
     ChainId(network): ChainId,
+    ClientId(client_id): ClientId,
     path: Path<(EvmNetwork, Address)>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
     let (_, owner) = path.0;
     Arc::clone(&state.session_manager)
-        .create_sse_connection(owner, network)
+        .create_sse_connection(owner, network, client_id)
         .await
 }

@@ -9,6 +9,7 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 
 use crate::api::chain_extractor::ChainId;
+use crate::api::client_id_extractor::ClientId;
 use crate::services::session_manager::SessionContext;
 use crate::{
     app_error::AppError,
@@ -48,6 +49,7 @@ pub struct UpdateSessionRequest {
 )]
 pub async fn update_session(
     ChainId(network): ChainId,
+    ClientId(client_id): ClientId,
     path: Path<(EvmNetwork, Address)>,
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateSessionRequest>,
@@ -60,7 +62,11 @@ pub async fn update_session(
     }
 
     let ctx = SessionContext {
-        session: Session { network, owner },
+        session: Session {
+            client_id,
+            network,
+            owner,
+        },
         tokens_lists_urls: body.tokens_lists_urls,
         custom_tokens: body.custom_tokens,
     };
