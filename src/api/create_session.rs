@@ -38,11 +38,12 @@ pub struct CreateSessionRequest {
     params(
         ("chain_id" = u64, Path, description = "EVM chain id; must match the instance's configured NETWORK", example = 1),
         ("owner"    = String, Path, description = "0x-prefixed owner address (20 bytes)", example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
+        ("X-Client-Id" = String, Header, description = "Required. UUID identifying the calling device/browser. Sessions are keyed by (chain_id, owner, client_id) — a distinct client_id gets its own isolated session and its own snapshot cycle for the same owner.", example = "550e8400-e29b-41d4-a716-446655440000"),
     ),
     request_body = CreateSessionRequest,
     responses(
         (status = 200, description = "Session created or watched list replaced if it already existed"),
-        (status = 400, description = "Empty token lists or token limit exceeded", body = crate::app_error::ErrorBody),
+        (status = 400, description = "Empty token lists, token limit exceeded, or missing/invalid X-Client-Id", body = crate::app_error::ErrorBody),
         (status = 404, description = "chain_id does not match this instance's NETWORK", body = crate::app_error::ErrorBody),
     ),
 )]

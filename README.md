@@ -32,8 +32,12 @@ ingress — see [Deployment model](#deployment-model).
   into a single multicall
 - **Block-aware diffing** — stale updates can't overwrite fresher ones
 - **Diff-only SSE events** after the initial snapshot (only changed balances are sent)
-- **Shared subscriptions** — N SSE clients watching the same wallet pay for one
-  set of background watchers
+- **Device-isolated sessions** — sessions are keyed by
+  `(chain_id, owner, client_id)`. Extra tabs of the same browser reuse the
+  session (single `localStorage`-scoped UUID → one shared set of watchers), but
+  a different browser / device / incognito profile opens its **own** watcher
+  set for the same wallet. Rationale: one device can never overwrite another
+  device's watched-token list
 - **Block-lag health probe** — dispatcher goes unhealthy if it falls behind
   chain head by more than `MAX_BLOCK_LAG` blocks; block delivery uses a
   bounded FIFO channel with overflow detection
@@ -72,14 +76,28 @@ All API routes carry `{chain_id}` so the ingress can route by URL. Each instance
 rejects requests addressed to a chain other than its configured `NETWORK` with
 `404 Not Found` (enforced via the `ChainId` axum extractor).
 
+**Every session-facing endpoint requires a `client_id`** — a UUID identifying
+the calling device. It comes in as:
+
+- `X-Client-Id: <uuid>` header on `POST` / `PUT` (`ClientId` axum extractor).
+- `?client_id=<uuid>` query parameter on the SSE endpoint (browser `EventSource`
+  cannot set custom headers).
+
+`client_id` widens the session key from `(chain_id, owner)` to
+`(chain_id, owner, client_id)`, giving each device its own isolated watched-token
+list. See the [Features](#features) section for the model in one paragraph.
+Missing or malformed `client_id` → `400 Bad Request`.
+
 ### `POST /{chain_id}/sessions/{owner}` — create session
 
 Must be called before opening the SSE stream. Spawns the per-session watchers
-(snapshot updater, ERC20 listeners, WETH9 listener, queue receiver).
+(snapshot updater, ERC20 listeners, WETH9 listener, queue receiver) scoped to
+the `(chain_id, owner, client_id)` triple from the request.
 
 ```bash
 curl -X POST http://localhost:8080/1/sessions/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
      -H 'Content-Type: application/json' \
+     -H 'X-Client-Id: 550e8400-e29b-41d4-a716-446655440000' \
      -d '{
        "tokensListsUrls": ["https://tokens.coingecko.com/uniswap/all.json"],
        "customTokens": ["0xdAC17F958D2ee523a2206206994597C13D831ec7"]
@@ -88,8 +106,8 @@ curl -X POST http://localhost:8080/1/sessions/0xd8dA6BF26964aF9D7eEd9e03E53415D3
 
 | Status | Meaning |
 |---|---|
-| `200 OK` | Session created (or watched list replaced if it already existed) |
-| `400 Bad Request` | Both `tokensListsUrls` and `customTokens` empty, or token limit exceeded |
+| `200 OK` | Session created (or watched list replaced if it already existed for this `client_id`) |
+| `400 Bad Request` | Both `tokensListsUrls` and `customTokens` empty, token limit exceeded, or missing/invalid `X-Client-Id` |
 | `404 Not Found` | `chain_id` does not match this instance's `NETWORK` |
 
 ### `PUT /{chain_id}/sessions/{owner}` — replace watched token list
@@ -99,6 +117,11 @@ lists + `customTokens` + WETH9). Tokens previously watched but absent from
 the new request are dropped from the watched set, and their cached balance
 entries are evicted so SSE clients stop receiving stale data for them.
 
+The update targets the session identified by `(chain_id, owner, client_id)` —
+sessions for other `client_id`s on the same wallet are untouched. This is the
+main correctness reason `client_id` exists: one device's `PUT` cannot silently
+overwrite another device's watched list.
+
 The `400 Bad Request` token-limit check applies to the **new** list, not to
 the union with the previous one — clients can freely rotate token lists
 without hitting the limit as long as each individual request stays under it.
@@ -106,22 +129,29 @@ without hitting the limit as long as each individual request stays under it.
 ```bash
 curl -X PUT http://localhost:8080/1/sessions/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045 \
      -H 'Content-Type: application/json' \
+     -H 'X-Client-Id: 550e8400-e29b-41d4-a716-446655440000' \
      -d '{ "customTokens": ["0xNewTokenAddress"] }'
 ```
 
 | Status | Meaning |
 |---|---|
 | `200 OK` | Watched list replaced |
-| `400 Bad Request` | Body empty or new list exceeds token limit |
-| `404 Not Found` | `chain_id` mismatch or session does not exist |
+| `400 Bad Request` | Body empty, new list exceeds token limit, or missing/invalid `X-Client-Id` |
+| `404 Not Found` | `chain_id` mismatch or session does not exist for this `client_id` |
 
 ### `GET /sse/{chain_id}/balances/{owner}` — balance stream
 
 Long-lived SSE stream. The first event is the full snapshot for all watched
 tokens; every subsequent event is **only the changed balances** (a diff).
 
+The `client_id` query parameter selects **which session** to attach to — it
+must match a session previously created via `POST` with the same `X-Client-Id`
+for this `(chain_id, owner)`. If no such session exists → `404 Not Found`.
+`X-Client-Id` header is also accepted (header wins if both are set); the query
+form exists because the browser `EventSource` API cannot set custom headers.
+
 ```bash
-curl -N http://localhost:8080/sse/1/balances/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045
+curl -N 'http://localhost:8080/sse/1/balances/0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045?client_id=550e8400-e29b-41d4-a716-446655440000'
 ```
 
 ```
@@ -200,10 +230,10 @@ sequenceDiagram
     participant Server
     participant Blockchain
 
-    Client->>Server: POST /1/sessions/0x... (token lists)
+    Client->>Server: POST /1/sessions/0x... (X-Client-Id, token lists)
     Server-->>Client: 200 OK
 
-    Client->>Server: GET /sse/1/balances/0x...
+    Client->>Server: GET /sse/1/balances/0x...?client_id=...
     Server-->>Client: SSE: balance_update (full snapshot)
 
     loop ERC20 Transfer / WETH Deposit / Withdrawal
@@ -218,7 +248,7 @@ sequenceDiagram
         Server-->>Client: SSE: balance_update (diff only)
     end
 
-    Client->>Server: PUT /1/sessions/0x... (replace watched list)
+    Client->>Server: PUT /1/sessions/0x... (X-Client-Id, replace watched list)
     Server-->>Client: 200 OK
 ```
 
@@ -234,7 +264,7 @@ flowchart TB
         CS["POST /{chain_id}/sessions/{owner}"]
         US["PUT  /{chain_id}/sessions/{owner}"]
         SSE["GET  /sse/{chain_id}/balances/{owner}"]
-        EX["ChainId extractor<br/>(404 on chain mismatch)"]
+        EX["ChainId extractor (404 on chain mismatch)<br/>+ ClientId extractor (400 on missing/invalid)"]
     end
 
     subgraph Orchestration["Session orchestration"]
@@ -253,7 +283,7 @@ flowchart TB
     subgraph ProcessWide["Process-wide (shared across sessions)"]
         BW["BlockWatcher<br/>WS newHeads<br/>+ reconnect + stall watchdog"]
         ED["Erc20TransferEventDispatcher<br/>per-block eth_getLogs × 2<br/>(Transfer + WETH9)"]
-        Router["SessionManager router<br/>get_owned_queue_if_watched()"]
+        Router["SessionManager router<br/>owned_queues_watching()"]
     end
 
     subgraph Watcher["Watcher tasks (per session)"]
@@ -429,10 +459,12 @@ notification (delivered via the process-wide `BlockWatcher`), the shared
 block:
 
 - **ERC20 Transfer** — `topics[0] = Transfer::SIGNATURE_HASH`, no address
-  filter (global). Client-side we route each log by `from` / `to` into the
-  matching session's queue via
-  `SubscriptionManager::get_owned_queue_if_watched(owner, token)`. Logs for
-  owners / tokens not in any watched set are dropped in-process.
+  filter (global). Client-side we route each log by `from` / `to` via
+  `SubscriptionManager::owned_queues_watching(owner, token)` — one Transfer
+  can match multiple sessions when several `client_id`s watch the same wallet,
+  so the router returns `Vec<BalanceRefreshQueueHandle>` and every matching
+  session's queue receives the refresh in parallel. Logs for owners / tokens
+  not in any watched set are dropped in-process.
 - **WETH9 Deposit / Withdrawal** — filtered node-side by `address = weth9`
   and both event signatures. Canonical WETH9 does **not** emit a `Transfer`
   on `deposit()` / `withdraw()`, so wrap/unwrap would be invisible to the
@@ -459,7 +491,8 @@ src/
 │   ├── update_session.rs   PUT  /{chain_id}/sessions/{owner}
 │   ├── create_sse_session.rs  GET /sse/{chain_id}/balances/{owner}
 │   ├── health.rs           GET /health — reads BlockWatcher::is_healthy()
-│   └── extractors.rs       ChainId — validates {chain_id} against AppState::network
+│   ├── chain_extractor.rs      ChainId — validates {chain_id} against AppState::network
+│   └── client_id_extractor.rs  ClientId — pulls device UUID from X-Client-Id header or ?client_id= query
 │
 ├── config/
 │   ├── constants.rs        compile-time tunables
@@ -468,7 +501,7 @@ src/
 │
 ├── domain/
 │   ├── evm_network.rs      EvmNetwork enum + FromStr / TryFrom<u64> + per-chain WETH9
-│   ├── session.rs          Session = (owner, network)
+│   ├── session.rs          Session = (network, owner, client_id) — one entry per device watching this wallet
 │   ├── events.rs           BalanceEvent for SSE
 │   ├── token.rs            Token (chain_id + address)
 │   └── errors.rs           EvmError

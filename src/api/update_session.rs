@@ -39,11 +39,12 @@ pub struct UpdateSessionRequest {
     params(
         ("chain_id" = u64, Path, description = "EVM chain id; must match the instance's configured NETWORK", example = 1),
         ("owner"    = String, Path, description = "0x-prefixed owner address (20 bytes)", example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
+        ("X-Client-Id" = String, Header, description = "Required. UUID identifying the calling device/browser. Only the session created for this same (chain_id, owner, client_id) is updated — sessions belonging to other client_ids on the same owner are untouched.", example = "550e8400-e29b-41d4-a716-446655440000"),
     ),
     request_body = UpdateSessionRequest,
     responses(
         (status = 200, description = "Watched token list replaced (REPLACE semantics, not extend; tokens absent from the new list are evicted)"),
-        (status = 400, description = "Empty body or new list exceeds token limit", body = crate::app_error::ErrorBody),
+        (status = 400, description = "Empty body, new list exceeds token limit, or missing/invalid X-Client-Id", body = crate::app_error::ErrorBody),
         (status = 404, description = "chain_id mismatch or session not created",   body = crate::app_error::ErrorBody),
     ),
 )]

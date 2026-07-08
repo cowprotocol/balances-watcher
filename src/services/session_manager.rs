@@ -245,9 +245,33 @@ impl SessionManager {
                     next = receiver.recv() => {
                         match next {
                             Some(event) => {
-                                if let Some(queue_handle) = this.sub_manager.get_owned_queue_if_watched(&event.owner, &event.token).await {
-                                    queue_handle.enqueue(event.token, event.block).await;
-                                }
+                                let queues = this
+                                    .sub_manager
+                                    .owned_queues_watching(&event.owner, &event.token)
+                                    .await;
+
+                                // Fan out the Transfer to every session on this
+                                // owner. With `Session = (network, owner, client_id)`
+                                // one owner can hold N sessions and each has its own
+                                // per-session refresh queue → we enqueue into all of
+                                // them; a slow queue must not delay the others, so
+                                // we drive the sends in parallel.
+                                //
+                                // Yes, this is deliberate RPC amplification (N
+                                // multicalls per Transfer when N devices watch the
+                                // same wallet). Kept as-is for now because snapshot
+                                // fetching is tightly coupled to per-session state
+                                // (watched-token set, broadcast tx, snapshot updater).
+                                // The right long-term fix is to lift the snapshot
+                                // layer out of the subscription: dedupe watched
+                                // tokens per-owner, run one multicall against the
+                                // union, and fan the results back into per-session
+                                // broadcasts. That's a separate rework — tracked as
+                                // a follow-up, not blocking the client_id change.
+                                futures::future::join_all(
+                                    queues.iter().map(|q| q.enqueue(event.token, event.block)),
+                                )
+                                .await;
                             },
                             None => break,
                         }

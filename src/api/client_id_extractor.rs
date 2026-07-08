@@ -1,3 +1,11 @@
+//! [`ClientId`] extractor — pulls the caller's device UUID from either the
+//! `X-Client-Id` request header (`POST` / `PUT`) or the `client_id` query
+//! parameter (SSE, where the browser `EventSource` API cannot set headers).
+//!
+//! The header wins if both are present; missing or malformed input → `400`.
+//! The extractor is state-agnostic (`impl FromRequestParts<S>`) so it can be
+//! reused in tests and any future router that doesn't own `AppState`.
+
 use crate::app_error::AppError;
 use axum::extract::{FromRequestParts, Query};
 use axum::http::request::Parts;
@@ -9,6 +17,9 @@ pub struct ClientIdQuery {
     pub client_id: Option<Uuid>,
 }
 
+/// Device-scoped session identifier — see [`crate::domain::Session`] for the
+/// full semantics. Handlers consume it as `ClientId(client_id): ClientId` and
+/// carry it into [`crate::domain::Session::client_id`].
 pub struct ClientId(pub Uuid);
 
 impl ClientId {

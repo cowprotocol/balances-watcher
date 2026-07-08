@@ -1,5 +1,5 @@
 //! Server-side registry of live SSE sessions, keyed by [`Session`]
-//! (`(owner, network)`). Owns every [`Subscription`] the process holds,
+//! (`(network, owner, client_id)`). Owns every [`Subscription`] the process holds,
 //! spawns its [`BalanceRefreshQueue`] worker on first creation, and
 //! arbitrates between HTTP handlers and a background cleanup task.
 //!
@@ -194,24 +194,37 @@ impl SubscriptionManager {
         Err(SubscriptionError::SessionNotRegistered)
     }
 
-    // check if there is an address(owner) which watches in subscriptions
-    // if there is - check that token is in watched list
-    // if token is watched - returns BalanceRefreshQueueHandle,
-    // otherwise - None
-    pub async fn get_owned_queue_if_watched(
+    // For every session on this `owner` whose watched-token set contains
+    // `token`, return the session's refresh-queue handle. Since sessions are
+    // keyed by `(network, owner, client_id)`, one owner may map to N sessions
+    // (one per device/tab) — each gets its own enqueue.
+    //
+    // Two-phase to avoid holding the outer read-lock across inner-lock awaits:
+    //   1) under `read()`, cheaply collect (Subscription, handle) for the
+    //      owner — no awaits between candidate rows;
+    //   2) drop the lock, then do the `is_watched_token` await per candidate.
+    // Otherwise every extra client_id on this owner would stretch the outer
+    // read-lock hold time, starving POST/PUT of the write lock.
+    pub async fn owned_queues_watching(
         &self,
         owner: &Address,
         token: &Address,
-    ) -> Option<BalanceRefreshQueueHandle> {
-        for (session, sub_with_counter) in self.subscriptions.read().await.iter() {
-            if session.owner == *owner
-                && sub_with_counter.subscription.is_watched_token(token).await
-            {
-                return Some(sub_with_counter.refresh_queue.clone());
+    ) -> Vec<BalanceRefreshQueueHandle> {
+        let candidates: Vec<(Arc<Subscription>, BalanceRefreshQueueHandle)> = {
+            let subs = self.subscriptions.read().await;
+            subs.iter()
+                .filter(|(session, _)| session.owner == *owner)
+                .map(|(_, entry)| (Arc::clone(&entry.subscription), entry.refresh_queue.clone()))
+                .collect()
+        };
+
+        let mut queues = Vec::new();
+        for (sub, queue) in candidates {
+            if sub.is_watched_token(token).await {
+                queues.push(queue);
             }
         }
-
-        None
+        queues
     }
 
     // true - if it was the last client

@@ -18,6 +18,7 @@ use std::{convert::Infallible, sync::Arc};
     params(
         ("chain_id" = u64, Path, description = "EVM chain id; must match the instance's configured NETWORK", example = 1),
         ("owner"    = String, Path, description = "0x-prefixed owner address (20 bytes)", example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
+        ("client_id" = String, Query, description = "Required. UUID that identifies the session created via POST /{chain_id}/sessions/{owner} with the same X-Client-Id header. Passed as a query parameter because the browser EventSource API cannot set custom request headers. May also be sent as `X-Client-Id`; the header takes precedence when both are present.", example = "550e8400-e29b-41d4-a716-446655440000"),
     ),
     responses(
         (status = 200,
@@ -26,7 +27,8 @@ use std::{convert::Infallible, sync::Arc};
                         every subsequent `balance_update` event is a diff (only changed entries). \
                         Terminal errors are emitted as `event: error` with `{ code, message }`.",
          content_type = "text/event-stream"),
-        (status = 404, description = "chain_id mismatch or session not created"),
+        (status = 400, description = "Missing or invalid client_id"),
+        (status = 404, description = "chain_id mismatch, or no session registered for this (chain_id, owner, client_id) triple"),
     ),
 )]
 pub async fn create_sse_connection(
