@@ -1,4 +1,4 @@
-use crate::api::extractors::ChainId;
+use crate::api::chain_extractor::ChainId;
 use crate::app_state::AppState;
 use crate::domain::EvmNetwork;
 use crate::services::session_manager::StreamError;

@@ -1,6 +1,6 @@
+mod chain_extractor;
 mod create_session;
 mod create_sse_session;
-mod extractors;
 mod health;
 mod openapi;
 mod update_session;

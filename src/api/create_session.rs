@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use utoipa::ToSchema;
 
-use crate::api::extractors::ChainId;
+use crate::api::chain_extractor::ChainId;
 use crate::services::session_manager::SessionContext;
 use crate::{
     app_error::AppError,
