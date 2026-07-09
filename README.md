@@ -528,6 +528,38 @@ src/
 └── tracing/                tracing-subscriber init (JSON layer)
 ```
 
+## Tests
+
+Unit tests run out of the box:
+
+```bash
+cargo test
+```
+
+Integration tests spin up a real [anvil](https://book.getfoundry.sh/anvil/)
+node, `anvil_setCode`-install canonical Multicall3 and WETH9 (bytecode fetched
+from a public RPC on first run and cached under `target/test-cache/` for
+offline reruns), then drive the full stack end-to-end. They cover:
+
+- initial SSE snapshot after `POST /sessions` includes WETH9;
+- `WETH.deposit()` / `withdraw()` produce SSE `balance_update`s;
+- an ERC20 `transfer` propagates through the dispatcher into SSE;
+- 6-th distinct `client_id` on one owner hits the `MAX_CLIENTS_PER_OWNER` cap and gets `429`.
+
+They carry `#[ignore]` so plain `cargo test` stays green without anvil. To run:
+
+```bash
+# once (installs anvil / cast into ~/.foundry/bin)
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+
+# run the integration suite (serially — metrics recorder is process-global)
+PATH="$HOME/.foundry/bin:$PATH" cargo test --test integration -- --ignored --test-threads=1
+```
+
+Override the bytecode-source RPC via `INTEGRATION_TEST_RPC_URL` if the default
+public endpoint is down. Once `target/test-cache/{multicall3,weth9}.hex` exist,
+subsequent runs are fully offline.
+
 ## License
 
 MIT
