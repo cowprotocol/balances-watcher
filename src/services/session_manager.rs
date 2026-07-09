@@ -106,6 +106,9 @@ pub enum SessionError {
 
     #[error("Too many clients")]
     TooManyClients,
+
+    #[error("Too many client_ids for this owner (limit: {0})")]
+    OwnerClientLimitExceeded(usize),
 }
 
 impl SessionManager {
@@ -192,7 +195,11 @@ impl SessionManager {
             ));
         }
 
-        let (sub, maybe_queue_rx_out) = self.sub_manager.upsert(session, new_watched_tokens).await;
+        let (sub, maybe_queue_rx_out) = self
+            .sub_manager
+            .upsert(session, new_watched_tokens)
+            .await
+            .map_err(Self::map_subscription_error)?;
 
         if let Some(queue_result_rx) = maybe_queue_rx_out {
             tracing::debug!(
@@ -425,6 +432,9 @@ impl SessionManager {
         match sub_error {
             SubscriptionError::ClientLimitExceeded => SessionError::TooManyClients,
             SubscriptionError::SessionNotRegistered => SessionError::SessionIsNotCreated,
+            SubscriptionError::OwnerClientLimitExceeded { limit } => {
+                SessionError::OwnerClientLimitExceeded(limit)
+            }
         }
     }
 }

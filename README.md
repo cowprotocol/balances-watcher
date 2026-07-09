@@ -109,6 +109,7 @@ curl -X POST http://localhost:8080/1/sessions/0xd8dA6BF26964aF9D7eEd9e03E53415D3
 | `200 OK` | Session created (or watched list replaced if it already existed for this `client_id`) |
 | `400 Bad Request` | Both `tokensListsUrls` and `customTokens` empty, token limit exceeded, or missing/invalid `X-Client-Id` |
 | `404 Not Found` | `chain_id` does not match this instance's `NETWORK` |
+| `429 Too Many Requests` | `(chain_id, owner)` already hosts `MAX_CLIENTS_PER_OWNER` (5) distinct `client_id`s |
 
 ### `PUT /{chain_id}/sessions/{owner}` — replace watched token list
 
@@ -435,6 +436,7 @@ Compile-time in `src/config/constants.rs` (and a few module-local `const`s):
 | Limit | Value | Description |
 |-------|-------|-------------|
 | Max tokens per session | `1500` | Session is rejected if total watched tokens exceeds this. |
+| Max client_ids per owner | `5` | `POST` rejected with 429 if this `(chain, owner)` already hosts N sessions with distinct `client_id`s. |
 | Token list cache TTL | `5 h` | HTTP fetches dedup'd via singleflight + cached. |
 | Session idle TTL | `5 s` | Sessions with no SSE clients are cancelled after this idle window. |
 | Broadcast channel capacity | `256` | Per-subscription buffer of pending events. |

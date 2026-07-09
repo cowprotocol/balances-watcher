@@ -45,6 +45,7 @@ pub struct CreateSessionRequest {
         (status = 200, description = "Session created or watched list replaced if it already existed"),
         (status = 400, description = "Empty token lists, token limit exceeded, or missing/invalid X-Client-Id", body = crate::app_error::ErrorBody),
         (status = 404, description = "chain_id does not match this instance's NETWORK", body = crate::app_error::ErrorBody),
+        (status = 429, description = "Too many distinct client_ids already active for this (chain_id, owner)", body = crate::app_error::ErrorBody),
     ),
 )]
 pub async fn create_session(

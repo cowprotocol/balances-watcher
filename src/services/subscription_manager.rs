@@ -27,6 +27,7 @@
 //! `idle_since`, `Arc<Subscription>` — that the registry inspects to decide
 //! "is anyone still listening?" without touching subscription internals.
 
+use crate::config::constants::MAX_CLIENTS_PER_OWNER;
 use crate::domain::{BalanceEvent, Session};
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
@@ -51,6 +52,11 @@ pub enum SubscriptionError {
     /// up, or had its client counter underflow on `unsubscribe`.
     #[error("no subscription registered for this session")]
     SessionNotRegistered,
+
+    /// A new `client_id` would push the count of active sessions for this
+    /// `(chain, owner)` past [`crate::config::constants::MAX_CLIENTS_PER_OWNER`].
+    #[error("too many active client_ids for this owner (limit: {limit})")]
+    OwnerClientLimitExceeded { limit: usize },
 }
 
 struct SubWithCounter {
@@ -95,14 +101,23 @@ impl SubscriptionManager {
     /// On **update** (the session already exists): replaces the watched-token
     /// set, optionally forces a snapshot refresh, and returns `None` in the
     /// second slot — the worker is already running.
+    ///
+    /// Fails with [`SubscriptionError::OwnerClientLimitExceeded`] when the
+    /// caller is opening a **new** session and this `(chain, owner)` already
+    /// hosts [`MAX_CLIENTS_PER_OWNER`] sessions. Updates to an existing
+    /// `client_id` bypass the cap — a client already inside the map can
+    /// keep rotating its watched-token list regardless of pressure.
     pub async fn upsert(
         &self,
         session: Session,
         tokens: HashSet<Address>,
-    ) -> (
-        Arc<Subscription>,
-        Option<mpsc::Receiver<Result<BalancesWithBlock, RpcError>>>,
-    ) {
+    ) -> Result<
+        (
+            Arc<Subscription>,
+            Option<mpsc::Receiver<Result<BalancesWithBlock, RpcError>>>,
+        ),
+        SubscriptionError,
+    > {
         let tokens_len = tokens.len();
         let maybe_sub = {
             let subs = self.subscriptions.read().await;
@@ -127,7 +142,7 @@ impl SubscriptionManager {
                 sub.emit_balance_snapshot_refresh();
             }
 
-            return (sub, None);
+            return Ok((sub, None));
         }
 
         let shutdown_token = self.lifecycle.cancel_token.clone();
@@ -151,10 +166,28 @@ impl SubscriptionManager {
             refresh_queue: refresh_queue.clone(),
         };
 
-        self.subscriptions
-            .write()
-            .await
-            .insert(session, sub_with_counter);
+        // Cap check + insert must share one write lock — otherwise concurrent
+        // POSTs with fresh UUIDs could each read a stale count and jointly
+        // overshoot the limit.
+        let mut subs = self.subscriptions.write().await;
+
+        // LEGACY: full-map scan. Goes away with the process-wide-queue
+        // migration once storage becomes `HashMap<Address, HashMap<Uuid, _>>`.
+        let existing_for_owner = subs.keys().filter(|s| s.owner == session.owner).count();
+        if existing_for_owner >= MAX_CLIENTS_PER_OWNER {
+            self.metrics.owner_client_limit_exceeded_total.increment(1);
+            tracing::warn!(
+                owner = %session.owner,
+                limit = MAX_CLIENTS_PER_OWNER,
+                existing = existing_for_owner,
+                "client request rejected: per-owner client limit exceeded",
+            );
+            return Err(SubscriptionError::OwnerClientLimitExceeded {
+                limit: MAX_CLIENTS_PER_OWNER,
+            });
+        }
+        subs.insert(session, sub_with_counter);
+        drop(subs);
 
         self.metrics.sessions_created_total.increment(1);
         self.metrics.active_sessions.increment(1);
@@ -164,7 +197,7 @@ impl SubscriptionManager {
             "session is created"
         );
 
-        (subscription, Some(result_rx))
+        Ok((subscription, Some(result_rx)))
     }
 
     pub async fn subscribe(

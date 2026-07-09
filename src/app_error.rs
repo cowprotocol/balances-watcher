@@ -11,11 +11,14 @@ pub enum AppError {
 
     #[error("Bad request: {0}")]
     BadRequest(String),
+
+    #[error("Too many requests: {0}")]
+    TooManyRequests(String),
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct ErrorBody {
-    /// Mirrors the HTTP status code (400 / 404).
+    /// Mirrors the HTTP status code (400 / 404 / 429).
     pub code: u16,
     /// Human-readable explanation; safe to surface to end users.
     pub message: String,
@@ -28,6 +31,7 @@ impl From<SessionError> for AppError {
             SessionError::TokenLimitExceeded(_, _) => AppError::BadRequest(e.to_string()),
             SessionError::TokenListNotFound(_) => AppError::BadRequest(e.to_string()),
             SessionError::TooManyClients => AppError::BadRequest(e.to_string()),
+            SessionError::OwnerClientLimitExceeded(_) => AppError::TooManyRequests(e.to_string()),
         }
     }
 }
@@ -37,6 +41,7 @@ impl IntoResponse for AppError {
         let status = match &self {
             AppError::NotFound(_) => StatusCode::NOT_FOUND,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
+            AppError::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
         };
 
         (
