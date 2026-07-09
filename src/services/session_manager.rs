@@ -103,9 +103,6 @@ pub enum SessionError {
     #[error("Session is not created")]
     SessionIsNotCreated,
 
-    #[error("Too many clients")]
-    TooManyClients,
-
     #[error("Too many client_ids for this owner (limit: {0})")]
     OwnerClientLimitExceeded(usize),
 }
@@ -422,7 +419,6 @@ impl SessionManager {
 
     fn map_subscription_error(sub_error: SubscriptionError) -> SessionError {
         match sub_error {
-            SubscriptionError::ClientLimitExceeded => SessionError::TooManyClients,
             SubscriptionError::SessionNotRegistered => SessionError::SessionIsNotCreated,
             SubscriptionError::OwnerClientLimitExceeded { limit } => {
                 SessionError::OwnerClientLimitExceeded(limit)

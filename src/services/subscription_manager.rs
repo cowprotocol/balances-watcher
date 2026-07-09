@@ -43,11 +43,6 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 /// Errors surfaced by [`SubscriptionManager`].
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SubscriptionError {
-    /// Per-session client counter would overflow `u32::MAX` — refuse the new
-    /// SSE connection rather than silently wrap.
-    #[error("per-session client limit exceeded")]
-    ClientLimitExceeded,
-
     /// The lookup hit a session that was never created, was already cleaned
     /// up, or had its client counter underflow on `unsubscribe`. With
     /// `Session = (chain, owner, client_id)`, the mismatch is usually a
@@ -211,10 +206,10 @@ impl SubscriptionManager {
         let mut subs = self.subscriptions.write().await;
 
         if let Some(existing) = subs.get_mut(&session) {
-            existing.clients = existing
-                .clients
-                .checked_add(1)
-                .ok_or(SubscriptionError::ClientLimitExceeded)?;
+            // saturating_add — u32::MAX SSE-connections on one session is
+            // unreachable in practice; better to silently cap than to panic
+            // (debug) or wrap (release).
+            existing.clients = existing.clients.saturating_add(1);
             existing.idle_since = None;
             let receiver = existing.subscription.subscribe();
 
