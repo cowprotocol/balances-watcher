@@ -28,6 +28,9 @@ pub struct Session {
 
 impl Display for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.owner, self.network)
+        // 8-hex prefix of client_id — enough to distinguish sibling sessions
+        // in logs, no allocation.
+        let (short_client, _, _, _) = self.client_id.as_fields();
+        write!(f, "{}:{}:{:08x}", self.owner, self.network, short_client)
     }
 }
