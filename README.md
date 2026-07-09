@@ -265,7 +265,7 @@ flowchart TB
         CS["POST /{chain_id}/sessions/{owner}"]
         US["PUT  /{chain_id}/sessions/{owner}"]
         SSE["GET  /sse/{chain_id}/balances/{owner}"]
-        EX["ChainId extractor (404 on chain mismatch)<br/>+ ClientId extractor (400 on missing/invalid)"]
+        EX["SessionPath extractor (404 on chain mismatch)<br/>+ ClientId extractor (400 on missing/invalid)"]
     end
 
     subgraph Orchestration["Session orchestration"]
@@ -493,7 +493,7 @@ src/
 │   ├── update_session.rs   PUT  /{chain_id}/sessions/{owner}
 │   ├── create_sse_session.rs  GET /sse/{chain_id}/balances/{owner}
 │   ├── health.rs           GET /health — reads BlockWatcher::is_healthy()
-│   ├── chain_extractor.rs      ChainId — validates {chain_id} against AppState::network
+│   ├── session_path_extractor.rs   SessionPath — parses (chain_id, owner) from path, validates chain_id against AppState::network
 │   └── client_id_extractor.rs  ClientId — pulls device UUID from X-Client-Id header or ?client_id= query
 │
 ├── config/

@@ -1,9 +1,9 @@
-mod chain_extractor;
 pub mod client_id_extractor;
 mod create_session;
 mod create_sse_session;
 mod health;
 mod openapi;
+mod session_path_extractor;
 mod update_session;
 
 use crate::api::health::health_handler;

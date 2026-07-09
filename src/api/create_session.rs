@@ -1,21 +1,14 @@
 use alloy::primitives::Address;
-use axum::{
-    extract::{Path, State},
-    Json,
-};
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use utoipa::ToSchema;
 
-use crate::api::chain_extractor::ChainId;
 use crate::api::client_id_extractor::ClientId;
+use crate::api::session_path_extractor::SessionPath;
 use crate::services::session_manager::SessionContext;
-use crate::{
-    app_error::AppError,
-    app_state::AppState,
-    domain::{EvmNetwork, Session},
-};
+use crate::{app_error::AppError, app_state::AppState, domain::Session};
 
 #[derive(Deserialize, Clone, Debug, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -49,13 +42,11 @@ pub struct CreateSessionRequest {
     ),
 )]
 pub async fn create_session(
-    ChainId(network): ChainId,
-    path: Path<(EvmNetwork, Address)>,
+    SessionPath(network, owner): SessionPath,
     ClientId(client_id): ClientId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<(), AppError> {
-    let (_, owner) = path.0;
     if body.tokens_lists_urls.is_empty() && body.custom_tokens.is_empty() {
         return Err(AppError::BadRequest(
             "tokens_lists_urls or custom_tokens should not be empty both".into(),
