@@ -49,8 +49,10 @@ pub enum SubscriptionError {
     ClientLimitExceeded,
 
     /// The lookup hit a session that was never created, was already cleaned
-    /// up, or had its client counter underflow on `unsubscribe`.
-    #[error("no subscription registered for this session")]
+    /// up, or had its client counter underflow on `unsubscribe`. With
+    /// `Session = (chain, owner, client_id)`, the mismatch is usually a
+    /// `client_id` that doesn't match any session for this `(chain, owner)`.
+    #[error("no session registered for this (chain, owner, client_id)")]
     SessionNotRegistered,
 
     /// A new `client_id` would push the count of active sessions for this
@@ -187,7 +189,9 @@ impl SubscriptionManager {
             });
         }
         subs.insert(session, sub_with_counter);
+        let sessions_for_owner = (existing_for_owner + 1) as f64;
         drop(subs);
+        self.metrics.sessions_per_owner.record(sessions_for_owner);
 
         self.metrics.sessions_created_total.increment(1);
         self.metrics.active_sessions.increment(1);

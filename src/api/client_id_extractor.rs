@@ -13,8 +13,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 #[derive(Deserialize)]
-pub struct ClientIdQuery {
-    pub client_id: Option<Uuid>,
+struct ClientIdQuery {
+    client_id: Option<Uuid>,
 }
 
 /// Device-scoped session identifier — see [`crate::domain::Session`] for the
@@ -44,9 +44,7 @@ impl ClientId {
     ) -> Result<Option<Uuid>, AppError> {
         let Query(q) = Query::<ClientIdQuery>::from_request_parts(parts, state)
             .await
-            .map_err(|_| {
-                AppError::BadRequest("Query failed for client ID extractor".to_string())
-            })?;
+            .map_err(|e| AppError::BadRequest(format!("invalid client_id query: {e}")))?;
         Ok(q.client_id)
     }
 }
@@ -57,12 +55,12 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientId {
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         if let Some(client_id) = ClientId::try_from_headers(parts)? {
             return Ok(ClientId(client_id));
-        } else if let Some(client_id) = ClientId::try_from_query(parts, &state).await? {
+        } else if let Some(client_id) = ClientId::try_from_query(parts, state).await? {
             return Ok(ClientId(client_id));
         }
 
         Err(AppError::BadRequest(
-            "No client ID found in headers".to_string(),
+            "missing client id (send X-Client-Id header or ?client_id= query)".to_string(),
         ))
     }
 }

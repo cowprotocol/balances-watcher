@@ -1,6 +1,7 @@
 use crate::api::client_id_extractor::ClientId;
 use crate::api::session_path_extractor::SessionPath;
 use crate::app_state::AppState;
+use crate::domain::Session;
 use crate::services::session_manager::StreamError;
 use axum::{
     extract::State,
@@ -35,6 +36,10 @@ pub async fn create_sse_connection(
     State(state): State<Arc<AppState>>,
 ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
     Arc::clone(&state.session_manager)
-        .create_sse_connection(owner, network, client_id)
+        .create_sse_connection(Session {
+            network,
+            owner,
+            client_id,
+        })
         .await
 }
