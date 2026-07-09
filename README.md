@@ -539,22 +539,37 @@ cargo test
 Integration tests spin up a real [anvil](https://book.getfoundry.sh/anvil/)
 node, `anvil_setCode`-install canonical Multicall3 and WETH9 (bytecode fetched
 from a public RPC on first run and cached under `target/test-cache/` for
-offline reruns), then drive the full stack end-to-end. They cover:
+offline reruns), then drive the full stack end-to-end.
 
-- initial SSE snapshot after `POST /sessions` includes WETH9;
-- `WETH.deposit()` / `withdraw()` produce SSE `balance_update`s;
-- an ERC20 `transfer` propagates through the dispatcher into SSE;
-- 6-th distinct `client_id` on one owner hits the `MAX_CLIENTS_PER_OWNER` cap and gets `429`.
+Two suites live under `tests/`:
 
-They carry `#[ignore]` so plain `cargo test` stays green without anvil. To run:
+- `integration` — happy-path coverage: initial SSE snapshot after
+  `POST /sessions` includes WETH9, `WETH.deposit()` / `withdraw()` produce
+  SSE `balance_update`s, an ERC20 `transfer` propagates through the
+  dispatcher, and the 6-th distinct `client_id` on one owner hits the
+  `MAX_CLIENTS_PER_OWNER` cap with `429`.
+- `session_lifecycle` — the background TTL path: an idle session is reaped
+  after `SESSION_TTL`, an actively subscribed one survives past it (and
+  dies once its subscribers disconnect), and two `client_id`s on the same
+  owner age independently. Death is asserted both black-box (subsequent
+  SSE-connect returns `404`) and via the `sessions_expired_total` counter.
+
+All tests carry `#[ignore]` so plain `cargo test` stays green without anvil.
+To run:
 
 ```bash
 # once (installs anvil / cast into ~/.foundry/bin)
 curl -L https://foundry.paradigm.xyz | bash && foundryup
 
-# run the integration suite (serially — metrics recorder is process-global)
+# happy-path suite
 PATH="$HOME/.foundry/bin:$PATH" cargo test --test integration -- --ignored --test-threads=1
+
+# TTL suite (slower — several `2 * SESSION_TTL + 2s` waits)
+PATH="$HOME/.foundry/bin:$PATH" cargo test --test session_lifecycle -- --ignored --test-threads=1
 ```
+
+`--test-threads=1` is required because the Prometheus recorder is a
+process-wide singleton shared across tests.
 
 Override the bytecode-source RPC via `INTEGRATION_TEST_RPC_URL` if the default
 public endpoint is down. Once `target/test-cache/{multicall3,weth9}.hex` exist,
