@@ -1,20 +1,14 @@
 use alloy::primitives::Address;
-use axum::{
-    extract::{Path, State},
-    Json,
-};
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use std::sync::Arc;
 use std::time::Instant;
 use utoipa::ToSchema;
 
-use crate::api::extractors::ChainId;
+use crate::api::client_id_extractor::ClientId;
+use crate::api::session_path_extractor::SessionPath;
 use crate::services::session_manager::SessionContext;
-use crate::{
-    app_error::AppError,
-    app_state::AppState,
-    domain::{EvmNetwork, Session},
-};
+use crate::{app_error::AppError, app_state::AppState, domain::Session};
 
 #[derive(Deserialize, Clone, Debug, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -37,28 +31,33 @@ pub struct CreateSessionRequest {
     params(
         ("chain_id" = u64, Path, description = "EVM chain id; must match the instance's configured NETWORK", example = 1),
         ("owner"    = String, Path, description = "0x-prefixed owner address (20 bytes)", example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
+        ("X-Client-Id" = String, Header, description = "Required. UUID identifying the calling device/browser. Sessions are keyed by (chain_id, owner, client_id) — a distinct client_id gets its own isolated session and its own snapshot cycle for the same owner.", example = "550e8400-e29b-41d4-a716-446655440000"),
     ),
     request_body = CreateSessionRequest,
     responses(
         (status = 200, description = "Session created or watched list replaced if it already existed"),
-        (status = 400, description = "Empty token lists or token limit exceeded", body = crate::app_error::ErrorBody),
+        (status = 400, description = "Empty token lists, token limit exceeded, or missing/invalid X-Client-Id", body = crate::app_error::ErrorBody),
         (status = 404, description = "chain_id does not match this instance's NETWORK", body = crate::app_error::ErrorBody),
+        (status = 429, description = "Too many distinct client_ids already active for this (chain_id, owner)", body = crate::app_error::ErrorBody),
     ),
 )]
 pub async fn create_session(
-    ChainId(network): ChainId,
-    path: Path<(EvmNetwork, Address)>,
+    SessionPath(network, owner): SessionPath,
+    ClientId(client_id): ClientId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<(), AppError> {
-    let (_, owner) = path.0;
     if body.tokens_lists_urls.is_empty() && body.custom_tokens.is_empty() {
         return Err(AppError::BadRequest(
             "tokens_lists_urls or custom_tokens should not be empty both".into(),
         ));
     }
 
-    let session = Session { network, owner };
+    let session = Session {
+        client_id,
+        network,
+        owner,
+    };
     let t0 = Instant::now();
 
     let ctx = SessionContext {

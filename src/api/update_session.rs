@@ -1,20 +1,14 @@
 use std::sync::Arc;
 
 use alloy::primitives::Address;
-use axum::{
-    extract::{Path, State},
-    Json,
-};
+use axum::{extract::State, Json};
 use serde::Deserialize;
 use utoipa::ToSchema;
 
-use crate::api::extractors::ChainId;
+use crate::api::client_id_extractor::ClientId;
+use crate::api::session_path_extractor::SessionPath;
 use crate::services::session_manager::SessionContext;
-use crate::{
-    app_error::AppError,
-    app_state::AppState,
-    domain::{EvmNetwork, Session},
-};
+use crate::{app_error::AppError, app_state::AppState, domain::Session};
 
 #[derive(Deserialize, Clone, Debug, ToSchema)]
 #[serde(rename_all = "camelCase")]
@@ -38,21 +32,21 @@ pub struct UpdateSessionRequest {
     params(
         ("chain_id" = u64, Path, description = "EVM chain id; must match the instance's configured NETWORK", example = 1),
         ("owner"    = String, Path, description = "0x-prefixed owner address (20 bytes)", example = "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045"),
+        ("X-Client-Id" = String, Header, description = "Required. UUID identifying the calling device/browser. Only the session created for this same (chain_id, owner, client_id) is updated — sessions belonging to other client_ids on the same owner are untouched.", example = "550e8400-e29b-41d4-a716-446655440000"),
     ),
     request_body = UpdateSessionRequest,
     responses(
         (status = 200, description = "Watched token list replaced (REPLACE semantics, not extend; tokens absent from the new list are evicted)"),
-        (status = 400, description = "Empty body or new list exceeds token limit", body = crate::app_error::ErrorBody),
+        (status = 400, description = "Empty body, new list exceeds token limit, or missing/invalid X-Client-Id", body = crate::app_error::ErrorBody),
         (status = 404, description = "chain_id mismatch or session not created",   body = crate::app_error::ErrorBody),
     ),
 )]
 pub async fn update_session(
-    ChainId(network): ChainId,
-    path: Path<(EvmNetwork, Address)>,
+    SessionPath(network, owner): SessionPath,
+    ClientId(client_id): ClientId,
     State(state): State<Arc<AppState>>,
     Json(body): Json<UpdateSessionRequest>,
 ) -> Result<(), AppError> {
-    let (_, owner) = path.0;
     if body.custom_tokens.is_empty() && body.tokens_lists_urls.is_empty() {
         return Err(AppError::BadRequest(
             "tokens_lists_urls && custom_tokens are empty".to_string(),
@@ -60,7 +54,11 @@ pub async fn update_session(
     }
 
     let ctx = SessionContext {
-        session: Session { network, owner },
+        session: Session {
+            client_id,
+            network,
+            owner,
+        },
         tokens_lists_urls: body.tokens_lists_urls,
         custom_tokens: body.custom_tokens,
     };

@@ -82,6 +82,10 @@ pub struct Metrics {
     pub snapshot_updater_runs_total: Counter,
     /// session rejected, token limit exceeded
     pub tokens_limit_exceeded_total: Counter,
+    /// session rejected, per-owner client_id cap hit
+    pub owner_client_limit_exceeded_total: Counter,
+    /// distribution of active client_id count per owner, sampled at insert
+    pub sessions_per_owner: Histogram,
     /// post sessions handler latency, ms
     pub create_session_duration_ms: Histogram,
 }
@@ -133,6 +137,8 @@ impl Metrics {
 
             snapshot_updater_runs_total: counter!("snapshot_updater_runs_total"),
             tokens_limit_exceeded_total: counter!("tokens_limit_exceeded_total"),
+            owner_client_limit_exceeded_total: counter!("owner_client_limit_exceeded_total"),
+            sessions_per_owner: histogram!("sessions_per_owner"),
             create_session_duration_ms: histogram!("create_session_duration_ms"),
         }
     }

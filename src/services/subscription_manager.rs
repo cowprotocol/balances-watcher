@@ -1,5 +1,5 @@
 //! Server-side registry of live SSE sessions, keyed by [`Session`]
-//! (`(owner, network)`). Owns every [`Subscription`] the process holds,
+//! (`(network, owner, client_id)`). Owns every [`Subscription`] the process holds,
 //! spawns its [`BalanceRefreshQueue`] worker on first creation, and
 //! arbitrates between HTTP handlers and a background cleanup task.
 //!
@@ -27,6 +27,7 @@
 //! `idle_since`, `Arc<Subscription>` — that the registry inspects to decide
 //! "is anyone still listening?" without touching subscription internals.
 
+use crate::config::constants::MAX_CLIENTS_PER_OWNER;
 use crate::domain::{BalanceEvent, Session};
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
@@ -42,15 +43,17 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 /// Errors surfaced by [`SubscriptionManager`].
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum SubscriptionError {
-    /// Per-session client counter would overflow `u32::MAX` — refuse the new
-    /// SSE connection rather than silently wrap.
-    #[error("per-session client limit exceeded")]
-    ClientLimitExceeded,
-
     /// The lookup hit a session that was never created, was already cleaned
-    /// up, or had its client counter underflow on `unsubscribe`.
-    #[error("no subscription registered for this session")]
+    /// up, or had its client counter underflow on `unsubscribe`. With
+    /// `Session = (chain, owner, client_id)`, the mismatch is usually a
+    /// `client_id` that doesn't match any session for this `(chain, owner)`.
+    #[error("no session registered for this (chain, owner, client_id)")]
     SessionNotRegistered,
+
+    /// A new `client_id` would push the count of active sessions for this
+    /// `(chain, owner)` past [`crate::config::constants::MAX_CLIENTS_PER_OWNER`].
+    #[error("too many active client_ids for this owner (limit: {limit})")]
+    OwnerClientLimitExceeded { limit: usize },
 }
 
 struct SubWithCounter {
@@ -95,14 +98,23 @@ impl SubscriptionManager {
     /// On **update** (the session already exists): replaces the watched-token
     /// set, optionally forces a snapshot refresh, and returns `None` in the
     /// second slot — the worker is already running.
+    ///
+    /// Fails with [`SubscriptionError::OwnerClientLimitExceeded`] when the
+    /// caller is opening a **new** session and this `(chain, owner)` already
+    /// hosts [`MAX_CLIENTS_PER_OWNER`] sessions. Updates to an existing
+    /// `client_id` bypass the cap — a client already inside the map can
+    /// keep rotating its watched-token list regardless of pressure.
     pub async fn upsert(
         &self,
         session: Session,
         tokens: HashSet<Address>,
-    ) -> (
-        Arc<Subscription>,
-        Option<mpsc::Receiver<Result<BalancesWithBlock, RpcError>>>,
-    ) {
+    ) -> Result<
+        (
+            Arc<Subscription>,
+            Option<mpsc::Receiver<Result<BalancesWithBlock, RpcError>>>,
+        ),
+        SubscriptionError,
+    > {
         let tokens_len = tokens.len();
         let maybe_sub = {
             let subs = self.subscriptions.read().await;
@@ -127,7 +139,7 @@ impl SubscriptionManager {
                 sub.emit_balance_snapshot_refresh();
             }
 
-            return (sub, None);
+            return Ok((sub, None));
         }
 
         let shutdown_token = self.lifecycle.cancel_token.clone();
@@ -151,10 +163,30 @@ impl SubscriptionManager {
             refresh_queue: refresh_queue.clone(),
         };
 
-        self.subscriptions
-            .write()
-            .await
-            .insert(session, sub_with_counter);
+        // Cap check + insert must share one write lock — otherwise concurrent
+        // POSTs with fresh UUIDs could each read a stale count and jointly
+        // overshoot the limit.
+        let mut subs = self.subscriptions.write().await;
+
+        // LEGACY: full-map scan. Goes away with the process-wide-queue
+        // migration once storage becomes `HashMap<Address, HashMap<Uuid, _>>`.
+        let existing_for_owner = subs.keys().filter(|s| s.owner == session.owner).count();
+        if existing_for_owner >= MAX_CLIENTS_PER_OWNER {
+            self.metrics.owner_client_limit_exceeded_total.increment(1);
+            tracing::warn!(
+                owner = %session.owner,
+                limit = MAX_CLIENTS_PER_OWNER,
+                existing = existing_for_owner,
+                "client request rejected: per-owner client limit exceeded",
+            );
+            return Err(SubscriptionError::OwnerClientLimitExceeded {
+                limit: MAX_CLIENTS_PER_OWNER,
+            });
+        }
+        subs.insert(session, sub_with_counter);
+        let sessions_for_owner = (existing_for_owner + 1) as f64;
+        drop(subs);
+        self.metrics.sessions_per_owner.record(sessions_for_owner);
 
         self.metrics.sessions_created_total.increment(1);
         self.metrics.active_sessions.increment(1);
@@ -164,7 +196,7 @@ impl SubscriptionManager {
             "session is created"
         );
 
-        (subscription, Some(result_rx))
+        Ok((subscription, Some(result_rx)))
     }
 
     pub async fn subscribe(
@@ -174,10 +206,10 @@ impl SubscriptionManager {
         let mut subs = self.subscriptions.write().await;
 
         if let Some(existing) = subs.get_mut(&session) {
-            existing.clients = existing
-                .clients
-                .checked_add(1)
-                .ok_or(SubscriptionError::ClientLimitExceeded)?;
+            // saturating_add — u32::MAX SSE-connections on one session is
+            // unreachable in practice; better to silently cap than to panic
+            // (debug) or wrap (release).
+            existing.clients = existing.clients.saturating_add(1);
             existing.idle_since = None;
             let receiver = existing.subscription.subscribe();
 
@@ -194,24 +226,37 @@ impl SubscriptionManager {
         Err(SubscriptionError::SessionNotRegistered)
     }
 
-    // check if there is an address(owner) which watches in subscriptions
-    // if there is - check that token is in watched list
-    // if token is watched - returns BalanceRefreshQueueHandle,
-    // otherwise - None
-    pub async fn get_owned_queue_if_watched(
+    // For every session on this `owner` whose watched-token set contains
+    // `token`, return the session's refresh-queue handle. Since sessions are
+    // keyed by `(network, owner, client_id)`, one owner may map to N sessions
+    // (one per device/tab) — each gets its own enqueue.
+    //
+    // Two-phase to avoid holding the outer read-lock across inner-lock awaits:
+    //   1) under `read()`, cheaply collect (Subscription, handle) for the
+    //      owner — no awaits between candidate rows;
+    //   2) drop the lock, then do the `is_watched_token` await per candidate.
+    // Otherwise every extra client_id on this owner would stretch the outer
+    // read-lock hold time, starving POST/PUT of the write lock.
+    pub async fn owned_queues_watching(
         &self,
         owner: &Address,
         token: &Address,
-    ) -> Option<BalanceRefreshQueueHandle> {
-        for (session, sub_with_counter) in self.subscriptions.read().await.iter() {
-            if session.owner == *owner
-                && sub_with_counter.subscription.is_watched_token(token).await
-            {
-                return Some(sub_with_counter.refresh_queue.clone());
+    ) -> Vec<BalanceRefreshQueueHandle> {
+        let candidates: Vec<(Arc<Subscription>, BalanceRefreshQueueHandle)> = {
+            let subs = self.subscriptions.read().await;
+            subs.iter()
+                .filter(|(session, _)| session.owner == *owner)
+                .map(|(_, entry)| (Arc::clone(&entry.subscription), entry.refresh_queue.clone()))
+                .collect()
+        };
+
+        let mut queues = Vec::new();
+        for (sub, queue) in candidates {
+            if sub.is_watched_token(token).await {
+                queues.push(queue);
             }
         }
-
-        None
+        queues
     }
 
     // true - if it was the last client

@@ -103,8 +103,8 @@ pub enum SessionError {
     #[error("Session is not created")]
     SessionIsNotCreated,
 
-    #[error("Too many clients")]
-    TooManyClients,
+    #[error("Too many client_ids for this owner (limit: {0})")]
+    OwnerClientLimitExceeded(usize),
 }
 
 impl SessionManager {
@@ -191,7 +191,11 @@ impl SessionManager {
             ));
         }
 
-        let (sub, maybe_queue_rx_out) = self.sub_manager.upsert(session, new_watched_tokens).await;
+        let (sub, maybe_queue_rx_out) = self
+            .sub_manager
+            .upsert(session, new_watched_tokens)
+            .await
+            .map_err(Self::map_subscription_error)?;
 
         if let Some(queue_result_rx) = maybe_queue_rx_out {
             tracing::debug!(
@@ -244,9 +248,33 @@ impl SessionManager {
                     next = receiver.recv() => {
                         match next {
                             Some(event) => {
-                                if let Some(queue_handle) = this.sub_manager.get_owned_queue_if_watched(&event.owner, &event.token).await {
-                                    queue_handle.enqueue(event.token, event.block).await;
-                                }
+                                let queues = this
+                                    .sub_manager
+                                    .owned_queues_watching(&event.owner, &event.token)
+                                    .await;
+
+                                // Fan out the Transfer to every session on this
+                                // owner. With `Session = (network, owner, client_id)`
+                                // one owner can hold N sessions and each has its own
+                                // per-session refresh queue → we enqueue into all of
+                                // them; a slow queue must not delay the others, so
+                                // we drive the sends in parallel.
+                                //
+                                // Yes, this is deliberate RPC amplification (N
+                                // multicalls per Transfer when N devices watch the
+                                // same wallet). Kept as-is for now because snapshot
+                                // fetching is tightly coupled to per-session state
+                                // (watched-token set, broadcast tx, snapshot updater).
+                                // The right long-term fix is to lift the snapshot
+                                // layer out of the subscription: dedupe watched
+                                // tokens per-owner, run one multicall against the
+                                // union, and fan the results back into per-session
+                                // broadcasts. That's a separate rework — tracked as
+                                // a follow-up, not blocking the client_id change.
+                                futures::future::join_all(
+                                    queues.iter().map(|q| q.enqueue(event.token, event.block)),
+                                )
+                                .await;
                             },
                             None => break,
                         }
@@ -311,10 +339,8 @@ impl SessionManager {
 
     pub async fn create_sse_connection(
         self: Arc<Self>,
-        owner: Address,
-        network: EvmNetwork,
+        session: Session,
     ) -> Result<Sse<impl Stream<Item = Result<Event, Infallible>>>, StreamError> {
-        let session = Session { network, owner };
         let (rx, subscription) = self.sub_manager.subscribe(session).await.map_err(|err| {
             let err = Self::map_subscription_error(err);
             StreamError::from(err)
@@ -393,8 +419,10 @@ impl SessionManager {
 
     fn map_subscription_error(sub_error: SubscriptionError) -> SessionError {
         match sub_error {
-            SubscriptionError::ClientLimitExceeded => SessionError::TooManyClients,
             SubscriptionError::SessionNotRegistered => SessionError::SessionIsNotCreated,
+            SubscriptionError::OwnerClientLimitExceeded { limit } => {
+                SessionError::OwnerClientLimitExceeded(limit)
+            }
         }
     }
 }
