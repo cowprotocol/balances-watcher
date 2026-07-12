@@ -41,10 +41,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
     tracing::info!("Listening to http://{}", server.local_addr);
 
-    server
-        .serve
-        .await
-        .expect("axum server task panicked")?;
+    server.serve.await.expect("axum server task panicked")?;
 
     drain(lifecycle).await;
 

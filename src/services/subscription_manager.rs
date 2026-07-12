@@ -78,7 +78,6 @@ pub struct SubscriptionManager {
     lifecycle: LifeCycle,
 }
 
-
 impl SubscriptionManager {
     pub fn new(metrics: Arc<Metrics>, rpc_client: Arc<RpcClient>, lifecycle: LifeCycle) -> Self {
         Self {

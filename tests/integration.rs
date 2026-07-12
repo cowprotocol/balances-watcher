@@ -47,7 +47,11 @@ async fn snapshot_after_post() {
     let client_id = Uuid::new_v4().to_string();
 
     let resp = post_session(&env.service_url, env.owner, &client_id, &env.token_list_url).await;
-    assert!(resp.status().is_success(), "POST /sessions status {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "POST /sessions status {}",
+        resp.status()
+    );
 
     let stream = open_sse(&env.service_url, env.owner, &client_id).await;
     tokio::pin!(stream);
@@ -59,7 +63,11 @@ async fn snapshot_after_post() {
         .balances
         .get(&WETH9_ADDRESS)
         .expect("WETH9 missing from initial snapshot");
-    assert_eq!(*weth_balance, U256::ZERO, "fresh owner should have zero WETH");
+    assert_eq!(
+        *weth_balance,
+        U256::ZERO,
+        "fresh owner should have zero WETH"
+    );
 }
 
 /// Case 2 — WETH `deposit()` and `withdraw()` drive SSE updates.
@@ -154,7 +162,10 @@ async fn erc20_transfer_is_broadcast() {
     })
     .await
     .expect("no update reflecting transfer");
-    assert_eq!(after.balances[&WETH9_ADDRESS], initial_bal - transfer_amount);
+    assert_eq!(
+        after.balances[&WETH9_ADDRESS],
+        initial_bal - transfer_amount
+    );
 }
 
 /// Case 4 — MAX_CLIENTS_PER_OWNER cap enforcement.
