@@ -35,7 +35,11 @@ async fn put_add_transfer_remove_flow() {
     // Step 1 — create the session watching only WETH9 (via the token list;
     // no custom tokens yet).
     let resp = post_session(&env.service_url, env.owner, &client_id, &env.token_list_url).await;
-    assert!(resp.status().is_success(), "POST /sessions: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "POST /sessions: {}",
+        resp.status()
+    );
 
     // Step 2 — drain the initial snapshot. It must include WETH9 but not
     // the custom token address, since the session hasn't asked for it yet.
@@ -67,7 +71,11 @@ async fn put_add_transfer_remove_flow() {
         &[CUSTOM_TOKEN_ADDRESS],
     )
     .await;
-    assert!(resp.status().is_success(), "PUT /sessions add: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "PUT /sessions add: {}",
+        resp.status()
+    );
 
     let event = wait_for(&mut stream, Duration::from_secs(30), |event| {
         event
@@ -83,7 +91,8 @@ async fn put_add_transfer_remove_flow() {
     // Step 5 — transfer some of the custom-token balance away. Standard
     // ERC20 Transfer log fires the dispatcher path.
     let transfer_amount = U256::from(250_000_000_000_000_000u128); // 0.25
-    env.custom_transfer(env.peer_address(), transfer_amount).await;
+    env.custom_transfer(env.peer_address(), transfer_amount)
+        .await;
 
     let event = wait_for(&mut stream, Duration::from_secs(30), |event| {
         event
@@ -113,7 +122,11 @@ async fn put_add_transfer_remove_flow() {
         &[],
     )
     .await;
-    assert!(resp.status().is_success(), "PUT /sessions remove: {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "PUT /sessions remove: {}",
+        resp.status()
+    );
 
     // Step 7 — transfer the (still non-zero) custom-token balance again.
     // On-chain this fires a Transfer log, but the server no longer watches
@@ -121,7 +134,8 @@ async fn put_add_transfer_remove_flow() {
     // the SSE stream during the probe window. Assert the negative: no
     // arriving event within `probe` may mention the custom token address.
     let transfer_amount = U256::from(50_000_000_000_000_000u128); // 0.05
-    env.custom_transfer(env.peer_address(), transfer_amount).await;
+    env.custom_transfer(env.peer_address(), transfer_amount)
+        .await;
 
     // Give the dispatcher generous time — one CALL_QUEUE_DELAY window
     // (300 ms) + a block-time tick + snapshot_interval (5 s in the test

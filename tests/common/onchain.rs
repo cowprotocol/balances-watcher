@@ -33,8 +33,7 @@ pub const WETH9_ADDRESS: Address = address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083
 /// any other ERC20 (no special dispatch), so we reuse WETH9 bytecode at a
 /// throwaway address — `deposit()` becomes a convenient way to mint balance
 /// for the owner and `transfer` still fires a standard Transfer event.
-pub const CUSTOM_TOKEN_ADDRESS: Address =
-    address!("0x00000000000000000000000000000000C0FFee00");
+pub const CUSTOM_TOKEN_ADDRESS: Address = address!("0x00000000000000000000000000000000C0FFee00");
 
 /// Public read-only RPC used solely to source deployed bytecode for
 /// Multicall3 and WETH9 the first time the suite runs. Results are cached
