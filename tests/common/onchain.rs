@@ -29,6 +29,13 @@ pub const MULTICALL3_ADDRESS: Address = address!("0xcA11bde05977b3631167028862bE
 /// exactly this constant.
 pub const WETH9_ADDRESS: Address = address!("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 
+/// Second ERC20 used by the token-list-update test. The server treats it as
+/// any other ERC20 (no special dispatch), so we reuse WETH9 bytecode at a
+/// throwaway address — `deposit()` becomes a convenient way to mint balance
+/// for the owner and `transfer` still fires a standard Transfer event.
+pub const CUSTOM_TOKEN_ADDRESS: Address =
+    address!("0x00000000000000000000000000000000C0FFee00");
+
 /// Public read-only RPC used solely to source deployed bytecode for
 /// Multicall3 and WETH9 the first time the suite runs. Results are cached
 /// under `target/test-cache/`, so subsequent runs are offline. Override via
@@ -74,8 +81,10 @@ pub async fn spawn_anvil() -> (AnvilInstance, DynProvider, PrivateKeySigner, Eth
 }
 
 /// `anvil_setCode`-install Multicall3 and WETH9 at their canonical mainnet
-/// addresses. Bytecode is fetched from a public RPC the first time the suite
-/// runs and cached under `target/test-cache/`, so subsequent runs are offline.
+/// addresses, plus a second WETH9 clone at [`CUSTOM_TOKEN_ADDRESS`] used by
+/// the token-list-update test as a stand-in "any other ERC20". Bytecode is
+/// fetched from a public RPC the first time the suite runs and cached under
+/// `target/test-cache/`, so subsequent runs are offline.
 pub async fn install_infrastructure(provider: &DynProvider) {
     fetch_and_setcode(provider, MULTICALL3_ADDRESS, "multicall3")
         .await
@@ -83,6 +92,11 @@ pub async fn install_infrastructure(provider: &DynProvider) {
     fetch_and_setcode(provider, WETH9_ADDRESS, "weth9")
         .await
         .expect("install WETH9 bytecode");
+    // Reuse the cached weth9 bytecode — this second address is just a
+    // throwaway ERC20 with independent storage.
+    fetch_and_setcode(provider, CUSTOM_TOKEN_ADDRESS, "weth9")
+        .await
+        .expect("install custom-token bytecode");
 }
 
 fn cache_dir() -> PathBuf {

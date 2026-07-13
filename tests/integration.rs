@@ -6,34 +6,11 @@
 //! singleton that gets re-installed per test).
 
 use alloy::primitives::U256;
-use futures::StreamExt;
 use std::time::Duration;
 use uuid::Uuid;
 
 mod common;
-use common::{open_sse, post_session, BalanceUpdate, Env, WETH9_ADDRESS};
-
-/// Waits up to `budget` for an event that satisfies `pred`, discarding
-/// events that don't. Returns `None` on timeout.
-async fn wait_for<F: Fn(&BalanceUpdate) -> bool>(
-    stream: &mut (impl futures::Stream<Item = BalanceUpdate> + Unpin),
-    budget: Duration,
-    pred: F,
-) -> Option<BalanceUpdate> {
-    let deadline = tokio::time::sleep(budget);
-    tokio::pin!(deadline);
-    loop {
-        tokio::select! {
-            _ = &mut deadline => return None,
-            maybe = stream.next() => {
-                let ev = maybe?;
-                if pred(&ev) {
-                    return Some(ev);
-                }
-            }
-        }
-    }
-}
+use common::{open_sse, post_session, wait_for, Env, WETH9_ADDRESS};
 
 /// Case 1 — snapshot after POST.
 ///

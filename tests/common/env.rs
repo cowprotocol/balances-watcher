@@ -17,7 +17,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 use super::api::start_token_list_server;
-use super::onchain::{install_infrastructure, spawn_anvil, Weth9, WETH9_ADDRESS};
+use super::onchain::{
+    install_infrastructure, spawn_anvil, Weth9, CUSTOM_TOKEN_ADDRESS, WETH9_ADDRESS,
+};
 
 /// Prometheus recorder is a process-wide singleton — `install_recorder`
 /// after the first successful call returns Err, but there's no way to fish
@@ -138,6 +140,35 @@ impl Env {
             .get_receipt()
             .await
             .expect("weth transfer receipt");
+    }
+
+    /// Mint balance on the throwaway custom ERC20 for the owner. The
+    /// contract at `CUSTOM_TOKEN_ADDRESS` is a plain WETH9 clone, so
+    /// `deposit()` is a convenient minting primitive.
+    pub async fn custom_deposit(&self, amount: U256) {
+        Weth9::new(CUSTOM_TOKEN_ADDRESS, &self.provider)
+            .deposit()
+            .value(amount)
+            .send()
+            .await
+            .expect("custom deposit send")
+            .get_receipt()
+            .await
+            .expect("custom deposit receipt");
+    }
+
+    /// `customToken.transfer(to, amount)`. Emits a standard ERC20 Transfer
+    /// event, so the dispatcher path fires just like it would for any other
+    /// watched token.
+    pub async fn custom_transfer(&self, to: Address, amount: U256) {
+        Weth9::new(CUSTOM_TOKEN_ADDRESS, &self.provider)
+            .transfer(to, amount)
+            .send()
+            .await
+            .expect("custom transfer send")
+            .get_receipt()
+            .await
+            .expect("custom transfer receipt");
     }
 
     /// A second EOA to use as a Transfer destination — anvil pre-funds

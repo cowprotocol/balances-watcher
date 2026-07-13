@@ -541,7 +541,7 @@ node, `anvil_setCode`-install canonical Multicall3 and WETH9 (bytecode fetched
 from a public RPC on first run and cached under `target/test-cache/` for
 offline reruns), then drive the full stack end-to-end.
 
-Two suites live under `tests/`:
+Three suites live under `tests/`:
 
 - `integration` — happy-path coverage: initial SSE snapshot after
   `POST /sessions` includes WETH9, `WETH.deposit()` / `withdraw()` produce
@@ -553,6 +553,10 @@ Two suites live under `tests/`:
   dies once its subscribers disconnect), and two `client_id`s on the same
   owner age independently. Death is asserted both black-box (subsequent
   SSE-connect returns `404`) and via the `sessions_expired_total` counter.
+- `token_list_update` — the `PUT /sessions` flow: adding a token yields an
+  SSE update with its balance, a transfer of the newly-watched token
+  produces the expected diff, removing the token silences further updates
+  even when the underlying ERC20 keeps emitting Transfer events.
 
 All tests carry `#[ignore]` so plain `cargo test` stays green without anvil.
 To run:
@@ -566,6 +570,9 @@ PATH="$HOME/.foundry/bin:$PATH" cargo test --test integration -- --ignored --tes
 
 # TTL suite (slower — several `2 * SESSION_TTL + 2s` waits)
 PATH="$HOME/.foundry/bin:$PATH" cargo test --test session_lifecycle -- --ignored --test-threads=1
+
+# PUT-flow (add token → transfer → remove → transfer-ignored)
+PATH="$HOME/.foundry/bin:$PATH" cargo test --test token_list_update -- --ignored --test-threads=1
 ```
 
 `--test-threads=1` is required because the Prometheus recorder is a

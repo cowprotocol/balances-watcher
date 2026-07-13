@@ -73,3 +73,5 @@ jobs:
               run: cargo test --test integration -- --ignored --test-threads=1
             - name: Run session-lifecycle suite
               run: cargo test --test session_lifecycle -- --ignored --test-threads=1
+            - name: Run token-list-update suite
+              run: cargo test --test token_list_update -- --ignored --test-threads=1

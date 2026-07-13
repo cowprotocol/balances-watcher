@@ -74,6 +74,35 @@ pub async fn post_session(
         .expect("POST /sessions")
 }
 
+/// PUT /1/sessions/{owner} — replace the session's watched-token set. The
+/// server treats this as REPLACE (not extend): tokens missing from the new
+/// request are dropped from the watched map. Note that WETH9 is always added
+/// back by the service side regardless of what the client sends, so it can't
+/// be "removed" via this call — the token-list-update test relies on removing
+/// the custom ERC20 instead.
+pub async fn put_session(
+    service_url: &str,
+    owner: Address,
+    client_id: &str,
+    token_list_url: &str,
+    custom_tokens: &[Address],
+) -> reqwest::Response {
+    let owner_hex = format!("{owner:#x}");
+    let url = format!("{service_url}/1/sessions/{owner_hex}");
+    let custom_hex: Vec<String> = custom_tokens.iter().map(|a| format!("{a:#x}")).collect();
+    let body = json!({
+        "tokensListsUrls": [token_list_url],
+        "customTokens": custom_hex,
+    });
+    reqwest::Client::new()
+        .put(&url)
+        .header("X-Client-Id", client_id)
+        .json(&body)
+        .send()
+        .await
+        .expect("PUT /sessions")
+}
+
 /// GET /sse/1/balances/{owner}?client_id=... — returns the raw response so
 /// tests can either read the stream (see [`sse_stream`]) or just inspect the
 /// status code (used by the TTL tests to assert 404 after expiry).
@@ -165,4 +194,33 @@ pub async fn open_sse(
 ) -> impl futures::Stream<Item = BalanceUpdate> {
     let resp = get_sse(service_url, owner, client_id).await;
     sse_stream(resp)
+}
+
+/// Read the SSE stream until an event satisfies `predicate` or `budget`
+/// expires. Non-matching events are consumed and discarded. Returns `None`
+/// on timeout, `Some(event)` on match. Every test needs this shape, so it
+/// lives here rather than being copy-pasted per file.
+pub async fn wait_for<S, F>(
+    stream: &mut S,
+    budget: std::time::Duration,
+    predicate: F,
+) -> Option<BalanceUpdate>
+where
+    S: futures::Stream<Item = BalanceUpdate> + Unpin,
+    F: Fn(&BalanceUpdate) -> bool,
+{
+    use futures::StreamExt;
+    let deadline = tokio::time::sleep(budget);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => return None,
+            maybe_event = stream.next() => {
+                let event = maybe_event?;
+                if predicate(&event) {
+                    return Some(event);
+                }
+            }
+        }
+    }
 }
