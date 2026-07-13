@@ -528,6 +528,60 @@ src/
 └── tracing/                tracing-subscriber init (JSON layer)
 ```
 
+## Tests
+
+Unit tests run out of the box:
+
+```bash
+cargo test
+```
+
+Integration tests spin up a real [anvil](https://book.getfoundry.sh/anvil/)
+node, `anvil_setCode`-install canonical Multicall3 and WETH9 (bytecode fetched
+from a public RPC on first run and cached under `target/test-cache/` for
+offline reruns), then drive the full stack end-to-end.
+
+Three suites live under `tests/`:
+
+- `integration` — happy-path coverage: initial SSE snapshot after
+  `POST /sessions` includes WETH9, `WETH.deposit()` / `withdraw()` produce
+  SSE `balance_update`s, an ERC20 `transfer` propagates through the
+  dispatcher, and the 6-th distinct `client_id` on one owner hits the
+  `MAX_CLIENTS_PER_OWNER` cap with `429`.
+- `session_lifecycle` — the background TTL path: an idle session is reaped
+  after `SESSION_TTL`, an actively subscribed one survives past it (and
+  dies once its subscribers disconnect), and two `client_id`s on the same
+  owner age independently. Death is asserted both black-box (subsequent
+  SSE-connect returns `404`) and via the `sessions_expired_total` counter.
+- `token_list_update` — the `PUT /sessions` flow: adding a token yields an
+  SSE update with its balance, a transfer of the newly-watched token
+  produces the expected diff, removing the token silences further updates
+  even when the underlying ERC20 keeps emitting Transfer events.
+
+All tests carry `#[ignore]` so plain `cargo test` stays green without anvil.
+To run:
+
+```bash
+# once (installs anvil / cast into ~/.foundry/bin)
+curl -L https://foundry.paradigm.xyz | bash && foundryup
+
+# happy-path suite
+PATH="$HOME/.foundry/bin:$PATH" cargo test --test integration -- --ignored --test-threads=1
+
+# TTL suite (slower — several `2 * SESSION_TTL + 2s` waits)
+PATH="$HOME/.foundry/bin:$PATH" cargo test --test session_lifecycle -- --ignored --test-threads=1
+
+# PUT-flow (add token → transfer → remove → transfer-ignored)
+PATH="$HOME/.foundry/bin:$PATH" cargo test --test token_list_update -- --ignored --test-threads=1
+```
+
+`--test-threads=1` is required because the Prometheus recorder is a
+process-wide singleton shared across tests.
+
+Override the bytecode-source RPC via `INTEGRATION_TEST_RPC_URL` if the default
+public endpoint is down. Once `target/test-cache/{multicall3,weth9}.hex` exist,
+subsequent runs are fully offline.
+
 ## License
 
 MIT

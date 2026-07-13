@@ -27,7 +27,7 @@
 //! `idle_since`, `Arc<Subscription>` — that the registry inspects to decide
 //! "is anyone still listening?" without touching subscription internals.
 
-use crate::config::constants::MAX_CLIENTS_PER_OWNER;
+use crate::config::constants::{MAX_CLIENTS_PER_OWNER, SESSION_TTL};
 use crate::domain::{BalanceEvent, Session};
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
@@ -37,7 +37,7 @@ use crate::services::subscription::Subscription;
 use alloy::primitives::{Address, BlockNumber, U256};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::{broadcast, mpsc, RwLock};
 
 /// Errors surfaced by [`SubscriptionManager`].
@@ -77,8 +77,6 @@ pub struct SubscriptionManager {
     rpc_client: Arc<RpcClient>,
     lifecycle: LifeCycle,
 }
-
-const SESSION_TTL: Duration = Duration::from_secs(5);
 
 impl SubscriptionManager {
     pub fn new(metrics: Arc<Metrics>, rpc_client: Arc<RpcClient>, lifecycle: LifeCycle) -> Self {

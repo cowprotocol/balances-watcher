@@ -48,3 +48,30 @@ jobs:
               with:
                 components: rustfmt
             - uses: actions-rust-lang/rustfmt@4066006ec54a31931b9b1fddfd38f2fdf2d27143 # v1.1.2
+
+    # Anvil-driven integration suites. Both files carry `#[ignore]` so the
+    # vanilla `Test` job above skips them; we run them here explicitly. Serial
+    # (`--test-threads=1`) because the Prometheus recorder is a process-wide
+    # singleton. First run per key fetches Multicall3 + WETH9 bytecode from a
+    # public RPC; the cache below keeps subsequent runs offline.
+    integration:
+        name: Integration (anvil)
+        runs-on: ubuntu-latest
+
+        steps:
+            - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+            - uses: actions-rust-lang/setup-rust-toolchain@46268bd060767258de96ed93c1251119784f2ab6 # v1.16.1
+            - uses: foundry-rs/foundry-toolchain@de808b1eea699e761c404bda44ba8f21aba30b2c # v1.4.0
+              with:
+                version: stable
+            - name: Cache on-chain bytecode fixtures
+              uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf # v4.2.2
+              with:
+                path: target/test-cache
+                key: integration-fixtures-v1
+            - name: Run integration suite
+              run: cargo test --test integration -- --ignored --test-threads=1
+            - name: Run session-lifecycle suite
+              run: cargo test --test session_lifecycle -- --ignored --test-threads=1
+            - name: Run token-list-update suite
+              run: cargo test --test token_list_update -- --ignored --test-threads=1

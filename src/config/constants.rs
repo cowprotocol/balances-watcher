@@ -20,3 +20,10 @@ pub const MULTICALL_PERMITS_COUNT: usize = 600;
 /// devices/tabs can watch one wallet at once, so a POST storm with unique
 /// UUIDs cannot spawn unbounded snapshot pipelines on a single wallet.
 pub const MAX_CLIENTS_PER_OWNER: usize = 5;
+
+/// Idle window after which a session with zero SSE subscribers is dropped by
+/// [`crate::services::subscription_manager::SubscriptionManager`]'s
+/// background cleanup task. Cleanup ticks at the same cadence, so an idle
+/// session dies somewhere in `[SESSION_TTL, 2 * SESSION_TTL)` after its last
+/// subscriber left.
+pub const SESSION_TTL: Duration = Duration::from_secs(5);
