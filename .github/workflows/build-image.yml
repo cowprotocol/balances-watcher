@@ -66,7 +66,26 @@ jobs:
         with:
           fetch-depth: 0
 
+      # Guard against re-runs / no-op merges: if the current HEAD is already
+      # at the latest tag (typical for "Re-run job" or a revert-followed-by-
+      # re-apply merge), skip the whole bump/tag/push chain. Without this
+      # guard we'd tag the same SHA twice with two different versions.
+      - name: Check for changes since last tag
+        id: changes
+        run: |
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "detected=true" >> "$GITHUB_OUTPUT"
+            echo "No previous tag — bootstrapping first release."
+          elif git diff --quiet "$LATEST..HEAD"; then
+            echo "detected=false" >> "$GITHUB_OUTPUT"
+            echo "No commits since $LATEST — skipping release."
+          else
+            echo "detected=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Compute next version
+        if: steps.changes.outputs.detected == 'true'
         id: version
         run: |
           LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
@@ -79,11 +98,13 @@ jobs:
           fi
 
       - name: Create and push tag
+        if: steps.changes.outputs.detected == 'true'
         run: |
           git tag ${{ steps.version.outputs.tag }}
           git push origin ${{ steps.version.outputs.tag }}
 
       - name: Login to GHCR
+        if: steps.changes.outputs.detected == 'true'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -91,6 +112,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Tag image with semver
+        if: steps.changes.outputs.detected == 'true'
         run: |
           SHA_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
           VERSION="${{ steps.version.outputs.tag }}"
