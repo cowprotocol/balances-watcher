@@ -25,6 +25,7 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN }}
 
       # Guard against re-runs and no-op merges: if HEAD is already at the
       # latest tag, skip the whole bump/tag chain. Without this, a re-run
