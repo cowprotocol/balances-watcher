@@ -1,0 +1,95 @@
+name: Release
+
+# Triggered when a PR gets merged into main. `pull_request_target` runs in the
+# base repo's context
+# The push of the new tag re-triggers `build-image.yml` through its
+# `tags: ["v*"]` filter, which is where the docker image with the semver
+# tags actually gets built and pushed. This workflow only tags & releases.
+on:
+  pull_request_target:
+    types: [ closed ]
+    branches: [ main ]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    name: Tag & Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: main
+          fetch-depth: 0
+
+      # Guard against re-runs and no-op merges: if HEAD is already at the
+      # latest tag, skip the whole bump/tag chain. Without this, a re-run
+      # would tag the same SHA a second time under a different version.
+      - name: Check for changes since last tag
+        id: changes
+        run: |
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST" ]; then
+            echo "detected=true" >> "$GITHUB_OUTPUT"
+            echo "No previous tag — bootstrapping first release."
+          elif git diff --quiet "$LATEST..HEAD"; then
+            echo "detected=false" >> "$GITHUB_OUTPUT"
+            echo "No commits since $LATEST — skipping release."
+          else
+            echo "detected=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Label-driven bump. Rules:
+      #   - PR carries label `breaking` → MAJOR+1  (v1.4.7 → v2.0.0)
+      #   - PR carries label `hotfix`   → PATCH+1  (v1.4.7 → v1.4.8)
+      #   - otherwise (default)         → MINOR+1  (v1.4.7 → v1.5.0)
+      - name: Compute next version
+        if: steps.changes.outputs.detected == 'true'
+        id: version
+        env:
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$LATEST" ]; then
+            LATEST="v0.0.0"
+          fi
+
+          MAJOR=$(echo "$LATEST" | sed 's/v\([0-9]*\)\..*/\1/')
+          MINOR=$(echo "$LATEST" | sed 's/v[0-9]*\.\([0-9]*\)\..*/\1/')
+          PATCH=$(echo "$LATEST" | sed 's/v[0-9]*\.[0-9]*\.\([0-9]*\).*/\1/')
+
+          if echo "$LABELS" | grep -q '"breaking"'; then
+            NEW="v$((MAJOR + 1)).0.0"
+            BUMP="MAJOR"
+          elif echo "$LABELS" | grep -q '"hotfix"'; then
+            NEW="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+            BUMP="PATCH"
+          else
+            NEW="v${MAJOR}.$((MINOR + 1)).0"
+            BUMP="MINOR"
+          fi
+
+          echo "Bumping ${LATEST} → ${NEW} (${BUMP}) based on labels ${LABELS}"
+          echo "tag=${NEW}" >> "$GITHUB_OUTPUT"
+
+      - name: Create and push tag
+        if: steps.changes.outputs.detected == 'true'
+        run: |
+          git tag ${{ steps.version.outputs.tag }}
+          git push origin ${{ steps.version.outputs.tag }}
+
+      # Create the GitHub Release object on top of the tag.
+      # `generate_release_notes` asks GitHub to auto-collect PR titles + authors
+      # merged between the previous Release and this one, turning /releases into
+      # a real changelog instead of a list of bare tags.
+      - name: Create GitHub Release
+        if: steps.changes.outputs.detected == 'true'
+        uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          generate_release_notes: true
