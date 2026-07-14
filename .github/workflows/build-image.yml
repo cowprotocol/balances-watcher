@@ -1,8 +1,18 @@
 name: Build Image
 
+# Fires on:
+# - push to main               → :sha-<7> + :latest
+# - push of a v* tag           → :sha-<7> + :v<X.Y.Z> + :v<X.Y> (semver aliases)
+# - PR                         → build only, no push (smoke check)
+#
+# Semver tags come from the sibling release.yml workflow: it runs on merged PRs,
+# decides the bump from PR labels, and pushes the new tag. That push re-triggers
+# this workflow through `tags: ["v*"]`, and the metadata-action's type=semver
+# entries below turn the tag into the two docker tags we want.
 on:
   push:
     branches: ["main"]
+    tags: ["v*"]
   pull_request:
 
 env:
@@ -40,6 +50,8 @@ jobs:
           tags: |
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - name: Build & push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
@@ -50,54 +62,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  release:
-    name: Tag & Release Image
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          fetch-depth: 0
-
-      - name: Compute next version
-        id: version
-        run: |
-          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST" ]; then
-            echo "tag=v0.1.0" >> "$GITHUB_OUTPUT"
-          else
-            MINOR=$(echo "$LATEST" | sed 's/v[0-9]*\.\([0-9]*\)\..*/\1/')
-            MAJOR=$(echo "$LATEST" | sed 's/v\([0-9]*\)\..*/\1/')
-            echo "tag=v${MAJOR}.$((MINOR + 1)).0" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create and push tag
-        run: |
-          git tag ${{ steps.version.outputs.tag }}
-          git push origin ${{ steps.version.outputs.tag }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Tag image with semver
-        run: |
-          SHA_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
-          VERSION="${{ steps.version.outputs.tag }}"
-          MINOR=$(echo "$VERSION" | grep -oP 'v\d+\.\d+')
-
-          docker pull "$SHA_TAG"
-          docker tag "$SHA_TAG" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-          docker tag "$SHA_TAG" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MINOR}"
-          docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-          docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MINOR}"
