@@ -1,8 +1,18 @@
 name: Build Image
 
+# Fires on:
+# - push to main               → :sha-<7> + :latest
+# - push of a v* tag           → :sha-<7> + :v<X.Y.Z> + :v<X.Y> (semver aliases)
+# - PR                         → build only, no push (smoke check)
+#
+# Semver tags come from the sibling release.yml workflow: it runs on merged PRs,
+# decides the bump from PR labels, and pushes the new tag. That push re-triggers
+# this workflow through `tags: ["v*"]`, and the metadata-action's type=semver
+# entries below turn the tag into the two docker tags we want.
 on:
   push:
     branches: ["main"]
+    tags: ["v*"]
   pull_request:
 
 env:
@@ -40,6 +50,8 @@ jobs:
           tags: |
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
       - name: Build & push
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
@@ -50,76 +62,3 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  release:
-    name: Tag & Release Image
-    needs: build
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      packages: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
-        with:
-          fetch-depth: 0
-
-      # Guard against re-runs / no-op merges: if the current HEAD is already
-      # at the latest tag (typical for "Re-run job" or a revert-followed-by-
-      # re-apply merge), skip the whole bump/tag/push chain. Without this
-      # guard we'd tag the same SHA twice with two different versions.
-      - name: Check for changes since last tag
-        id: changes
-        run: |
-          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST" ]; then
-            echo "detected=true" >> "$GITHUB_OUTPUT"
-            echo "No previous tag — bootstrapping first release."
-          elif git diff --quiet "$LATEST..HEAD"; then
-            echo "detected=false" >> "$GITHUB_OUTPUT"
-            echo "No commits since $LATEST — skipping release."
-          else
-            echo "detected=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Compute next version
-        if: steps.changes.outputs.detected == 'true'
-        id: version
-        run: |
-          LATEST=$(git tag --list 'v*' --sort=-v:refname | head -1)
-          if [ -z "$LATEST" ]; then
-            echo "tag=v0.1.0" >> "$GITHUB_OUTPUT"
-          else
-            MINOR=$(echo "$LATEST" | sed 's/v[0-9]*\.\([0-9]*\)\..*/\1/')
-            MAJOR=$(echo "$LATEST" | sed 's/v\([0-9]*\)\..*/\1/')
-            echo "tag=v${MAJOR}.$((MINOR + 1)).0" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create and push tag
-        if: steps.changes.outputs.detected == 'true'
-        run: |
-          git tag ${{ steps.version.outputs.tag }}
-          git push origin ${{ steps.version.outputs.tag }}
-
-      - name: Login to GHCR
-        if: steps.changes.outputs.detected == 'true'
-        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Tag image with semver
-        if: steps.changes.outputs.detected == 'true'
-        run: |
-          SHA_TAG="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
-          VERSION="${{ steps.version.outputs.tag }}"
-          MINOR=$(echo "$VERSION" | grep -oP 'v\d+\.\d+')
-
-          docker pull "$SHA_TAG"
-          docker tag "$SHA_TAG" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-          docker tag "$SHA_TAG" "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MINOR}"
-          docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
-          docker push "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${MINOR}"
