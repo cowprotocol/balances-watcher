@@ -37,6 +37,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: write # required by buildx `cache-to: type=gha` to reserve slots
 
     steps:
       # persist-credentials: false — don't leave GITHUB_TOKEN in the runner's
@@ -81,7 +82,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ github.event_name }}
-          cache-to: type=gha,mode=max,scope=${{ github.event_name }}
+          cache-to: type=gha,mode=min,scope=${{ github.event_name }}
 
   release:
     name: Tag & Release
