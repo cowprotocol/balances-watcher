@@ -46,7 +46,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      actions: write # required by buildx `cache-to: type=gha` to reserve slots
 
     steps:
       # persist-credentials: false — don't leave GITHUB_TOKEN in the runner's
@@ -80,9 +79,13 @@ jobs:
           tags: |
             type=sha
 
-      # Cache scope keyed by event name so a malicious PR build cannot
-      # poison the cache read by the merge-time (`pull_request_target`)
-      # build. Same file, different buckets.
+      # Registry-hosted cache instead of `type=gha`. The GHA Cache API v2
+      # backend has been flaky (opaque "failed to reserve cache" 5xx from
+      # the service even under quota), and switching to a dedicated GHCR
+      # tag as a cache manifest sidesteps it entirely. We already hold
+      # `packages: write`, so no extra permission needed. Cache tag is
+      # scoped by event name so a PR-time build cannot poison the cache
+      # that the merge-time (`pull_request_target`) build reads.
       - name: Build & push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
@@ -90,8 +93,8 @@ jobs:
           push: ${{ github.event_name == 'pull_request_target' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ github.event_name }}
-          cache-to: type=gha,mode=min,scope=${{ github.event_name }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ github.event_name }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache-${{ github.event_name }},mode=min
 
   release:
     name: Tag & Release
