@@ -142,13 +142,13 @@ impl SessionManager {
 
         let (tx, rx) = mpsc::channel::<Erc20TransferEvent>(256);
         let event_dispatcher = Erc20TransferEventDispatcher::spawn(
+            config.active_network,
             Arc::clone(&metrics),
             Arc::clone(&rpc_client),
             Arc::clone(&block_watcher),
             block_head_rx,
             lifecycle.clone(),
             tx,
-            config.active_network.weth9_address(),
         );
 
         let manager = Arc::new(Self {

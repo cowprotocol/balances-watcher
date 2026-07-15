@@ -54,7 +54,8 @@ pub struct Metrics {
     /// completed, results fanned out). Rate ≈ chain block rate when healthy.
     pub event_dispatcher_blocks_processed_total: Counter,
     /// current dispatcher lag in blocks (`latest_block - last_processed`).
-    /// Set on every processed block. Prod alerting can page on `> MAX_BLOCK_LAG`.
+    /// Set on every processed block. Prod alerting can page on lag values
+    /// above `EvmNetwork::max_block_lag()` for the deployment's chain.
     pub event_dispatcher_lag_blocks: Gauge,
     /// eth_getLogs attempt failed (per-attempt, bumped from the retry `.notify`
     /// hook — same semantics as `multicall_failed_total`). Sum across erc20 and

@@ -73,6 +73,29 @@ impl EvmNetwork {
             EvmNetwork::Sepolia => Duration::from_secs(12),
         }
     }
+
+    /// Number of blocks the event dispatcher is allowed to fall behind the
+    /// chain head before `/health` flips to unhealthy. Each entry targets
+    /// ~30s of real-time tolerance (`max_block_lag * block_time`), so a
+    /// fast chain like Polygon or Arbitrum doesn't trip the guard on any
+    /// brief provider hiccup while Ethereum barely notices. Values are
+    /// spelled out per chain (not derived from `block_time`) so a reader
+    /// can see the exact block budget for each network at a glance.
+    pub fn max_block_lag(self) -> u64 {
+        match self {
+            EvmNetwork::Eth => 3,          // * 12s   = 36s
+            EvmNetwork::Bnb => 40,         // * 0.75s = 30s
+            EvmNetwork::Gnosis => 6,       // * 5s    = 30s
+            EvmNetwork::Polygon => 15,     // * 2s    = 30s
+            EvmNetwork::Base => 15,        // * 2s    = 30s
+            EvmNetwork::Plasma => 30,      // * 1s    = 30s
+            EvmNetwork::Arbitrum => 120,   // * 0.25s = 30s
+            EvmNetwork::Avalanche => 15,   // * 2s    = 30s
+            EvmNetwork::Ink => 30,         // * 1s    = 30s
+            EvmNetwork::Linea => 6,        // * 5s    = 30s
+            EvmNetwork::Sepolia => 3,      // * 12s   = 36s
+        }
+    }
 }
 
 impl TryFrom<u64> for EvmNetwork {
