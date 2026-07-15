@@ -19,6 +19,15 @@ env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
+# Serialize releases. Two merges in quick succession would otherwise both
+# compute `v${next}` from the same `git tag --list` snapshot and race on
+# `git push origin <tag>` — leaving an orphan image (imagetools create
+# succeeds) with no matching git tag. `cancel-in-progress: false` lets
+# each run finish so we don't drop half-way through a tag+release.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 # No workflow-level permissions — each job declares its own minimum.
 # `build` doesn't touch git or Releases, so `contents: read` is enough.
 # `release` gets both `contents:write` (tag push + Release create) and
@@ -37,6 +46,7 @@ jobs:
     permissions:
       contents: read
       packages: write
+      actions: write # required by buildx `cache-to: type=gha` to reserve slots
 
     steps:
       # persist-credentials: false — don't leave GITHUB_TOKEN in the runner's
@@ -81,7 +91,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=${{ github.event_name }}
-          cache-to: type=gha,mode=max,scope=${{ github.event_name }}
+          cache-to: type=gha,mode=min,scope=${{ github.event_name }}
 
   release:
     name: Tag & Release
