@@ -378,11 +378,14 @@ etc.) over one shared `flux-apps/balances-watcher/` template.
 
 ### Release flow
 
-Versioning is semantic and label-driven. Two workflows split the work by
-event, not by concern:
+Versioning is semantic and label-driven. Everything lives in a single
+workflow — **`.github/workflows/build-and-release.yml`** — with two jobs:
 
-- **`release.yml`** — fires on `pull_request_target: closed` when a PR is merged
-  into `main`. Does the whole release in one job:
+- **`build`** — Dockerfile build.
+  - On PR: build only, no push (smoke check).
+  - On merge (`pull_request_target: closed` + `merged=true`): build and
+    push `:sha-<7>`.
+- **`release`** (`needs: build`) — runs only on merge.
   1. Reads the merged PR's labels and picks the bump:
 
      | PR label | Bump | Example |
@@ -391,43 +394,52 @@ event, not by concern:
      | `hotfix` | PATCH + 1 | `v1.4.7 → v1.4.8` |
      | (none) | MINOR + 1 (default) | `v1.4.7 → v1.5.0` |
 
-  2. Builds & pushes the docker image with tags `:vX.Y.Z` and `:vX.Y`.
+  2. Retags the `:sha-<7>` image from step 1 with `:vX.Y.Z`, `:vX.Y`,
+     and `:latest` via `docker buildx imagetools create` — a manifest-level
+     alias, no rebuild.
   3. Pushes the git tag.
   4. Creates a GitHub Release with auto-generated notes (PR titles + authors
      between the previous Release and the new one).
 
-- **`build-image.yml`** — fires on push to `main` (produces `:sha-<7>` +
-  `:latest`, i.e. a post-merge debug image) and on PR (build-only smoke check).
-  Semver tags are NOT produced here — they come from `release.yml`.
+`release` starts only after `build` succeeds — `needs: build` gates it.
+Language-side checks (clippy, fmt, tests, integration, audit) live in
+`code-checks.yml` and gate the merge itself via branch protection, so
+by the time `release` runs everything was green on the PR.
 
-Docker build ordering inside `release.yml` is intentional: **build before
-git tag**. If the build fails, no version has been advertised yet — a retry
-just overwrites the same GHCR tag with an identical image. Tagging first
-would risk an orphan git tag pointing at a version with no image behind it.
+#### Ordering inside `release`
+
+Image retag first, then git tag, then GitHub Release. If any retag/tag/push
+step fails, we haven't advertised the version anywhere consumers look — a
+retry just re-tags the same commit again. If we tagged first and image
+retag failed, we'd have an orphan git tag pointing at a version with no
+public image.
 
 #### Docker tag `v`-prefix
 
-`release.yml` explicitly emits `:vX.Y.Z` and `:vX.Y` via `type=raw` in
-`docker/metadata-action`. Default `type=semver` in the same action strips
-the `v` (docker convention), but our infra overlays and pre-consolidation
-GHCR history (`v0.2.0..v1.5.0`) use the prefix — keep it consistent.
+Semver tags are emitted with the `v` prefix (`:v1.6.1`, `:v1.6`). Matches
+the git-tag convention (`v1.6.1`) and the pre-consolidation GHCR history
+(`v0.2.0..v1.5.0`). `docker/metadata-action`'s default `type=semver` strips
+the `v` — we bypass that by using `docker buildx imagetools create --tag`
+directly with the raw string.
 
 #### Skip-empty guard
 
-`release.yml` short-circuits if `HEAD` already sits on the latest tag (`git
-diff --quiet $LATEST..HEAD`). This handles two cases: re-runs after a
-transient failure, and no-op merges (revert-then-reapply). Without it we'd
-tag the same commit under two versions.
+`release` short-circuits if `HEAD` already sits on the latest tag (`git diff
+--quiet $LATEST..HEAD`). This handles two cases: re-runs after a transient
+failure, and no-op merges (revert-then-reapply). Without it we'd tag the
+same commit under two versions.
 
 #### Why one workflow, not a chain
 
-Earlier iterations split tagging into `release.yml` and image build into
-`build-image.yml`, wired together by the tag push. GitHub silently exempts
-pushes made with `GITHUB_TOKEN` from triggering downstream workflows
-(loop-protection rule), so that chain required a PAT (`RELEASE_TOKEN`) on
-the tag push. Consolidating both into a single `release.yml` job removes
-the cross-workflow trigger — plain `GITHUB_TOKEN` with `contents:write` +
-`packages:write` is enough. No PAT to manage or rotate.
+Earlier iterations split tagging and image build into two separate workflow
+files, wired together by the tag push. GitHub silently exempts pushes made
+with `GITHUB_TOKEN` from triggering downstream workflows (loop-protection
+rule), so that chain required a PAT on the tag push. Later attempts kept
+two workflows but had them run in parallel — they raced on the shared
+buildx GHA cache with `failed to reserve cache`. Consolidating into one
+workflow with `needs: build` removes both problems: plain `GITHUB_TOKEN`
+with `contents:write` + `packages:write` is enough, and there's no
+parallel writer competing for the cache.
 
 #### Promoting staging → prod
 
