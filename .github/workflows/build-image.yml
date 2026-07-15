@@ -1,18 +1,16 @@
 name: Build Image
 
 # Fires on:
-# - push to main               → :sha-<7> + :latest
-# - push of a v* tag           → :sha-<7> + :v<X.Y.Z> + :v<X.Y> (semver aliases)
-# - PR                         → build only, no push (smoke check)
+# - push to main → :sha-<7> + :latest  (post-merge debug image)
+# - PR           → build only, no push (smoke check that the Dockerfile still builds)
 #
-# Semver tags come from the sibling release.yml workflow: it runs on merged PRs,
-# decides the bump from PR labels, and pushes the new tag. That push re-triggers
-# this workflow through `tags: ["v*"]`, and the metadata-action's type=semver
-# entries below turn the tag into the two docker tags we want.
+# Semver-tagged images (:vX.Y.Z, :vX.Y) are NOT produced here — release.yml
+# handles that as part of its tag-and-release job. See release.yml for why
+# we consolidated: a split trigger chain required a PAT to bypass the
+# GITHUB_TOKEN → workflow-triggers loop-protection rule.
 on:
   push:
     branches: ["main"]
-    tags: ["v*"]
   pull_request:
 
 env:
@@ -47,14 +45,9 @@ jobs:
         uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # Keep the `v` prefix on semver docker tags so they line up with the
-          # git tags (v1.5.0 etc.) and with the pre-metadata-action history on
-          # GHCR (v0.2.0..v1.5.0). Default `pattern={{version}}` strips it.
           tags: |
             type=sha
             type=raw,value=latest,enable={{is_default_branch}}
-            type=semver,pattern=v{{version}}
-            type=semver,pattern=v{{major}}.{{minor}}
 
       - name: Build & push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0

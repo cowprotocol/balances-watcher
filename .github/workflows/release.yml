@@ -1,17 +1,26 @@
 name: Release
 
-# Triggered when a PR gets merged into main. `pull_request_target` runs in the
-# base repo's context
-# The push of the new tag re-triggers `build-image.yml` through its
-# `tags: ["v*"]` filter, which is where the docker image with the semver
-# tags actually gets built and pushed. This workflow only tags & releases.
+# Fires when a PR gets merged into main. `pull_request_target` runs in the
+# base repo's context, which grants access to `github.event.pull_request.labels`
+# (needed for label-driven bump) and to `secrets.GITHUB_TOKEN` with the
+# permissions declared below.
+#
+# One job does everything: compute the next version, build & push the docker
+# image with semver tags, push the git tag, create the GitHub Release. No
+# downstream workflow trigger, so no PAT required — GITHUB_TOKEN with
+# contents:write + packages:write is sufficient.
 on:
   pull_request_target:
-    types: [ closed ]
-    branches: [ main ]
+    types: [closed]
+    branches: [main]
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
 
 permissions:
-  contents: write
+  contents: write   # git tag push + Release create
+  packages: write   # GHCR push
 
 jobs:
   release:
@@ -25,11 +34,11 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          token: ${{ secrets.RELEASE_TOKEN }}
 
       # Guard against re-runs and no-op merges: if HEAD is already at the
-      # latest tag, skip the whole bump/tag chain. Without this, a re-run
-      # would tag the same SHA a second time under a different version.
+      # latest tag, skip the whole bump/tag/build chain. Without this, a
+      # re-run would tag the same SHA a second time under a different
+      # version.
       - name: Check for changes since last tag
         id: changes
         run: |
@@ -45,9 +54,17 @@ jobs:
           fi
 
       # Label-driven bump. Rules:
-      #   - PR carries label `breaking` → MAJOR+1  (v1.4.7 → v2.0.0)
-      #   - PR carries label `hotfix`   → PATCH+1  (v1.4.7 → v1.4.8)
-      #   - otherwise (default)         → MINOR+1  (v1.4.7 → v1.5.0)
+      #   - PR carries label `breaking` → MAJOR + 1  (v1.4.7 → v2.0.0)
+      #   - PR carries label `hotfix`   → PATCH + 1  (v1.4.7 → v1.4.8)
+      #   - otherwise (default)         → MINOR + 1  (v1.4.7 → v1.5.0)
+      #
+      # `breaking` takes precedence over `hotfix` if both are present.
+      # Grep looks for the quoted label name to avoid substring collisions
+      # (e.g. a label called `hotfixable` won't fire the hotfix branch).
+      #
+      # Emits both `tag` (full semver, e.g. v1.6.1) and `minor_tag` (v1.6)
+      # so the docker image gets both stamped on it — same shape as the old
+      # `type=semver,pattern={{major}}.{{minor}}` behaviour.
       - name: Compute next version
         if: steps.changes.outputs.detected == 'true'
         id: version
@@ -64,18 +81,69 @@ jobs:
           PATCH=$(echo "$LATEST" | sed 's/v[0-9]*\.[0-9]*\.\([0-9]*\).*/\1/')
 
           if echo "$LABELS" | grep -q '"breaking"'; then
-            NEW="v$((MAJOR + 1)).0.0"
+            NEW_MAJOR=$((MAJOR + 1))
+            NEW_MINOR=0
+            NEW_PATCH=0
             BUMP="MAJOR"
           elif echo "$LABELS" | grep -q '"hotfix"'; then
-            NEW="v${MAJOR}.${MINOR}.$((PATCH + 1))"
+            NEW_MAJOR=$MAJOR
+            NEW_MINOR=$MINOR
+            NEW_PATCH=$((PATCH + 1))
             BUMP="PATCH"
           else
-            NEW="v${MAJOR}.$((MINOR + 1)).0"
+            NEW_MAJOR=$MAJOR
+            NEW_MINOR=$((MINOR + 1))
+            NEW_PATCH=0
             BUMP="MINOR"
           fi
 
+          NEW="v${NEW_MAJOR}.${NEW_MINOR}.${NEW_PATCH}"
+          NEW_MINOR_TAG="v${NEW_MAJOR}.${NEW_MINOR}"
+
           echo "Bumping ${LATEST} → ${NEW} (${BUMP}) based on labels ${LABELS}"
           echo "tag=${NEW}" >> "$GITHUB_OUTPUT"
+          echo "minor_tag=${NEW_MINOR_TAG}" >> "$GITHUB_OUTPUT"
+
+      # Docker build & push first, then git tag / Release. If the build
+      # fails, we haven't advertised the version anywhere yet — a retry
+      # simply overwrites the same GHCR tag with the (identical) image. If
+      # we tagged first and the build broke, we'd have an orphan git tag
+      # pointing at a version with no image behind it.
+      - name: Set up Docker Buildx
+        if: steps.changes.outputs.detected == 'true'
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
+
+      - name: Login to GHCR
+        if: steps.changes.outputs.detected == 'true'
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `type=raw` injects the exact strings we computed above — no semver
+      # parsing, no v-prefix stripping. Labels come from the same action so
+      # `org.opencontainers.image.version` etc. get filled automatically.
+      - name: Docker meta (tags/labels)
+        if: steps.changes.outputs.detected == 'true'
+        id: meta
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.tag }}
+            type=raw,value=${{ steps.version.outputs.minor_tag }}
+
+      - name: Build & push semver-tagged image
+        if: steps.changes.outputs.detected == 'true'
+        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Create and push tag
         if: steps.changes.outputs.detected == 'true'
@@ -84,9 +152,9 @@ jobs:
           git push origin ${{ steps.version.outputs.tag }}
 
       # Create the GitHub Release object on top of the tag.
-      # `generate_release_notes` asks GitHub to auto-collect PR titles + authors
-      # merged between the previous Release and this one, turning /releases into
-      # a real changelog instead of a list of bare tags.
+      # `generate_release_notes` asks GitHub to auto-collect PR titles +
+      # authors merged between the previous Release and this one, turning
+      # /releases into a real changelog instead of a list of bare tags.
       - name: Create GitHub Release
         if: steps.changes.outputs.detected == 'true'
         uses: softprops/action-gh-release@fe965f7af51af5f2602596916f38a38df2e33de0 # v3.0.2

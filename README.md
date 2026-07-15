@@ -378,41 +378,39 @@ etc.) over one shared `flux-apps/balances-watcher/` template.
 
 ### Release flow
 
-Versioning is semantic and label-driven. Two workflows split the work:
+Versioning is semantic and label-driven. Two workflows split the work by
+event, not by concern:
 
 - **`release.yml`** — fires on `pull_request_target: closed` when a PR is merged
-  into `main`. Reads the merged PR's labels and picks the bump:
+  into `main`. Does the whole release in one job:
+  1. Reads the merged PR's labels and picks the bump:
 
-  | PR label | Bump | Example |
-  |---|---|---|
-  | `breaking` | MAJOR + 1 | `v1.4.7 → v2.0.0` |
-  | `hotfix` | PATCH + 1 | `v1.4.7 → v1.4.8` |
-  | (none) | MINOR + 1 (default) | `v1.4.7 → v1.5.0` |
+     | PR label | Bump | Example |
+     |---|---|---|
+     | `breaking` | MAJOR + 1 | `v1.4.7 → v2.0.0` |
+     | `hotfix` | PATCH + 1 | `v1.4.7 → v1.4.8` |
+     | (none) | MINOR + 1 (default) | `v1.4.7 → v1.5.0` |
 
-  Then it creates the git tag, pushes it, and creates a GitHub Release with
-  auto-generated notes (PR titles + authors between the previous Release and
-  the new one).
+  2. Builds & pushes the docker image with tags `:vX.Y.Z` and `:vX.Y`.
+  3. Pushes the git tag.
+  4. Creates a GitHub Release with auto-generated notes (PR titles + authors
+     between the previous Release and the new one).
 
 - **`build-image.yml`** — fires on push to `main` (produces `:sha-<7>` +
-  `:latest`) and on push of a `v*` git tag (produces the semver tags
-  `:vX.Y.Z` and `:vX.Y`). Buildx multi-stage build → GHCR.
+  `:latest`, i.e. a post-merge debug image) and on PR (build-only smoke check).
+  Semver tags are NOT produced here — they come from `release.yml`.
 
-The two are decoupled: `release.yml` tags, tag push triggers `build-image.yml`.
+Docker build ordering inside `release.yml` is intentional: **build before
+git tag**. If the build fails, no version has been advertised yet — a retry
+just overwrites the same GHCR tag with an identical image. Tagging first
+would risk an orphan git tag pointing at a version with no image behind it.
 
-#### Two gotchas worth knowing
+#### Docker tag `v`-prefix
 
-1. **Tag push must use a PAT, not `GITHUB_TOKEN`.** GitHub silently exempts
-   `GITHUB_TOKEN`-driven pushes from triggering downstream workflows (loop
-   protection). To make the tag push fire `build-image.yml`, `release.yml`
-   uses the `RELEASE_TOKEN` repo secret (fine-grained PAT with
-   `Contents: read/write` on this repo). Rotate the PAT before its expiration
-   or CI will silently stop bumping images.
-
-2. **Docker tag `v`-prefix is preserved intentionally.** `docker/metadata-action`
-   by default strips the `v` from semver docker tags (so `v1.6.0` becomes
-   `:1.6.0`), but our overlays and history use `v1.5.0`, `v1.4.0` etc. with
-   the prefix. We keep the prefix via `pattern=v{{version}}` in the
-   metadata-action config — if you touch that step, keep the `v`.
+`release.yml` explicitly emits `:vX.Y.Z` and `:vX.Y` via `type=raw` in
+`docker/metadata-action`. Default `type=semver` in the same action strips
+the `v` (docker convention), but our infra overlays and pre-consolidation
+GHCR history (`v0.2.0..v1.5.0`) use the prefix — keep it consistent.
 
 #### Skip-empty guard
 
@@ -420,6 +418,16 @@ The two are decoupled: `release.yml` tags, tag push triggers `build-image.yml`.
 diff --quiet $LATEST..HEAD`). This handles two cases: re-runs after a
 transient failure, and no-op merges (revert-then-reapply). Without it we'd
 tag the same commit under two versions.
+
+#### Why one workflow, not a chain
+
+Earlier iterations split tagging into `release.yml` and image build into
+`build-image.yml`, wired together by the tag push. GitHub silently exempts
+pushes made with `GITHUB_TOKEN` from triggering downstream workflows
+(loop-protection rule), so that chain required a PAT (`RELEASE_TOKEN`) on
+the tag push. Consolidating both into a single `release.yml` job removes
+the cross-workflow trigger — plain `GITHUB_TOKEN` with `contents:write` +
+`packages:write` is enough. No PAT to manage or rotate.
 
 #### Promoting staging → prod
 
