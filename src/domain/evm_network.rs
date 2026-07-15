@@ -83,17 +83,17 @@ impl EvmNetwork {
     /// can see the exact block budget for each network at a glance.
     pub fn max_block_lag(self) -> u64 {
         match self {
-            EvmNetwork::Eth => 3,          // * 12s   = 36s
-            EvmNetwork::Bnb => 40,         // * 0.75s = 30s
-            EvmNetwork::Gnosis => 6,       // * 5s    = 30s
-            EvmNetwork::Polygon => 15,     // * 2s    = 30s
-            EvmNetwork::Base => 15,        // * 2s    = 30s
-            EvmNetwork::Plasma => 30,      // * 1s    = 30s
-            EvmNetwork::Arbitrum => 120,   // * 0.25s = 30s
-            EvmNetwork::Avalanche => 15,   // * 2s    = 30s
-            EvmNetwork::Ink => 30,         // * 1s    = 30s
-            EvmNetwork::Linea => 6,        // * 5s    = 30s
-            EvmNetwork::Sepolia => 3,      // * 12s   = 36s
+            EvmNetwork::Eth => 3,        // * 12s   = 36s
+            EvmNetwork::Bnb => 40,       // * 0.75s = 30s
+            EvmNetwork::Gnosis => 6,     // * 5s    = 30s
+            EvmNetwork::Polygon => 15,   // * 2s    = 30s
+            EvmNetwork::Base => 15,      // * 2s    = 30s
+            EvmNetwork::Plasma => 30,    // * 1s    = 30s
+            EvmNetwork::Arbitrum => 120, // * 0.25s = 30s
+            EvmNetwork::Avalanche => 15, // * 2s    = 30s
+            EvmNetwork::Ink => 30,       // * 1s    = 30s
+            EvmNetwork::Linea => 6,      // * 5s    = 30s
+            EvmNetwork::Sepolia => 3,    // * 12s   = 36s
         }
     }
 }
