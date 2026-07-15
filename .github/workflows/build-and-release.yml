@@ -46,7 +46,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      actions: write # required by buildx `cache-to: type=gha` to reserve slots
 
     steps:
       # persist-credentials: false — don't leave GITHUB_TOKEN in the runner's
@@ -60,8 +59,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
 
+      # Login runs on every event now — even on `pull_request` builds we
+      # need GHCR auth to pull/push the registry-hosted buildx cache tag
+      # (`cache-from`/`cache-to: type=registry,ref=ghcr.io/...:buildcache-*`).
+      # Without login, buildx falls back to an anonymous token request that
+      # 403s on private GHCR packages. GITHUB_TOKEN on same-repo PRs has
+      # `packages: write`; on fork PRs it's read-only, which is enough for
+      # `cache-from`. `cache-to` is skipped on non-merge events anyway.
       - name: Login to GHCR
-        if: github.event_name == 'pull_request_target'
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
         with:
           registry: ${{ env.REGISTRY }}
@@ -80,9 +85,16 @@ jobs:
           tags: |
             type=sha
 
-      # Cache scope keyed by event name so a malicious PR build cannot
-      # poison the cache read by the merge-time (`pull_request_target`)
-      # build. Same file, different buckets.
+      # Registry-hosted cache instead of `type=gha`. The GHA Cache API v2
+      # backend has been flaky (opaque "failed to reserve cache" 5xx from
+      # the service even under quota); a dedicated GHCR tag as a cache
+      # manifest sidesteps it entirely. We already hold `packages: write`,
+      # so no extra permission needed.
+      #
+      # PR builds only READ the cache; only merges (`pull_request_target`)
+      # WRITE it. This means a poisoned PR build cannot pollute what the
+      # next merge picks up, and fork PRs (with a read-only GITHUB_TOKEN)
+      # don't try — and fail — to push cache blobs.
       - name: Build & push
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7.2.0
         with:
@@ -90,8 +102,8 @@ jobs:
           push: ${{ github.event_name == 'pull_request_target' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ github.event_name }}
-          cache-to: type=gha,mode=min,scope=${{ github.event_name }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: ${{ github.event_name == 'pull_request_target' && format('type=registry,ref={0}/{1}:buildcache,mode=min', env.REGISTRY, env.IMAGE_NAME) || '' }}
 
   release:
     name: Tag & Release
