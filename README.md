@@ -358,24 +358,93 @@ model:
 - **Per-chain config** — separate RPC endpoints, rate-limit tiers, resource
   requests, Prometheus pod labels.
 
-### Kubernetes (production)
+### Kubernetes
 
 Deployed via [cowprotocol/infrastructure](https://github.com/cowprotocol/infrastructure)
-using Pulumi (DNS, secrets) + Flux (k8s manifests). One `Deployment` + `Service`
-per chain in the `balances-watcher` namespace, with a shared `Ingress` routing
-`/<chain_id>/...` and `/sse/<chain_id>/...` to the matching service.
+using Pulumi (DNS) + Flux (k8s manifests):
 
-Docker images are built and pushed to GHCR by `.github/workflows/build-image.yml`
-on push to `main` or on semver tags (`vX.Y.Z`). Flux picks up new image tags
-from `ghcr.io/cowprotocol/balances-watcher`.
+- **Staging**: `balances-watcher.barn.cow.fi`. Flux `ImagePolicy` watches GHCR
+  and auto-opens a bump PR when a new semver tag lands (see the
+  `staging-auto-pr` workflow in the infra repo).
+- **Prod**: `balances-watcher.cow.fi`. **No Flux image automation** on the prod
+  cluster — the tag is pinned manually in `cluster/prod/balances-watcher/…/kustomization.yaml`,
+  bumped via an infra PR when someone decides to promote a version from staging.
+  This is the deliberate promotion gate between the two environments.
 
-### Releases
+One `Deployment` + `Service` per chain in the `balances-watcher` namespace,
+with a shared `Ingress` routing `/<chain_id>/...` and `/sse/<chain_id>/...` to
+the matching service. Each chain is a kustomize overlay (`nameSuffix: -mainnet`
+etc.) over one shared `flux-apps/balances-watcher/` template.
 
-Versioning is fully automatic. Every merge to `main` triggers the `release` job
-which bumps the minor version from the latest git tag (`v0.1.0` → `v0.2.0` → …)
-and pushes the new tag. The tag push re-triggers the build pipeline, producing
-a GHCR image tagged with the semver version (`v0.2.0`, `0.2`) alongside `sha-xxx`
-and `latest`.
+### Release flow
+
+Versioning is semantic and label-driven. Two workflows split the work by
+event, not by concern:
+
+- **`release.yml`** — fires on `pull_request_target: closed` when a PR is merged
+  into `main`. Does the whole release in one job:
+  1. Reads the merged PR's labels and picks the bump:
+
+     | PR label | Bump | Example |
+     |---|---|---|
+     | `breaking` | MAJOR + 1 | `v1.4.7 → v2.0.0` |
+     | `hotfix` | PATCH + 1 | `v1.4.7 → v1.4.8` |
+     | (none) | MINOR + 1 (default) | `v1.4.7 → v1.5.0` |
+
+  2. Builds & pushes the docker image with tags `:vX.Y.Z` and `:vX.Y`.
+  3. Pushes the git tag.
+  4. Creates a GitHub Release with auto-generated notes (PR titles + authors
+     between the previous Release and the new one).
+
+- **`build-image.yml`** — fires on push to `main` (produces `:sha-<7>` +
+  `:latest`, i.e. a post-merge debug image) and on PR (build-only smoke check).
+  Semver tags are NOT produced here — they come from `release.yml`.
+
+Docker build ordering inside `release.yml` is intentional: **build before
+git tag**. If the build fails, no version has been advertised yet — a retry
+just overwrites the same GHCR tag with an identical image. Tagging first
+would risk an orphan git tag pointing at a version with no image behind it.
+
+#### Docker tag `v`-prefix
+
+`release.yml` explicitly emits `:vX.Y.Z` and `:vX.Y` via `type=raw` in
+`docker/metadata-action`. Default `type=semver` in the same action strips
+the `v` (docker convention), but our infra overlays and pre-consolidation
+GHCR history (`v0.2.0..v1.5.0`) use the prefix — keep it consistent.
+
+#### Skip-empty guard
+
+`release.yml` short-circuits if `HEAD` already sits on the latest tag (`git
+diff --quiet $LATEST..HEAD`). This handles two cases: re-runs after a
+transient failure, and no-op merges (revert-then-reapply). Without it we'd
+tag the same commit under two versions.
+
+#### Why one workflow, not a chain
+
+Earlier iterations split tagging into `release.yml` and image build into
+`build-image.yml`, wired together by the tag push. GitHub silently exempts
+pushes made with `GITHUB_TOKEN` from triggering downstream workflows
+(loop-protection rule), so that chain required a PAT (`RELEASE_TOKEN`) on
+the tag push. Consolidating both into a single `release.yml` job removes
+the cross-workflow trigger — plain `GITHUB_TOKEN` with `contents:write` +
+`packages:write` is enough. No PAT to manage or rotate.
+
+#### Promoting staging → prod
+
+Manual and intentional:
+
+```bash
+# In cowprotocol/infrastructure
+git checkout -b promote/balances-watcher-v1.7.0
+# Bump: cluster/prod/balances-watcher/balances-watcher/kustomization.yaml
+#   newTag: v1.6.1  →  newTag: v1.7.0
+git commit -am "promote balances-watcher to v1.7.0 in prod"
+git push -u origin promote/balances-watcher-v1.7.0
+gh pr create --title "promote balances-watcher v1.7.0 → prod"
+```
+
+Reviewer approves, merges, Flux applies. No automation between the version
+existing on staging and it landing in prod — that's the gate.
 
 ### docker-compose (local dev)
 
