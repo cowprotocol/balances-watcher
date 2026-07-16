@@ -72,6 +72,13 @@ impl TokenListFetcher {
         network: EvmNetwork,
         allow_private_hosts: bool,
     ) -> Self {
+        if allow_private_hosts {
+            tracing::warn!(
+                "ALLOW_PRIVATE_TOKEN_LISTS is enabled — token-list URLs may reach \
+                 private/loopback hosts. This must never be on in a deployed environment."
+            );
+        }
+
         Self {
             cache: Cache::builder()
                 .time_to_live(cache_ttl)
