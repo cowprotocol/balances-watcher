@@ -5,6 +5,7 @@ pub mod snapshot_updater;
 mod subscription;
 pub mod subscription_manager;
 pub mod token_list_fetcher;
+pub mod url_guard;
 
 pub mod rpc_client;
 

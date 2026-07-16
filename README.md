@@ -42,6 +42,11 @@ ingress — see [Deployment model](#deployment-model).
   chain head by more than `MAX_BLOCK_LAG` blocks; block delivery uses a
   bounded FIFO channel with overflow detection
 - **Token-list caching** with 5 h TTL + concurrent-request deduplication
+- **SSRF-guarded token-list fetching** — client-supplied list URLs must be
+  `http(s)` and resolve to public addresses (private / loopback / link-local
+  / metadata ranges are refused, including via redirects and DNS rebinding);
+  responses are capped at 10 MB and 20 s per fetch. Local dev can opt out via
+  `ALLOW_PRIVATE_TOKEN_LISTS=true`
 - **Graceful shutdown** — `SIGTERM` cancels every spawned task via
   `CancellationToken`; in-flight work is awaited (up to 10 s) before exit
 - **Prometheus metrics** exposed at `/metrics`
@@ -487,6 +492,7 @@ curl -N      http://localhost:4000/sse/1/balances/0xd8dA...
 | `HTTP_BIND` | Bind address. | `0.0.0.0:8080` |
 | `SNAPSHOT_INTERVAL` | Full multicall refresh interval, seconds. | `60` |
 | `MAX_WATCHED_TOKENS_LIMIT` | Max tokens per session. | `1500` |
+| `ALLOW_PRIVATE_TOKEN_LISTS` | SSRF escape hatch: allow client-supplied token-list URLs to point at private / loopback hosts. Local dev & tests only — keep `false` in any deployed environment. | `false` |
 | `RUST_LOG` | Standard `tracing-subscriber` env-filter. | unset |
 
 ## Quick start
@@ -519,6 +525,8 @@ Compile-time in `src/config/constants.rs` (and a few module-local `const`s):
 | Max tokens per session | `1500` | Session is rejected if total watched tokens exceeds this. |
 | Max client_ids per owner | `5` | `POST` rejected with 429 if this `(chain, owner)` already hosts N sessions with distinct `client_id`s. |
 | Token list cache TTL | `5 h` | HTTP fetches dedup'd via singleflight + cached. |
+| Token list fetch timeout | `20 s` | Whole-request timeout per token-list HTTP fetch. |
+| Token list response cap | `10 MB` | Max token-list body size (checked via `Content-Length` and while streaming). |
 | Session idle TTL | `5 s` | Sessions with no SSE clients are cancelled after this idle window. |
 | Broadcast channel capacity | `256` | Per-subscription buffer of pending events. |
 | Calls-queue debounce | `300 ms` | Window over which transfer events coalesce into a single multicall. |

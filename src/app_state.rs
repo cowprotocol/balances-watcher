@@ -48,6 +48,7 @@ impl AppState {
                 snapshot_interval: network_config.snapshot_interval,
                 token_limit: network_config.max_watched_tokens_limit,
                 active_network: network,
+                allow_private_token_lists: network_config.allow_private_token_lists,
             },
             ws_url,
         );

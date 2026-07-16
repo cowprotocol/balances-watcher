@@ -36,6 +36,8 @@ pub struct SessionConfig {
     pub token_limit: usize,
     // network that manager handles
     pub active_network: EvmNetwork,
+    // allow token-list URLs on private/loopback hosts (local dev & tests only)
+    pub allow_private_token_lists: bool,
 }
 
 /// Per-network session orchestrator.
@@ -97,6 +99,9 @@ pub enum SessionError {
     #[error("Token list not found: {0}")]
     TokenListNotFound(String),
 
+    #[error("Token list url not allowed: {0} ({1})")]
+    TokenListUrlNotAllowed(String, String),
+
     #[error("Token limit exceeded, max count is {0}, current count is {1}")]
     TokenLimitExceeded(usize, usize),
 
@@ -120,6 +125,7 @@ impl SessionManager {
             get_token_list_fetcher_backoff(),
             Arc::clone(&metrics),
             config.active_network,
+            config.allow_private_token_lists,
         );
 
         let sub_manager = Arc::new(SubscriptionManager::new(
@@ -298,6 +304,9 @@ impl SessionManager {
             .await
             .map_err(|err| match err {
                 FetcherError::UnableToLoadList(url, _) => SessionError::TokenListNotFound(url),
+                FetcherError::UrlNotAllowed(url, reason) => {
+                    SessionError::TokenListUrlNotAllowed(url, reason)
+                }
             })?;
         tokens.extend(custom_tokens);
         // token lists doesn't contain weth9 address, we always should insert it

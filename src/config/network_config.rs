@@ -9,6 +9,9 @@ pub struct NetworkConfig {
     pub rpc_http_url: String,
     pub snapshot_interval: usize,
     pub max_watched_tokens_limit: usize,
+    /// Allow token-list URLs on private / loopback hosts (SSRF escape hatch
+    /// for local dev and tests). `false` in production.
+    pub allow_private_token_lists: bool,
 }
 
 impl NetworkConfig {
@@ -40,6 +43,7 @@ impl NetworkConfig {
             rpc_http_url: args.rpc_http_url.clone(),
             snapshot_interval,
             max_watched_tokens_limit,
+            allow_private_token_lists: args.allow_private_token_lists,
         }
     }
 }

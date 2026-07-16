@@ -28,6 +28,12 @@ pub struct Args {
 
     #[arg(long, env = "MAX_WATCHED_TOKENS_LIMIT", default_value = "1500")]
     pub max_watched_tokens_limit: String,
+
+    /// SSRF escape hatch: allow client-supplied token-list URLs to point at
+    /// private / loopback hosts. Only for local development and tests —
+    /// must stay `false` in any deployed environment.
+    #[arg(long, env = "ALLOW_PRIVATE_TOKEN_LISTS", default_value_t = false)]
+    pub allow_private_token_lists: bool,
 }
 
 impl Args {

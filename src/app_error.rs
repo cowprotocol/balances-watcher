@@ -30,6 +30,7 @@ impl From<SessionError> for AppError {
             SessionError::SessionIsNotCreated => AppError::NotFound(e.to_string()),
             SessionError::TokenLimitExceeded(_, _) => AppError::BadRequest(e.to_string()),
             SessionError::TokenListNotFound(_) => AppError::BadRequest(e.to_string()),
+            SessionError::TokenListUrlNotAllowed(_, _) => AppError::BadRequest(e.to_string()),
             SessionError::OwnerClientLimitExceeded(_) => AppError::TooManyRequests(e.to_string()),
         }
     }

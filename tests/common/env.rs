@@ -74,6 +74,8 @@ impl Env {
             rpc_http_url: anvil.endpoint(),
             snapshot_interval: 5,
             max_watched_tokens_limit: 1500,
+            // the in-process token-list server lives on 127.0.0.1
+            allow_private_token_lists: true,
         };
 
         let server = spawn_server(
@@ -189,5 +191,55 @@ impl Env {
 impl Drop for Env {
     fn drop(&mut self) {
         self.service_lifecycle.cancel_token.cancel();
+    }
+}
+
+/// Service-only environment: balances-watcher without anvil. The RPC
+/// endpoints point at a closed local port and are never successfully
+/// dialled — good enough for tests that exercise the HTTP surface without
+/// touching the chain (URL-guard rejections and friends). Unlike [`Env`],
+/// tests built on this don't need `#[ignore]` or foundry on PATH.
+pub struct ServiceEnv {
+    /// Base URL of the balances-watcher service (e.g. `http://127.0.0.1:XXXX`).
+    pub service_url: String,
+    lifecycle: LifeCycle,
+}
+
+impl ServiceEnv {
+    pub async fn spawn(allow_private_token_lists: bool) -> Self {
+        let lifecycle = LifeCycle::spawn();
+        let metrics_handler = shared_metrics_handle();
+        let metrics = Arc::new(Metrics::install());
+
+        let network_cfg = NetworkConfig {
+            network: EvmNetwork::Eth,
+            // port 9 (discard) — connection-refused instantly, never answers
+            rpc_http_url: "http://127.0.0.1:9".to_string(),
+            snapshot_interval: 3600,
+            max_watched_tokens_limit: 1500,
+            allow_private_token_lists,
+        };
+
+        let server = spawn_server(
+            "127.0.0.1:0",
+            network_cfg,
+            "ws://127.0.0.1:9".to_string(),
+            metrics,
+            metrics_handler,
+            lifecycle.clone(),
+        )
+        .await
+        .expect("spawn_server (service-only)");
+
+        Self {
+            service_url: format!("http://{}", server.local_addr),
+            lifecycle,
+        }
+    }
+}
+
+impl Drop for ServiceEnv {
+    fn drop(&mut self) {
+        self.lifecycle.cancel_token.cancel();
     }
 }

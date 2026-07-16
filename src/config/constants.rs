@@ -21,6 +21,17 @@ pub const MULTICALL_PERMITS_COUNT: usize = 600;
 /// UUIDs cannot spawn unbounded snapshot pipelines on a single wallet.
 pub const MAX_CLIENTS_PER_OWNER: usize = 5;
 
+/// Whole-request timeout for a single token-list HTTP fetch. Token lists are
+/// a few MB at most; anything slower than this is a dead upstream (or an
+/// attacker-controlled tarpit) and should fail the request, not hold the
+/// session-create handler open.
+pub const TOKEN_LIST_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Cap on a token-list response body. The largest legitimate lists
+/// (coingecko `all.json`) are single-digit MB; the cap exists so a
+/// caller-supplied URL serving an unbounded body cannot OOM the process.
+pub const MAX_TOKEN_LIST_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
 /// Idle window after which a session with zero SSE subscribers is dropped by
 /// [`crate::services::subscription_manager::SubscriptionManager`]'s
 /// background cleanup task. Cleanup ticks at the same cadence, so an idle
