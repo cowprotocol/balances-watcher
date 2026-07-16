@@ -76,6 +76,8 @@ pub struct Metrics {
     pub token_list_loaded_total: Counter,
     /// token list fetch failed after retries
     pub token_list_load_failed_total: Counter,
+    /// token list url rejected by the ssrf guard (bad scheme / private host)
+    pub token_list_url_rejected_total: Counter,
     /// token list fetch latency, ms
     pub token_list_loaded_time_in_ms: Histogram,
 
@@ -134,6 +136,7 @@ impl Metrics {
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),
+            token_list_url_rejected_total: counter!("token_list_url_rejected_total"),
             token_list_loaded_time_in_ms: histogram!("token_list_loaded_time_in_ms"),
 
             snapshot_updater_runs_total: counter!("snapshot_updater_runs_total"),

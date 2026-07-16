@@ -8,6 +8,7 @@ axum = "0.8.9"
 reqwest = { version = "0.13.3", features = ["json", "stream"] }
 tokio = { version = "1.52.1", features = ["full"] }
 serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 futures = "0.3.32"
 tokio-stream = "0.1.18"
 clap = { version = "4.6.1", features = ["env", "derive"] }
@@ -29,6 +30,5 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum", "reqwest"] }
 
 [dev-dependencies]
 wiremock = "0.6.5"
-serde_json = "1.0.149"
 hex = "0.4"
 eventsource-stream = "0.2"

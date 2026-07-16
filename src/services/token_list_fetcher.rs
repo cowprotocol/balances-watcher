@@ -8,6 +8,8 @@
 //! trigger duplicate HTTP calls. Retries on transient HTTP failures are handled
 //! with exponential backoff ([`backon`]).
 
+use crate::config::constants::{MAX_TOKEN_LIST_RESPONSE_BYTES, TOKEN_LIST_FETCH_TIMEOUT};
+use crate::services::url_guard;
 use crate::{
     domain::{EvmNetwork, Token},
     metrics::Metrics,
@@ -15,6 +17,7 @@ use crate::{
 use alloy::primitives::Address;
 use backon::{ExponentialBuilder, Retryable};
 use futures::future::try_join_all;
+use futures::StreamExt;
 use moka::future::Cache;
 use reqwest::{Client, Response};
 use serde::Deserialize;
@@ -35,6 +38,11 @@ type ChainTokens = HashSet<Address>;
 pub enum FetcherError {
     #[error("unable to load token list, url: {0}, error: {1}")]
     UnableToLoadList(String, String),
+
+    /// The URL failed the SSRF guard ([`url_guard::validate_url`]) — wrong
+    /// scheme, or a non-public host while private hosts are disallowed.
+    #[error("token list url not allowed, url: {0}, reason: {1}")]
+    UrlNotAllowed(String, String),
 }
 
 pub struct TokenListFetcher {
@@ -46,6 +54,9 @@ pub struct TokenListFetcher {
     metrics: Arc<Metrics>,
     // active network; the fetcher is single-chain, so it filters lists by this one
     network: EvmNetwork,
+    // SSRF escape hatch: when true, token-list URLs may point at private /
+    // loopback hosts (local dev, integration tests). Always false in prod.
+    allow_private_hosts: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,17 +70,38 @@ impl TokenListFetcher {
         backoff_cfg: ExponentialBuilder,
         metrics: Arc<Metrics>,
         network: EvmNetwork,
+        allow_private_hosts: bool,
     ) -> Self {
         Self {
             cache: Cache::builder()
                 .time_to_live(cache_ttl)
                 .max_capacity(CACHE_CAPACITY)
                 .build(),
-            client: Client::new(),
+            client: Self::build_client(allow_private_hosts),
             backoff_cfg,
             metrics,
             network,
+            allow_private_hosts,
         }
+    }
+
+    /// Build the HTTP client for token-list fetches. Always applies a
+    /// whole-request timeout and a bounded redirect policy; when private
+    /// hosts are disallowed, DNS resolution additionally goes through
+    /// [`url_guard::PublicOnlyDnsResolver`] so redirects and DNS-rebinding
+    /// cannot smuggle the client into the internal network.
+    fn build_client(allow_private_hosts: bool) -> Client {
+        let builder = Client::builder()
+            .timeout(TOKEN_LIST_FETCH_TIMEOUT)
+            .redirect(url_guard::redirect_policy(allow_private_hosts));
+
+        let builder = if allow_private_hosts {
+            builder
+        } else {
+            builder.dns_resolver(Arc::new(url_guard::PublicOnlyDnsResolver))
+        };
+
+        builder.build().expect("token-list http client")
     }
 
     /// Fetches the given token lists, filters them down to the fetcher's active
@@ -106,6 +138,12 @@ impl TokenListFetcher {
     }
 
     async fn fetch_list_and_filter_by_chain(&self, url: &str) -> Result<ChainTokens, FetcherError> {
+        url_guard::validate_url(url, self.allow_private_hosts).map_err(|reason| {
+            self.metrics.token_list_url_rejected_total.increment(1);
+            tracing::warn!(url, reason, "token list url rejected by ssrf guard");
+            FetcherError::UrlNotAllowed(url.into(), reason)
+        })?;
+
         let network = self.network;
         let token_set = self
             .fetch_list(url)
@@ -127,22 +165,52 @@ impl TokenListFetcher {
         let t0 = Instant::now();
         let metrics = Arc::clone(&self.metrics);
 
-        self.fetch_with_backoff(url)
+        let response = self.fetch_with_backoff(url).await.inspect(move |_| {
+            metrics.token_list_loaded_total.increment(1);
+            metrics
+                .token_list_loaded_time_in_ms
+                .record(t0.elapsed().as_millis() as f64);
+            tracing::debug!(
+                time_ms = ?t0.elapsed().as_millis(),
+                url = ?url,
+                "token list loaded"
+            );
+        })?;
+
+        let body = Self::read_body_capped(response, MAX_TOKEN_LIST_RESPONSE_BYTES)
             .await
-            .inspect(move |_| {
-                metrics.token_list_loaded_total.increment(1);
-                metrics
-                    .token_list_loaded_time_in_ms
-                    .record(t0.elapsed().as_millis() as f64);
-                tracing::debug!(
-                    time_ms = ?t0.elapsed().as_millis(),
-                    url = ?url,
-                    "token list loaded"
-                );
-            })?
-            .json()
-            .await
+            .map_err(|err| {
+                self.metrics.token_list_load_failed_total.increment(1);
+                FetcherError::UnableToLoadList(url.into(), err)
+            })?;
+
+        serde_json::from_slice(&body)
             .map_err(|err| FetcherError::UnableToLoadList(url.into(), err.to_string()))
+    }
+
+    /// Read a response body while enforcing `cap` — both up front via
+    /// `Content-Length` and incrementally while streaming, so a body without
+    /// (or lying about) the header still cannot grow past the cap.
+    async fn read_body_capped(response: Response, cap: usize) -> Result<Vec<u8>, String> {
+        if let Some(len) = response.content_length() {
+            if len > cap as u64 {
+                return Err(format!(
+                    "token list response too large: {len} bytes (cap: {cap})"
+                ));
+            }
+        }
+
+        let mut body: Vec<u8> = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|err| err.to_string())?;
+            if body.len() + chunk.len() > cap {
+                return Err(format!("token list response exceeded {cap} bytes cap"));
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        Ok(body)
     }
 
     async fn fetch_with_backoff(&self, url: &str) -> Result<Response, FetcherError> {
@@ -198,11 +266,13 @@ mod token_list_fetcher_tests {
             .with_max_times(BACK_OFFS as usize)
             .with_jitter();
 
+        // wiremock serves from 127.0.0.1 — private hosts must be allowed here
         Arc::new(TokenListFetcher::new(
             Duration::from_millis(300),
             back_off,
             Arc::new(Metrics::install()),
             EvmNetwork::Eth,
+            true,
         ))
     }
 
