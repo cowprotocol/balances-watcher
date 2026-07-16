@@ -17,6 +17,7 @@
 //! single-block range, so the cost is fixed per block (~two HTTP RPCs
 //! per ~12s on mainnet) regardless of active session count.
 
+use crate::domain::EvmNetwork;
 use crate::evm::wrapped::WrappedToken;
 use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
@@ -32,7 +33,6 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const ERC20_TRANSFER_TOPICS_LEN: usize = 3;
-const MAX_BLOCK_LAG: u64 = 10;
 
 pub struct Erc20TransferEvent {
     pub owner: Address,
@@ -49,17 +49,21 @@ pub struct Erc20TransferEventDispatcher {
     transfer_tx_out: mpsc::Sender<Erc20TransferEvent>,
     latest_processed_block: AtomicU64,
     weth9_address: Address,
+    /// Snapshot of `EvmNetwork::max_block_lag()` for the chain this
+    /// dispatcher was spawned for. Kept as a plain field so the health
+    /// check stays lock-free.
+    max_block_lag: u64,
 }
 
 impl Erc20TransferEventDispatcher {
     pub fn spawn(
+        network: EvmNetwork,
         metrics: Arc<Metrics>,
         rpc_client: Arc<RpcClient>,
         block_watcher: Arc<BlockWatcher>,
         block_number_rx: mpsc::Receiver<BlockNumber>,
         lifecycle: LifeCycle,
         transfer_tx_out: mpsc::Sender<Erc20TransferEvent>,
-        weth9_address: Address,
     ) -> Arc<Self> {
         let dispatcher = Arc::new(Self {
             metrics,
@@ -68,8 +72,9 @@ impl Erc20TransferEventDispatcher {
             cancel_token: lifecycle.cancel_token,
             is_active: AtomicBool::new(false),
             transfer_tx_out,
-            weth9_address,
+            weth9_address: network.weth9_address(),
             latest_processed_block: AtomicU64::new(0),
+            max_block_lag: network.max_block_lag(),
         });
 
         let dispatcher_for_spawn = Arc::clone(&dispatcher);
@@ -82,7 +87,7 @@ impl Erc20TransferEventDispatcher {
 
     /// Structured health for `/health`. Healthy from the moment the dispatcher
     /// has seen its first block notification, unless block lag has climbed
-    /// past `MAX_BLOCK_LAG`. Per-block fetch failures do NOT toggle this —
+    /// past `self.max_block_lag`. Per-block fetch failures do NOT toggle this —
     /// they're logged and the loop continues; only sustained lag is unhealthy.
     pub fn health_status(&self) -> SubsystemHealth {
         if !self.is_active.load(Ordering::Relaxed) {
@@ -103,15 +108,17 @@ impl Erc20TransferEventDispatcher {
         }
 
         let lag = current_head.saturating_sub(latest_processed_block);
-        if lag > MAX_BLOCK_LAG {
+        let max_block_lag = self.max_block_lag;
+        if lag > max_block_lag {
             tracing::warn!(
                 current_head = current_head,
                 lag,
                 latest_processed_block,
+                max_block_lag,
                 "event dispatcher: lag exceeded threshold, dispatcher unhealthy"
             );
             return SubsystemHealth::Unhealthy(format!(
-                "block lag {lag} exceeds max {MAX_BLOCK_LAG} \
+                "block lag {lag} exceeds max {max_block_lag} \
                  (head={current_head}, latest_processed={latest_processed_block})"
             ));
         }
