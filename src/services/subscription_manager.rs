@@ -349,11 +349,14 @@ impl SubscriptionManager {
             if existing.clients == 0 {
                 existing.idle_since = Some(Instant::now());
 
-                self.metrics.sessions_expired_total.increment(1);
+                // The session is now idle, not expired — it can still be
+                // revived by a `subscribe` within `SESSION_TTL`. Count it as
+                // expired only when the cleanup sweep actually reaps it, so
+                // `sessions_expired_total` mirrors `active_sessions`.
                 self.metrics.sse_connections_active.decrement(1);
                 tracing::info!(
                     session = %session,
-                    "session expired"
+                    "session went idle: last subscriber disconnected"
                 );
 
                 return Ok(true);
