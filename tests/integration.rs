@@ -72,8 +72,9 @@ async fn weth_deposit_and_withdraw_are_broadcast() {
     let deposit_amount = U256::from(500_000_000_000_000_000u128); // 0.5 ETH
     env.weth_deposit(deposit_amount).await;
 
-    let after_deposit = wait_for(&mut stream, Duration::from_secs(30), |ev| {
-        ev.balances
+    let after_deposit = wait_for(&mut stream, Duration::from_secs(30), |event| {
+        event
+            .balances
             .get(&WETH9_ADDRESS)
             .map(|v| *v >= deposit_amount)
             .unwrap_or(false)
@@ -86,8 +87,9 @@ async fn weth_deposit_and_withdraw_are_broadcast() {
     let withdraw_amount = U256::from(200_000_000_000_000_000u128); // 0.2 ETH
     env.weth_withdraw(withdraw_amount).await;
 
-    let after_withdraw = wait_for(&mut stream, Duration::from_secs(30), |ev| {
-        ev.balances
+    let after_withdraw = wait_for(&mut stream, Duration::from_secs(30), |event| {
+        event
+            .balances
             .get(&WETH9_ADDRESS)
             .map(|v| *v < after_deposit_bal)
             .unwrap_or(false)
@@ -120,8 +122,8 @@ async fn erc20_transfer_is_broadcast() {
     let stream = open_sse(&env.service_url, env.owner, &client_id).await;
     tokio::pin!(stream);
 
-    let initial = wait_for(&mut stream, Duration::from_secs(15), |ev| {
-        ev.balances.contains_key(&WETH9_ADDRESS)
+    let initial = wait_for(&mut stream, Duration::from_secs(15), |event| {
+        event.balances.contains_key(&WETH9_ADDRESS)
     })
     .await
     .expect("no initial snapshot");
@@ -131,8 +133,9 @@ async fn erc20_transfer_is_broadcast() {
     let transfer_amount = U256::from(300_000_000_000_000_000u128); // 0.3 WETH
     env.weth_transfer(env.peer_address(), transfer_amount).await;
 
-    let after = wait_for(&mut stream, Duration::from_secs(30), |ev| {
-        ev.balances
+    let after = wait_for(&mut stream, Duration::from_secs(30), |event| {
+        event
+            .balances
             .get(&WETH9_ADDRESS)
             .map(|v| *v < initial_bal)
             .unwrap_or(false)
@@ -178,4 +181,156 @@ async fn owner_client_limit_returns_429() {
         "expected 429 at cap, got {}",
         resp.status()
     );
+}
+
+/// Case 5 — a client attaching late to a live session is seeded with the
+/// full, up-to-date snapshot (not just future diffs).
+///
+/// Multiple SSE connections on the same `(chain, owner, client_id)` share one
+/// subscription. A connection that joins *after* the balance has already moved
+/// must still receive the current snapshot on connect — `create_sse_connection`
+/// seeds each new client from `current_snapshot()` before switching it to
+/// broadcast diffs. We prove it by moving the balance while two clients watch,
+/// then attaching a third and asserting its first event already reflects the
+/// change.
+#[tokio::test]
+#[ignore]
+async fn late_joining_client_gets_full_snapshot() {
+    let env = Env::spawn().await;
+    let client_id = Uuid::new_v4().to_string();
+
+    // Seed WETH so the snapshot carries a non-zero balance worth re-sending.
+    let seed = U256::from(1_000_000_000_000_000_000u128); // 1 WETH
+    env.weth_deposit(seed).await;
+
+    let resp = post_session(&env.service_url, env.owner, &client_id, &env.token_list_url).await;
+    assert!(resp.status().is_success());
+
+    // Two clients attach up front and drain their initial snapshot.
+    let stream_a = open_sse(&env.service_url, env.owner, &client_id).await;
+    tokio::pin!(stream_a);
+    let _ = wait_for(&mut stream_a, Duration::from_secs(15), |event| {
+        event.balances.contains_key(&WETH9_ADDRESS)
+    })
+    .await
+    .expect("client A got no initial snapshot");
+
+    let stream_b = open_sse(&env.service_url, env.owner, &client_id).await;
+    tokio::pin!(stream_b);
+    let _ = wait_for(&mut stream_b, Duration::from_secs(15), |event| {
+        event.balances.contains_key(&WETH9_ADDRESS)
+    })
+    .await
+    .expect("client B got no initial snapshot");
+
+    // Advance the balance past what A and B saw at connect time.
+    let extra = U256::from(500_000_000_000_000_000u128); // +0.5 WETH
+    env.weth_deposit(extra).await;
+    let expected = seed + extra;
+
+    // Wait until A observes the diff — this guarantees the server-side snapshot
+    // has actually advanced before the late client connects.
+    let _ = wait_for(&mut stream_a, Duration::from_secs(30), |event| {
+        event
+            .balances
+            .get(&WETH9_ADDRESS)
+            .map(|v| *v == expected)
+            .unwrap_or(false)
+    })
+    .await
+    .expect("client A never saw the post-join deposit");
+
+    // The late joiner's very first event must be the full current snapshot,
+    // already carrying the advanced balance.
+    let stream_c = open_sse(&env.service_url, env.owner, &client_id).await;
+    tokio::pin!(stream_c);
+    let snapshot_c = wait_for(&mut stream_c, Duration::from_secs(15), |event| {
+        event.balances.contains_key(&WETH9_ADDRESS)
+    })
+    .await
+    .expect("late client C got no initial snapshot");
+    assert_eq!(
+        snapshot_c.balances[&WETH9_ADDRESS], expected,
+        "late joiner must be seeded with the full up-to-date snapshot"
+    );
+}
+
+/// Case 6 — a single balance change fans out to every client on the session.
+///
+/// Three SSE connections share one `(chain, owner, client_id)` session. One
+/// on-chain WETH deposit must be delivered to all three broadcast receivers,
+/// proving the fan-out reaches every attached client, not just one.
+#[tokio::test]
+#[ignore]
+async fn balance_update_fans_out_to_all_session_clients() {
+    let env = Env::spawn().await;
+    let client_id = Uuid::new_v4().to_string();
+
+    let seed = U256::from(1_000_000_000_000_000_000u128); // 1 WETH
+    env.weth_deposit(seed).await;
+
+    let resp = post_session(&env.service_url, env.owner, &client_id, &env.token_list_url).await;
+    assert!(resp.status().is_success());
+
+    // Three clients on the same session.
+    let stream_a = open_sse(&env.service_url, env.owner, &client_id).await;
+    let stream_b = open_sse(&env.service_url, env.owner, &client_id).await;
+    let stream_c = open_sse(&env.service_url, env.owner, &client_id).await;
+    tokio::pin!(stream_a);
+    tokio::pin!(stream_b);
+    tokio::pin!(stream_c);
+
+    // Drain each client's initial snapshot.
+    let _ = wait_for(&mut stream_a, Duration::from_secs(15), |event| {
+        event.balances.contains_key(&WETH9_ADDRESS)
+    })
+    .await
+    .expect("client A got no initial snapshot");
+    let _ = wait_for(&mut stream_b, Duration::from_secs(15), |event| {
+        event.balances.contains_key(&WETH9_ADDRESS)
+    })
+    .await
+    .expect("client B got no initial snapshot");
+    let _ = wait_for(&mut stream_c, Duration::from_secs(15), |event| {
+        event.balances.contains_key(&WETH9_ADDRESS)
+    })
+    .await
+    .expect("client C got no initial snapshot");
+
+    // A single on-chain change must reach all three clients.
+    let extra = U256::from(400_000_000_000_000_000u128); // +0.4 WETH
+    env.weth_deposit(extra).await;
+    let expected = seed + extra;
+
+    let after_a = wait_for(&mut stream_a, Duration::from_secs(30), |event| {
+        event
+            .balances
+            .get(&WETH9_ADDRESS)
+            .map(|v| *v == expected)
+            .unwrap_or(false)
+    })
+    .await
+    .expect("client A missed the fan-out update");
+    let after_b = wait_for(&mut stream_b, Duration::from_secs(30), |event| {
+        event
+            .balances
+            .get(&WETH9_ADDRESS)
+            .map(|v| *v == expected)
+            .unwrap_or(false)
+    })
+    .await
+    .expect("client B missed the fan-out update");
+    let after_c = wait_for(&mut stream_c, Duration::from_secs(30), |event| {
+        event
+            .balances
+            .get(&WETH9_ADDRESS)
+            .map(|v| *v == expected)
+            .unwrap_or(false)
+    })
+    .await
+    .expect("client C missed the fan-out update");
+
+    assert_eq!(after_a.balances[&WETH9_ADDRESS], expected);
+    assert_eq!(after_b.balances[&WETH9_ADDRESS], expected);
+    assert_eq!(after_c.balances[&WETH9_ADDRESS], expected);
 }

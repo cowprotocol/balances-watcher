@@ -5,7 +5,7 @@ pub struct Metrics {
     pub sessions_created_total: Counter,
     /// existing session got new tokens
     pub sessions_updated_total: Counter,
-    /// session removed (idle ttl or last client left)
+    /// session reaped by the cleanup sweep (idle past ttl)
     pub sessions_expired_total: Counter,
     /// currently live sessions
     pub active_sessions: Gauge,
