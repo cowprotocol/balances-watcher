@@ -24,10 +24,18 @@ use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::BroadcastStream;
 
 const TOKEN_LIST_CACHE_TTL: Duration = Duration::from_hours(5);
+
+/// State for [`SessionManager::broadcast_events_with_lag_close`]'s `unfold`.
+/// `Closed` is entered right after the lag-close event so the very next poll
+/// ends the stream.
+enum LagCloseState {
+    Streaming(BroadcastStream<BalanceEvent>),
+    Closed,
+}
 
 pub struct SessionConfig {
     // interval for multicall for the whole watched token list
@@ -346,6 +354,55 @@ impl SessionManager {
         }
     }
 
+    /// Bridge the per-session broadcast channel into a stream of
+    /// [`BalanceEvent`]s, converting a broadcast `Lagged` into a clean close.
+    ///
+    /// The wire protocol is snapshot-then-diffs: the initial snapshot is sent
+    /// once and diffs are never re-sent. If a slow client's receiver overflows
+    /// the broadcast ring buffer, those diffs are lost for good — the server's
+    /// snapshot has already advanced, so the periodic refresh won't re-emit
+    /// them either. Silently continuing would leave the client permanently
+    /// stale. Instead we emit one `Error { code: 503 }` event and end the
+    /// stream, so the client reconnects and is re-seeded with a full snapshot.
+    fn broadcast_events_with_lag_close(
+        rx: broadcast::Receiver<BalanceEvent>,
+        metrics: Arc<Metrics>,
+        session: Session,
+    ) -> impl Stream<Item = BalanceEvent> {
+        stream::unfold(
+            LagCloseState::Streaming(BroadcastStream::new(rx)),
+            move |state| {
+                let metrics = Arc::clone(&metrics);
+                async move {
+                    let mut stream = match state {
+                        LagCloseState::Closed => return None,
+                        LagCloseState::Streaming(stream) => stream,
+                    };
+
+                    match stream.next().await {
+                        // Sender dropped (session reaped) — end the stream.
+                        None => None,
+                        Some(Ok(event)) => Some((event, LagCloseState::Streaming(stream))),
+                        Some(Err(err)) => {
+                            metrics.broadcast_lagged_total.increment(1);
+                            tracing::warn!(
+                                error = %err,
+                                session = %session,
+                                "sse client lagged behind broadcast, closing stream to force reconnect",
+                            );
+                            let close_event = BalanceEvent::Error {
+                                code: 503,
+                                message: "event stream lagged; reconnect for a fresh snapshot"
+                                    .into(),
+                            };
+                            Some((close_event, LagCloseState::Closed))
+                        }
+                    }
+                }
+            },
+        )
+    }
+
     pub async fn create_sse_connection(
         self: Arc<Self>,
         session: Session,
@@ -392,31 +449,19 @@ impl SessionManager {
         let manager_for_cleanup = Arc::clone(&self.sub_manager);
         let metrics = Arc::clone(&self.metrics);
 
-        let broadcast_stream = BroadcastStream::new(rx).filter_map(move |result| {
-            let metrics = Arc::clone(&metrics);
-            async move {
-                match result {
-                    Ok(event) => match Self::balance_event_to_sse(event) {
-                        Ok(sse_event) => Some(Ok(sse_event)),
-                        Err(err) => {
-                            tracing::error!(
-                                error = %err,
-                                "failed to serialize balance event as sse event",
-                            );
-                            None
-                        }
-                    },
+        let broadcast_stream = Self::broadcast_events_with_lag_close(rx, metrics, session)
+            .filter_map(move |event| async move {
+                match Self::balance_event_to_sse(event) {
+                    Ok(sse_event) => Some(Ok(sse_event)),
                     Err(err) => {
-                        metrics.broadcast_lagged_total.increment(1);
-                        tracing::warn!(
+                        tracing::error!(
                             error = %err,
-                            "sse client lagged behind broadcast, dropping event",
+                            "failed to serialize balance event as sse event",
                         );
                         None
                     }
                 }
-            }
-        });
+            });
 
         let sse_stream = initial_stream.chain(broadcast_stream);
 
@@ -431,6 +476,96 @@ impl SessionManager {
             SubscriptionError::SessionNotRegistered => SessionError::SessionIsNotCreated,
             SubscriptionError::OwnerClientLimitExceeded { limit } => {
                 SessionError::OwnerClientLimitExceeded(limit)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod broadcast_lag_tests {
+    //! Regression tests for the lagged-SSE-client fix.
+    //!
+    //! Diffs are broadcast once and never re-sent, so a client whose receiver
+    //! overflows the broadcast ring buffer used to silently miss updates and
+    //! drift permanently stale (the old code logged a warning and dropped the
+    //! events). The stream must instead emit a single 503 close event and end,
+    //! so the client reconnects for a fresh snapshot.
+
+    use super::*;
+    use crate::domain::EvmNetwork;
+    use uuid::Uuid;
+
+    fn test_session() -> Session {
+        Session {
+            owner: Address::ZERO,
+            network: EvmNetwork::Eth,
+            client_id: Uuid::from_u128(1),
+        }
+    }
+
+    fn balance_update_event(n: u8) -> BalanceEvent {
+        let mut balances = HashMap::new();
+        balances.insert(Address::from([n; 20]), n.to_string());
+        BalanceEvent::BalanceUpdate(balances)
+    }
+
+    /// The regression: overflow the ring buffer, then the stream must yield
+    /// exactly one 503 error event and stop — no silent drop, no further
+    /// events.
+    #[tokio::test]
+    async fn lagged_client_gets_close_event_then_stream_ends() {
+        let metrics = Arc::new(Metrics::install());
+        // Tiny buffer so we can overflow it deterministically.
+        let (tx, rx) = broadcast::channel(4);
+
+        // Send more than capacity with nobody draining: the receiver falls
+        // behind by more than the buffer, so its first recv yields `Lagged`.
+        for i in 0..8u8 {
+            tx.send(balance_update_event(i)).expect("receiver is alive");
+        }
+
+        let events: Vec<BalanceEvent> =
+            SessionManager::broadcast_events_with_lag_close(rx, metrics, test_session())
+                .collect()
+                .await;
+
+        assert_eq!(
+            events.len(),
+            1,
+            "lagged stream must yield only the close event, got {events:?}"
+        );
+        match &events[0] {
+            BalanceEvent::Error { code, .. } => assert_eq!(*code, 503),
+            other => panic!("expected a 503 error close event, got {other:?}"),
+        }
+    }
+
+    /// A client that keeps up receives every diff in order, and the stream
+    /// ends cleanly when the sender is dropped — no spurious close event.
+    #[tokio::test]
+    async fn healthy_client_receives_all_events_without_close() {
+        let metrics = Arc::new(Metrics::install());
+        let (tx, rx) = broadcast::channel(16);
+
+        for i in 0..3u8 {
+            tx.send(balance_update_event(i)).expect("receiver is alive");
+        }
+        drop(tx); // no more events → the stream should end on its own
+
+        let events: Vec<BalanceEvent> =
+            SessionManager::broadcast_events_with_lag_close(rx, metrics, test_session())
+                .collect()
+                .await;
+
+        assert_eq!(
+            events.len(),
+            3,
+            "every in-capacity event must pass through untouched"
+        );
+        for event in &events {
+            match event {
+                BalanceEvent::BalanceUpdate(_) => {}
+                other => panic!("healthy stream must not inject a close event: {other:?}"),
             }
         }
     }
