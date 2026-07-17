@@ -63,6 +63,24 @@ struct SubWithCounter {
     pub refresh_queue: BalanceRefreshQueueHandle,
 }
 
+/// The decision [`SubscriptionManager::upsert`] reaches under the registry
+/// write lock, carried out of the locked block so the follow-up awaits run
+/// only after the guard is dropped.
+enum UpsertOutcome {
+    /// The session already existed — created by a concurrent racer after our
+    /// read-path miss. Apply `tokens` as an update outside the lock.
+    Existing {
+        sub: Arc<Subscription>,
+        tokens: HashSet<Address>,
+    },
+    /// We won the create: the caller gets the queue receiver to wire up its
+    /// snapshot pipeline.
+    Created {
+        sub: Arc<Subscription>,
+        result_rx: mpsc::Receiver<Result<BalancesWithBlock, RpcError>>,
+    },
+}
+
 #[derive(Debug, Clone)]
 pub struct Balance {
     pub amount: U256,
@@ -114,30 +132,87 @@ impl SubscriptionManager {
         SubscriptionError,
     > {
         let tokens_len = tokens.len();
+
+        // Fast path: the session already exists — replace its watched set
+        // without touching the registry write lock.
         let maybe_sub = {
             let subs = self.subscriptions.read().await;
             subs.get(&session).map(|sub| Arc::clone(&sub.subscription))
         };
-
         if let Some(sub) = maybe_sub {
-            let changed = sub.set_watched_tokens(tokens).await;
-
-            self.metrics.sessions_updated_total.increment(1);
-            tracing::info!(
-                session = %session,
-                tokens_len,
-                watched_tokens_changed = changed,
-                "watched token list updated"
-            );
-
-            if changed {
-                // PUT had a real effect — force a fresh multicall so balances
-                // reflect the new set right away instead of waiting for the
-                // next snapshot tick.
-                sub.emit_balance_snapshot_refresh();
-            }
-
+            self.replace_watched_tokens(&sub, session, tokens).await;
             return Ok((sub, None));
+        }
+
+        // Create path. Existence re-check, cap check and insert share one
+        // write lock: two concurrent POSTs for a brand-new session can both
+        // miss the read-path above, and without the re-check the second
+        // insert would silently replace the first entry — leaking its
+        // watchers, whose cancellation token would no longer be reachable
+        // from the map (and handing a second queue receiver to the caller,
+        // which would spawn a duplicate snapshot pipeline).
+        //
+        // The block only decides (everything inside is sync); acting on the
+        // decision happens in the match below, after the guard is gone.
+        let outcome = {
+            let mut subs = self.subscriptions.write().await;
+
+            if let Some(existing) = subs.get(&session) {
+                // Lost the create race to a concurrent request.
+                UpsertOutcome::Existing {
+                    sub: Arc::clone(&existing.subscription),
+                    tokens,
+                }
+            } else {
+                self.create_session_locked(&mut subs, session, tokens)?
+            }
+        };
+
+        match outcome {
+            UpsertOutcome::Existing { sub, tokens } => {
+                self.replace_watched_tokens(&sub, session, tokens).await;
+                Ok((sub, None))
+            }
+            UpsertOutcome::Created { sub, result_rx } => {
+                self.metrics.sessions_created_total.increment(1);
+                self.metrics.active_sessions.increment(1);
+                tracing::info!(
+                    tokens_len = %tokens_len,
+                    session = %session,
+                    "session is created"
+                );
+                Ok((sub, Some(result_rx)))
+            }
+        }
+    }
+
+    /// Cap-check, create and register a brand-new session.
+    ///
+    /// Caller must already hold the registry write lock and have confirmed
+    /// `session` is absent — the guard is passed in as `subs`.
+    ///
+    /// Returns [`SubscriptionError::OwnerClientLimitExceeded`] when this
+    /// `(chain, owner)` is already at [`MAX_CLIENTS_PER_OWNER`].
+    fn create_session_locked(
+        &self,
+        subs: &mut HashMap<Session, SubWithCounter>,
+        session: Session,
+        tokens: HashSet<Address>,
+    ) -> Result<UpsertOutcome, SubscriptionError> {
+        // LEGACY: full-map scan. Goes away with the process-wide-queue
+        // migration once storage becomes `HashMap<Address, HashMap<Uuid, _>>`.
+        let existing_for_owner = subs.keys().filter(|s| s.owner == session.owner).count();
+        if existing_for_owner >= MAX_CLIENTS_PER_OWNER {
+            self.metrics.owner_client_limit_exceeded_total.increment(1);
+            tracing::warn!(
+                owner = %session.owner,
+                limit = MAX_CLIENTS_PER_OWNER,
+                existing = existing_for_owner,
+                "client request rejected: per-owner client limit exceeded",
+            );
+            return Err(SubscriptionError::OwnerClientLimitExceeded {
+                limit: MAX_CLIENTS_PER_OWNER,
+            });
         }
 
         let shutdown_token = self.lifecycle.cancel_token.clone();
@@ -154,47 +229,51 @@ impl SubscriptionManager {
         )
         .spawn();
 
-        let sub_with_counter = SubWithCounter {
-            clients: 0,
-            subscription: Arc::clone(&subscription),
-            idle_since: Some(Instant::now()),
-            refresh_queue: refresh_queue.clone(),
-        };
+        subs.insert(
+            session,
+            SubWithCounter {
+                clients: 0,
+                subscription: Arc::clone(&subscription),
+                idle_since: Some(Instant::now()),
+                refresh_queue,
+            },
+        );
+        self.metrics
+            .sessions_per_owner
+            .record((existing_for_owner + 1) as f64);
 
-        // Cap check + insert must share one write lock — otherwise concurrent
-        // POSTs with fresh UUIDs could each read a stale count and jointly
-        // overshoot the limit.
-        let mut subs = self.subscriptions.write().await;
+        Ok(UpsertOutcome::Created {
+            sub: subscription,
+            result_rx,
+        })
+    }
 
-        // LEGACY: full-map scan. Goes away with the process-wide-queue
-        // migration once storage becomes `HashMap<Address, HashMap<Uuid, _>>`.
-        let existing_for_owner = subs.keys().filter(|s| s.owner == session.owner).count();
-        if existing_for_owner >= MAX_CLIENTS_PER_OWNER {
-            self.metrics.owner_client_limit_exceeded_total.increment(1);
-            tracing::warn!(
-                owner = %session.owner,
-                limit = MAX_CLIENTS_PER_OWNER,
-                existing = existing_for_owner,
-                "client request rejected: per-owner client limit exceeded",
-            );
-            return Err(SubscriptionError::OwnerClientLimitExceeded {
-                limit: MAX_CLIENTS_PER_OWNER,
-            });
-        }
-        subs.insert(session, sub_with_counter);
-        let sessions_for_owner = (existing_for_owner + 1) as f64;
-        drop(subs);
-        self.metrics.sessions_per_owner.record(sessions_for_owner);
+    /// PUT-replace the watched-token set of an existing subscription. Forces
+    /// a snapshot refresh only when the set actually changed, so re-PUT'ing
+    /// the same list stays a no-op.
+    async fn replace_watched_tokens(
+        &self,
+        sub: &Arc<Subscription>,
+        session: Session,
+        tokens: HashSet<Address>,
+    ) {
+        let tokens_len = tokens.len();
+        let changed = sub.set_watched_tokens(tokens).await;
 
-        self.metrics.sessions_created_total.increment(1);
-        self.metrics.active_sessions.increment(1);
+        self.metrics.sessions_updated_total.increment(1);
         tracing::info!(
-            tokens_len = %tokens_len,
             session = %session,
-            "session is created"
+            tokens_len,
+            watched_tokens_changed = changed,
+            "watched token list updated"
         );
 
-        Ok((subscription, Some(result_rx)))
+        if changed {
+            // PUT had a real effect — force a fresh multicall so balances
+            // reflect the new set right away instead of waiting for the
+            // next snapshot tick.
+            sub.emit_balance_snapshot_refresh();
+        }
     }
 
     pub async fn subscribe(
@@ -270,11 +349,14 @@ impl SubscriptionManager {
             if existing.clients == 0 {
                 existing.idle_since = Some(Instant::now());
 
-                self.metrics.sessions_expired_total.increment(1);
+                // The session is now idle, not expired — it can still be
+                // revived by a `subscribe` within `SESSION_TTL`. Count it as
+                // expired only when the cleanup sweep actually reaps it, so
+                // `sessions_expired_total` mirrors `active_sessions`.
                 self.metrics.sse_connections_active.decrement(1);
                 tracing::info!(
                     session = %session,
-                    "session expired"
+                    "session went idle: last subscriber disconnected"
                 );
 
                 return Ok(true);
