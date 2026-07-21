@@ -152,6 +152,7 @@ impl SessionManager {
             Arc::clone(&metrics),
             lifecycle.clone(),
             block_ws,
+            Arc::clone(&rpc_client),
         );
 
         let (tx, rx) = mpsc::channel::<Erc20TransferEvent>(256);

@@ -19,9 +19,10 @@
 //!    ```
 //!
 //! 2. **Log fetches for the process-wide event dispatcher** —
-//!    [`RpcClient::fetch_transfer_logs_for_block`] (ERC20 Transfer, global topic
-//!    filter) and [`RpcClient::fetch_weth9_logs_for_block`] (WETH9 Deposit /
-//!    Withdrawal, address-filtered). Called once per block by
+//!    [`RpcClient::fetch_transfer_logs_in_range`] (ERC20 Transfer, global topic
+//!    filter) and [`RpcClient::fetch_weth9_logs_in_range`] (WETH9 Deposit /
+//!    Withdrawal, address-filtered). Called per head block (single-block range)
+//!    or per backfill chunk after a gap by
 //!    [`crate::services::event_dispatcher::Erc20TransferEventDispatcher`].
 
 use crate::config::constants::MULTICALL_PERMITS_COUNT;
@@ -42,6 +43,12 @@ use std::time::{Duration, Instant};
 use tokio_stream::Stream;
 
 const MULTICALL_CHUNK_SIZE: usize = 500;
+
+/// Upper bound on the `eth_blockNumber` round-trip in
+/// [`RpcClient::latest_block_number`]. The block-watcher stall check must
+/// not be held hostage by a slow node — on timeout the caller treats the
+/// head as unknown and falls back to the plain reconnect path.
+const HEADER_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// `(token → balance, block_number_the_batch_was_read_at)`.
 pub type BalancesWithBlock = (HashMap<Address, U256>, BlockNumber);
@@ -74,35 +81,57 @@ impl RpcClient {
         }
     }
 
-    /// Fetch every ERC20 `Transfer` log emitted in `block_number`. Uses HTTP
-    /// `eth_getLogs` (server-side topic filter); returns 100% of matching
-    /// logs in the block, in contrast to WS `eth_subscribe` whose internal
+    /// Current chain head via HTTP `eth_blockNumber`. Single attempt, no
+    /// retry/backoff, bounded by [`HEADER_TIMEOUT`] — the only caller is
+    /// the block-watcher stall check, which needs a fast verdict and treats
+    /// any error as "unconfirmed" (falls back to the plain reconnect path).
+    pub async fn latest_block_number(&self) -> Result<BlockNumber, RpcError> {
+        match tokio::time::timeout(HEADER_TIMEOUT, self.provider.get_block_number()).await {
+            Ok(result) => result.map_err(|err| RpcError::Exhausted(err.to_string())),
+            Err(_) => Err(RpcError::Exhausted(format!(
+                "eth_blockNumber timed out after {}s",
+                HEADER_TIMEOUT.as_secs()
+            ))),
+        }
+    }
+
+    /// Fetch every ERC20 `Transfer` log emitted in blocks `from..=to`. Uses
+    /// HTTP `eth_getLogs` (server-side topic filter); returns 100% of matching
+    /// logs in the range, in contrast to WS `eth_subscribe` whose internal
     /// buffer drops the tail of burst blocks.
+    ///
+    /// The happy path is a single-block range (`from == to`, one call per
+    /// head); wider ranges are used by the dispatcher's gap backfill and must
+    /// stay small enough for the provider's per-response log limit — the
+    /// caller owns chunking.
     ///
     /// Transient RPC failures are retried per [`Self::backoff`]; the final
     /// `Err` surfaces as [`RpcError::Exhausted`].
-    pub async fn fetch_transfer_logs_for_block(
+    pub async fn fetch_transfer_logs_in_range(
         &self,
-        block_number: BlockNumber,
+        from: BlockNumber,
+        to: BlockNumber,
     ) -> Result<Vec<Log>, RpcError> {
         let filter = Filter::new()
-            .from_block(block_number)
-            .to_block(block_number)
+            .from_block(from)
+            .to_block(to)
             .event_signature(ERC20::Transfer::SIGNATURE_HASH);
 
         self.get_logs_with_retries(filter).await
     }
 
-    /// Fetch WETH9 `Deposit` and `Withdrawal` logs emitted in `block_number`,
-    /// address-filtered to the canonical WETH9 contract for this chain.
-    /// Needed alongside [`Self::fetch_transfer_logs_for_block`] because the
-    /// canonical WETH9 impl does not emit `Transfer` on wrap / unwrap.
+    /// Fetch WETH9 `Deposit` and `Withdrawal` logs emitted in blocks
+    /// `from..=to`, address-filtered to the canonical WETH9 contract for this
+    /// chain. Needed alongside [`Self::fetch_transfer_logs_in_range`] because
+    /// the canonical WETH9 impl does not emit `Transfer` on wrap / unwrap.
     ///
-    /// Same retry policy as [`Self::fetch_transfer_logs_for_block`].
-    pub async fn fetch_weth9_logs_for_block(
+    /// Same retry policy and chunking contract as
+    /// [`Self::fetch_transfer_logs_in_range`].
+    pub async fn fetch_weth9_logs_in_range(
         &self,
         weth9_address: Address,
-        block_number: BlockNumber,
+        from: BlockNumber,
+        to: BlockNumber,
     ) -> Result<Vec<Log>, RpcError> {
         let event_signatures = vec![
             WrappedToken::Deposit::SIGNATURE_HASH,
@@ -110,8 +139,8 @@ impl RpcClient {
         ];
 
         let filter = Filter::new()
-            .from_block(block_number)
-            .to_block(block_number)
+            .from_block(from)
+            .to_block(to)
             .address(weth9_address)
             .event_signature(event_signatures);
 

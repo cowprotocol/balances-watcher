@@ -68,9 +68,14 @@ pub struct Metrics {
     /// eth_getLogs for a block exhausted retries — that block's logs are
     /// permanently lost (dispatcher still bumps `latest_processed_block` to
     /// keep lag health honest). Sum across erc20 and weth9 paths; one failed
-    /// source on one block bumps by 1. **Data-loss counter — page on any
-    /// non-zero rate.** Snapshot loop (60s cadence) is the recovery path.
+    /// source bumps by the number of blocks in the failed range (1 on the
+    /// per-head path). **Data-loss counter — page on any non-zero rate.**
+    /// Snapshot loop (60s cadence) is the recovery path.
     pub event_dispatcher_missed_block_logs_total: Counter,
+    /// blocks fetched via gap backfill (range eth_getLogs) instead of the
+    /// per-head path — i.e. heads the WS subscription never delivered
+    /// (reconnect gaps, skipped heads). Steady non-zero rate = flaky WS.
+    pub event_dispatcher_backfilled_blocks_total: Counter,
 
     /// token list fetched ok
     pub token_list_loaded_total: Counter,
@@ -132,6 +137,9 @@ impl Metrics {
             eth_get_logs_duration_ms: histogram!("eth_get_logs_duration_ms"),
             event_dispatcher_missed_block_logs_total: counter!(
                 "event_dispatcher_missed_block_logs_total"
+            ),
+            event_dispatcher_backfilled_blocks_total: counter!(
+                "event_dispatcher_backfilled_blocks_total"
             ),
 
             token_list_loaded_total: counter!("token_list_loaded_total"),
