@@ -59,6 +59,15 @@ impl Env {
     /// balances-watcher service. Anything failing aborts the test with a
     /// pointed panic message.
     pub async fn spawn() -> Self {
+        Self::spawn_with_network(EvmNetwork::Eth).await
+    }
+
+    /// Same as [`Self::spawn`] but with an explicit network. The network
+    /// picks per-chain timings (`block_time`-derived stall timeout,
+    /// `max_block_lag`) — timing-sensitive tests spawn a fast chain (e.g.
+    /// Ink: 3s stall timeout) so they run in seconds instead of mainnet's
+    /// 36s windows. Anvil doesn't care what chain we claim to be.
+    pub async fn spawn_with_network(network: EvmNetwork) -> Self {
         let (anvil, provider, deployer, deployer_wallet) = spawn_anvil().await;
         install_infrastructure(&provider).await;
 
@@ -70,7 +79,7 @@ impl Env {
         let metrics = Arc::new(Metrics::install());
 
         let network_cfg = NetworkConfig {
-            network: EvmNetwork::Eth,
+            network,
             rpc_http_url: anvil.endpoint(),
             snapshot_interval: 5,
             max_watched_tokens_limit: 1500,
