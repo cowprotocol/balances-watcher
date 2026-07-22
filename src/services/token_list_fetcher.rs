@@ -123,6 +123,8 @@ impl TokenListFetcher {
     /// requested token, otherwise we cannot rely on the reported balances.
     /// A failed fetch is not cached, so a subsequent call retries it.
     pub async fn get_tokens(&self, urls: &[String]) -> Result<ChainTokens, FetcherError> {
+        let t0 = Instant::now();
+
         let token_lists_handlers = urls.iter().map(|url| {
             let url_clone = url.clone();
 
@@ -136,11 +138,15 @@ impl TokenListFetcher {
             }
         });
 
-        let tokens = try_join_all(token_lists_handlers)
-            .await
-            .map_err(|err| (*err).clone())?
-            .into_iter()
-            .flatten();
+        let result = try_join_all(token_lists_handlers).await;
+
+        // Whole-request resolution latency (all lists, cache hits included).
+        // Recorded on both paths so a failing set is still visible.
+        self.metrics
+            .token_lists_resolve_duration_ms
+            .record(t0.elapsed().as_millis() as f64);
+
+        let tokens = result.map_err(|err| (*err).clone())?.into_iter().flatten();
         Ok(tokens.collect())
     }
 
@@ -168,31 +174,55 @@ impl TokenListFetcher {
         Ok(token_set.collect())
     }
 
+    /// Fetch, download and parse a single list. Reached only on a cache miss
+    /// (moka runs this once per uncached URL), so the metrics and the log
+    /// below fire per actual network load, never for a cache hit — exactly
+    /// one line per outcome, naming the URL either way.
     async fn fetch_list(&self, url: &str) -> Result<ApiResponse, FetcherError> {
         let t0 = Instant::now();
-        let metrics = Arc::clone(&self.metrics);
+        let outcome = self.load_and_parse(url).await;
+        let elapsed_ms = t0.elapsed().as_millis() as f64;
 
-        let response = self.fetch_with_backoff(url).await.inspect(move |_| {
-            metrics.token_list_loaded_total.increment(1);
-            metrics
-                .token_list_loaded_time_in_ms
-                .record(t0.elapsed().as_millis() as f64);
-            tracing::debug!(
-                time_ms = ?t0.elapsed().as_millis(),
-                url = ?url,
-                "token list loaded"
-            );
-        })?;
+        match &outcome {
+            Ok((_, bytes)) => {
+                self.metrics.token_list_loaded_total.increment(1);
+                self.metrics.token_list_loaded_time_in_ms.record(elapsed_ms);
+                tracing::info!(
+                    url = %url,
+                    time_ms = elapsed_ms as u64,
+                    bytes = *bytes,
+                    "token list loaded"
+                );
+            }
+            Err(err) => {
+                self.metrics.token_list_load_failed_total.increment(1);
+                tracing::warn!(
+                    url = %url,
+                    time_ms = elapsed_ms as u64,
+                    error = %err,
+                    "token list load failed"
+                );
+            }
+        }
+
+        outcome.map(|(parsed, _)| parsed)
+    }
+
+    /// Transport (with retries) + capped body download + JSON parse for one
+    /// list. Returns the parsed response and the raw body size; every failure
+    /// surfaces as [`FetcherError::UnableToLoadList`] carrying the URL and the
+    /// underlying reason (which [`Self::fetch_list`] logs).
+    async fn load_and_parse(&self, url: &str) -> Result<(ApiResponse, usize), FetcherError> {
+        let response = self.fetch_with_backoff(url).await?;
 
         let body = Self::read_body_capped(response, MAX_TOKEN_LIST_RESPONSE_BYTES)
             .await
-            .map_err(|err| {
-                self.metrics.token_list_load_failed_total.increment(1);
-                FetcherError::UnableToLoadList(url.into(), err)
-            })?;
+            .map_err(|err| FetcherError::UnableToLoadList(url.into(), err))?;
 
-        serde_json::from_slice(&body)
-            .map_err(|err| FetcherError::UnableToLoadList(url.into(), err.to_string()))
+        let parsed: ApiResponse = serde_json::from_slice(&body)
+            .map_err(|err| FetcherError::UnableToLoadList(url.into(), err.to_string()))?;
+
+        Ok((parsed, body.len()))
     }
 
     /// Read a response body while enforcing `cap` — both up front via
@@ -221,15 +251,12 @@ impl TokenListFetcher {
     }
 
     async fn fetch_with_backoff(&self, url: &str) -> Result<Response, FetcherError> {
-        let resp = (|| async { self.client.get(url).send().await?.error_for_status() })
+        // Failure accounting (metric + warn) is centralised in `fetch_list`,
+        // so this only maps the transport error into the domain error.
+        (|| async { self.client.get(url).send().await?.error_for_status() })
             .retry(self.backoff_cfg)
             .await
-            .map_err(|err| {
-                self.metrics.token_list_load_failed_total.increment(1);
-                FetcherError::UnableToLoadList(url.into(), err.to_string())
-            })?;
-
-        Ok(resp)
+            .map_err(|err| FetcherError::UnableToLoadList(url.into(), err.to_string()))
     }
 }
 
