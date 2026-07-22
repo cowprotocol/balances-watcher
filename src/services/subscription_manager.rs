@@ -176,7 +176,10 @@ impl SubscriptionManager {
             UpsertOutcome::Created { sub, result_rx } => {
                 self.metrics.sessions_created_total.increment(1);
                 self.metrics.active_sessions.increment(1);
-                tracing::info!(
+                // Creation is already surfaced at INFO by the handler's
+                // `create_session END` line (with timing + success); keep this
+                // one at debug so INFO logs aren't doubled per session.
+                tracing::debug!(
                     tokens_len = %tokens_len,
                     session = %session,
                     "session is created"

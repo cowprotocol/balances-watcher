@@ -83,8 +83,16 @@ pub struct Metrics {
     pub token_list_load_failed_total: Counter,
     /// token list url rejected by the ssrf guard (bad scheme / private host)
     pub token_list_url_rejected_total: Counter,
-    /// token list fetch latency, ms
+    /// single token-list fetch latency, ms — full load (headers + body +
+    /// parse) on a cache miss. Recorded per actually-fetched list, so the
+    /// count also tracks how often the cache is cold.
     pub token_list_loaded_time_in_ms: Histogram,
+    /// whole-request token-list resolution latency, ms: the total time
+    /// `get_tokens` spends resolving ALL of a session's lists (cache hits
+    /// included, so ~0 on a warm cache). This is the slice of
+    /// `create_session_duration_ms` that is token-list work — a spike here
+    /// in lockstep with create-session latency pins the cause on the lists.
+    pub token_lists_resolve_duration_ms: Histogram,
 
     /// periodic snapshot multicall fired
     pub snapshot_updater_runs_total: Counter,
@@ -146,6 +154,7 @@ impl Metrics {
             token_list_load_failed_total: counter!("token_list_load_failed_total"),
             token_list_url_rejected_total: counter!("token_list_url_rejected_total"),
             token_list_loaded_time_in_ms: histogram!("token_list_loaded_time_in_ms"),
+            token_lists_resolve_duration_ms: histogram!("token_lists_resolve_duration_ms"),
 
             snapshot_updater_runs_total: counter!("snapshot_updater_runs_total"),
             tokens_limit_exceeded_total: counter!("tokens_limit_exceeded_total"),
