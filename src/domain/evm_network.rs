@@ -96,6 +96,37 @@ impl EvmNetwork {
             EvmNetwork::Sepolia => 3,    // * 12s   = 36s
         }
     }
+
+    /// Blocks one backfill `eth_getLogs` chunk may span for this chain. The
+    /// binding constraint is the provider's per-response log cap (10k on
+    /// Alchemy-class nodes, 20k on reth), and Transfer-log volume scales
+    /// with seconds of chain activity — so the budget is per-chain, not
+    /// one-size-fits-all. Each value targets roughly half of the 10k budget
+    /// at the chain's typical log volume.
+    ///
+    /// Ethereum and Polygon are grounded in the 2026-07-29 range bench
+    /// (~550 Transfer logs/block on mainnet via OVH reth, ~400 on Polygon
+    /// via Alchemy); chains without bench data keep their previous
+    /// heuristic of ~10s of chain activity. The dispatcher bisects a
+    /// rejected range down to single blocks, so an overestimate degrades
+    /// gracefully on restrictive fallbacks. Values never exceed
+    /// `max_block_lag()`: a chunk wider than the backfill cap could never
+    /// be filled.
+    pub fn backfill_chunk_blocks(self) -> u64 {
+        match self {
+            EvmNetwork::Eth => 2,       // ~1.1k logs; covers the 3-block cap in 2 requests
+            EvmNetwork::Bnb => 13,      // ~10s heuristic
+            EvmNetwork::Gnosis => 2,    // ~10s heuristic
+            EvmNetwork::Polygon => 15,  // ~6k logs, p50 ~1.7s — the whole cap in one request
+            EvmNetwork::Base => 5,      // ~10s heuristic
+            EvmNetwork::Plasma => 10,   // ~10s heuristic
+            EvmNetwork::Arbitrum => 40, // ~10s heuristic
+            EvmNetwork::Avalanche => 5, // ~10s heuristic
+            EvmNetwork::Ink => 10,      // ~10s heuristic
+            EvmNetwork::Linea => 2,     // ~10s heuristic
+            EvmNetwork::Sepolia => 1,   // ~10s heuristic (12s blocks: block-by-block)
+        }
+    }
 }
 
 impl TryFrom<u64> for EvmNetwork {

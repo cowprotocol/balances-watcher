@@ -18,6 +18,7 @@
 pub mod api;
 pub mod env;
 pub mod onchain;
+pub mod rpc_proxy;
 
 pub use api::{
     fetch_metric, get_sse, open_sse, post_session, put_session, sse_stream,
@@ -25,3 +26,4 @@ pub use api::{
 };
 pub use env::{Env, ServiceEnv};
 pub use onchain::{Weth9, CUSTOM_TOKEN_ADDRESS, MULTICALL3_ADDRESS, WETH9_ADDRESS};
+pub use rpc_proxy::RpcProxy;
