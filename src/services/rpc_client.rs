@@ -35,6 +35,7 @@ use alloy::primitives::{Address, BlockNumber, U256};
 use alloy::providers::{DynProvider, Dynamic, Failure, MulticallBuilder, MulticallError, Provider};
 use alloy::rpc::types::{Filter, Log};
 use alloy::sol_types::{SolCall, SolEvent};
+use alloy::transports::TransportError;
 use backon::{ExponentialBuilder, Retryable};
 use futures::stream::{self, StreamExt};
 use std::collections::HashMap;
@@ -58,8 +59,9 @@ type DynMulticallBuilder<D> = MulticallBuilder<Dynamic<D>, Arc<DynProvider>, Eth
 /// Error surface for this module.
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum RpcError {
-    /// Multicall retry path: backoff exhausted, or short-circuited on a
-    /// permanent error by [`RpcClient::is_multicall_retryable`].
+    /// Backoff exhausted, or short-circuited on a permanent error
+    /// ([`RpcClient::is_multicall_retryable`] /
+    /// [`RpcClient::is_get_logs_retryable`]).
     #[error("Provider exhausted after retries: {0}")]
     Exhausted(String),
 }
@@ -147,12 +149,12 @@ impl RpcClient {
         self.get_logs_with_retries(filter).await
     }
 
-    /// Run `eth_getLogs` with retry/backoff. Retries every error unconditionally
-    /// — we construct all filters ourselves, so "permanent" errors (bad filter,
-    /// unknown topic) are not expected here. Real-world failures are transport
-    /// hiccups (5xx, connection reset, timeout) and "block not found" while
-    /// the node is briefly behind the head; both resolve within one backoff
-    /// window.
+    /// Run `eth_getLogs` with retry/backoff. Transient failures — transport
+    /// hiccups (5xx, connection reset, timeout), rate limiting, and "block
+    /// not found" while the node is briefly behind the head — resolve within
+    /// one backoff window and are retried. Deterministic query rejections
+    /// ([`Self::is_get_logs_retryable`] returns `false`) short-circuit so the
+    /// dispatcher's range bisect can react immediately.
     async fn get_logs_with_retries(&self, filter: Filter) -> Result<Vec<Log>, RpcError> {
         let metrics = Arc::clone(&self.metrics);
         (|| {
@@ -160,6 +162,7 @@ impl RpcClient {
             async move { self.provider.get_logs(&filter).await }
         })
         .retry(Self::backoff())
+        .when(Self::is_get_logs_retryable)
         .notify(move |err, duration| {
             metrics.eth_get_logs_failed_total.increment(1);
             tracing::warn!(
@@ -169,7 +172,53 @@ impl RpcClient {
             );
         })
         .await
-        .map_err(|err| RpcError::Exhausted(err.to_string()))
+        .map_err(|err| {
+            if !Self::is_get_logs_retryable(&err) {
+                tracing::warn!(
+                    error = %err,
+                    "eth_getLogs rejected the query permanently, not retrying"
+                );
+            }
+            RpcError::Exhausted(err.to_string())
+        })
+    }
+
+    /// Classify an `eth_getLogs` error: worth another backoff round, or a
+    /// deterministic rejection of this exact query?
+    ///
+    /// Providers cap ranged log queries in provider-specific ways — max
+    /// results (reth: "query exceeds max results", Alchemy: "query returned
+    /// more than 10000 results"), response size, or topic-only filters
+    /// refused outright beyond a single block (publicnode: "please specify
+    /// an address"). Those fail identically on every attempt; each futile
+    /// backoff round costs ~14s during which the dispatcher's range bisect
+    /// cannot start. Detection is message-based and heuristic by necessity
+    /// (error codes are provider-specific: reth -32602, Infura -32005,
+    /// publicnode -32701) — a missed pattern only costs the old
+    /// full-backoff behavior, a false hit skips retries for one range and
+    /// the bisect refetches its halves anyway.
+    fn is_get_logs_retryable(err: &TransportError) -> bool {
+        let Some(resp) = err.as_error_resp() else {
+            return true;
+        };
+
+        let message = resp.message.to_lowercase();
+        // "rate limit exceeded" must keep backing off — don't let the
+        // "exceed" pattern below classify throttling as permanent.
+        if message.contains("rate") {
+            return true;
+        }
+
+        const QUERY_TOO_BIG: [&str; 5] = [
+            "exceed",
+            "too large",
+            "more than",
+            "response size",
+            "specify an address",
+        ];
+        !QUERY_TOO_BIG
+            .iter()
+            .any(|pattern| message.contains(pattern))
     }
 
     /// Read ERC20 balances for `owner` at `block_id`, one Multicall3
@@ -482,5 +531,62 @@ impl RpcClient {
             .with_max_delay(Duration::from_secs(10))
             .with_max_times(3)
             .with_jitter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::rpc::json_rpc::ErrorPayload;
+    use alloy::transports::TransportErrorKind;
+
+    fn error_resp(code: i64, message: &str) -> TransportError {
+        TransportError::ErrorResp(ErrorPayload {
+            code,
+            message: message.to_string().into(),
+            data: None,
+        })
+    }
+
+    #[test]
+    fn transport_level_errors_are_retryable() {
+        assert!(RpcClient::is_get_logs_retryable(
+            &TransportErrorKind::backend_gone()
+        ));
+    }
+
+    #[test]
+    fn rate_limiting_is_retryable() {
+        assert!(RpcClient::is_get_logs_retryable(&error_resp(
+            -32005,
+            "rate limit exceeded"
+        )));
+    }
+
+    #[test]
+    fn node_behind_head_is_retryable() {
+        assert!(RpcClient::is_get_logs_retryable(&error_resp(
+            -32000,
+            "block not found"
+        )));
+    }
+
+    #[test]
+    fn provider_query_caps_are_permanent() {
+        // reth
+        assert!(!RpcClient::is_get_logs_retryable(&error_resp(
+            -32602,
+            "query exceeds max results 20000, retry with the range 100-150"
+        )));
+        // Alchemy
+        assert!(!RpcClient::is_get_logs_retryable(&error_resp(
+            -32602,
+            "Log response size exceeded. query returned more than 10000 results"
+        )));
+        // publicnode-style topic-only restriction
+        assert!(!RpcClient::is_get_logs_retryable(&error_resp(
+            -32701,
+            "Please specify an address in your request"
+        )));
     }
 }

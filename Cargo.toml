@@ -12,7 +12,7 @@ serde_json = "1.0.149"
 futures = "0.3.32"
 tokio-stream = "0.1.18"
 clap = { version = "4.6.1", features = ["env", "derive"] }
-alloy = { version = "2.0.4", features = ["provider-ws", "getrandom", "node-bindings", "sol-types", "contract", "signers", "signer-local"] }
+alloy = { version = "2.0.4", features = ["provider-ws", "getrandom", "node-bindings", "sol-types", "contract", "signers", "signer-local", "json-rpc"] }
 thiserror = "2.0.18"
 anyhow = "1.0.102"
 tracing = "0.1.44"

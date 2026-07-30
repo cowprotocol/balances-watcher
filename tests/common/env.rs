@@ -20,6 +20,7 @@ use super::api::start_token_list_server;
 use super::onchain::{
     install_infrastructure, spawn_anvil, Weth9, CUSTOM_TOKEN_ADDRESS, WETH9_ADDRESS,
 };
+use super::rpc_proxy::RpcProxy;
 
 /// Prometheus recorder is a process-wide singleton — `install_recorder`
 /// after the first successful call returns Err, but there's no way to fish
@@ -68,8 +69,38 @@ impl Env {
     /// Ink: 3s stall timeout) so they run in seconds instead of mainnet's
     /// 36s windows. Anvil doesn't care what chain we claim to be.
     pub async fn spawn_with_network(network: EvmNetwork) -> Self {
+        let (env, _no_proxy) = Self::spawn_inner(network, false).await;
+        env
+    }
+
+    /// Same as [`Self::spawn_with_network`], but the service's HTTP RPC is
+    /// routed through a programmable fault-injection [`RpcProxy`]; the WS
+    /// `newHeads` subscription stays wired straight to anvil. Lets tests
+    /// degrade `eth_getLogs` (delays, range caps, poisoned blocks) while
+    /// the chain keeps running honestly underneath — the shape of a real
+    /// provider incident, where heads keep flowing over WS while the HTTP
+    /// side struggles.
+    pub async fn spawn_with_rpc_proxy(network: EvmNetwork) -> (Self, RpcProxy) {
+        let (env, proxy) = Self::spawn_inner(network, true).await;
+        (
+            env,
+            proxy.expect("spawn_inner(with_proxy = true) always builds a proxy"),
+        )
+    }
+
+    async fn spawn_inner(network: EvmNetwork, with_proxy: bool) -> (Self, Option<RpcProxy>) {
         let (anvil, provider, deployer, deployer_wallet) = spawn_anvil().await;
         install_infrastructure(&provider).await;
+
+        let proxy = if with_proxy {
+            Some(RpcProxy::spawn(anvil.endpoint()).await)
+        } else {
+            None
+        };
+        let rpc_http_url = proxy
+            .as_ref()
+            .map(|proxy| proxy.url.clone())
+            .unwrap_or_else(|| anvil.endpoint());
 
         let owner = deployer.address();
         let (token_list_url, _token_list_cancel) = start_token_list_server(WETH9_ADDRESS).await;
@@ -80,7 +111,7 @@ impl Env {
 
         let network_cfg = NetworkConfig {
             network,
-            rpc_http_url: anvil.endpoint(),
+            rpc_http_url,
             snapshot_interval: 5,
             max_watched_tokens_limit: 1500,
             // the in-process token-list server lives on 127.0.0.1
@@ -103,7 +134,7 @@ impl Env {
         // SSE `balance_update` races the connect.
         tokio::time::sleep(Duration::from_millis(1000)).await;
 
-        Self {
+        let env = Self {
             service_url: format!("http://{}", server.local_addr),
             anvil,
             provider,
@@ -113,7 +144,8 @@ impl Env {
             token_list_url,
             _token_list_cancel,
             service_lifecycle,
-        }
+        };
+        (env, proxy)
     }
 
     /// `WETH.deposit()` with `amount` wei attached. Triggers a Deposit log.

@@ -20,14 +20,35 @@
 //! **Gap backfill.** WS `newHeads` skips heads across reconnects (and can
 //! skip under load). When an incoming head is more than one block past
 //! `latest_processed_block`, the dispatcher fetches the missing range too:
-//! sequential `eth_getLogs` chunks sized to [`BACKFILL_CHUNK_SECONDS`] of
-//! chain activity (see [`Erc20TransferEventDispatcher::backfill_chunk_blocks`]), advancing the cursor
+//! sequential `eth_getLogs` chunks of at most
+//! [`EvmNetwork::backfill_chunk_blocks`] blocks (a per-chain budget sized
+//! against provider log caps), advancing the cursor
 //! after each chunk — so a chunk that exhausts retries leaves a smaller
 //! residual gap that the next head re-triggers. The backfill is capped at
 //! the chain's `max_block_lag()` blocks; anything older is deliberately
 //! skipped (the 60s snapshot loop is the recovery path, and processing a
 //! log only schedules a balance refresh, so replays and reorg leftovers
 //! are harmless — refreshes read current chain state).
+//!
+//! **Queue drain.** Heads that arrive while a fetch cycle is in flight
+//! queue up in the block channel. Processing them one recv at a time
+//! would fire one single-block fetch cycle per queued head — on a provider
+//! that is even slightly slower than the chain's block time the dispatcher
+//! then falls behind monotonically with no way to amortize (this is
+//! exactly how the 2026-07-29 Polygon crashloop unfolded: a fallback node
+//! ~15% over block time grew lag past `max_block_lag` and `/health` killed
+//! the pod). Instead, every cycle drains the channel to the newest queued
+//! head and hands `plan_fetch` the whole span at once, so a backlog
+//! collapses into one ranged plan (ordinary ranged `eth_getLogs` amortizes
+//! its per-request overhead: ~2× the latency buys ~10× the blocks).
+//!
+//! **Range bisect.** Some providers reject ranged topic-only queries that
+//! a healthy node accepts — log-count / response-size caps, or public
+//! fallbacks that require an address filter beyond a single block. A
+//! rejected range is split in half and each half refetched, bottoming out
+//! at single blocks — whose failure loses only that block's logs (the
+//! pre-range behavior). Worst case therefore degrades to block-by-block
+//! fetching, never below it.
 
 use crate::domain::EvmNetwork;
 use crate::evm::wrapped::WrappedToken;
@@ -35,24 +56,17 @@ use crate::graceful_shutdown::LifeCycle;
 use crate::metrics::Metrics;
 use crate::services::block_watcher::BlockWatcher;
 use crate::services::health::SubsystemHealth;
-use crate::services::rpc_client::RpcClient;
+use crate::services::rpc_client::{RpcClient, RpcError};
 use alloy::primitives::{Address, BlockNumber};
 use alloy::rpc::types::Log;
 use alloy::sol_types::SolEvent;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 const ERC20_TRANSFER_TOPICS_LEN: usize = 3;
-
-/// Budget per backfill `eth_getLogs` range, expressed in chain time: log
-/// volume scales with seconds of chain activity, not block count, so a
-/// fixed block-count chunk would be huge on a 12s-block chain and trivial
-/// on a 250ms one. Providers cap response size; sequential chunks
-/// self-throttle.
-const BACKFILL_CHUNK_SECONDS: Duration = Duration::from_secs(10);
 
 /// Fetch work derived from one incoming head vs the dispatcher's cursor.
 /// Produced by [`Erc20TransferEventDispatcher::plan_fetch`], executed by
@@ -63,8 +77,8 @@ struct FetchPlan {
     /// cap. Healed by the snapshot loop; logged, not replayed.
     skipped_blocks: u64,
     /// Inclusive `(from, to)` ranges to fetch, oldest first, each at most
-    /// one backfill chunk wide (see [`Erc20TransferEventDispatcher::backfill_chunk_blocks`]). Empty =
-    /// stale or duplicate head.
+    /// one backfill chunk wide (see [`EvmNetwork::backfill_chunk_blocks`]).
+    /// Empty = stale or duplicate head.
     ranges: Vec<(BlockNumber, BlockNumber)>,
 }
 
@@ -87,8 +101,8 @@ pub struct Erc20TransferEventDispatcher {
     /// dispatcher was spawned for. Kept as a plain field so the health
     /// check stays lock-free.
     max_block_lag: u64,
-    /// Blocks per backfill `eth_getLogs` chunk, derived once from the
-    /// chain's block time (see [`Erc20TransferEventDispatcher::backfill_chunk_blocks`]).
+    /// Snapshot of [`EvmNetwork::backfill_chunk_blocks`] — blocks one
+    /// backfill `eth_getLogs` chunk may span for this chain.
     backfill_chunk_blocks: u64,
 }
 
@@ -112,7 +126,7 @@ impl Erc20TransferEventDispatcher {
             weth9_address: network.weth9_address(),
             latest_processed_block: AtomicU64::new(0),
             max_block_lag: network.max_block_lag(),
-            backfill_chunk_blocks: Self::backfill_chunk_blocks(network.block_time()),
+            backfill_chunk_blocks: network.backfill_chunk_blocks(),
         });
 
         let dispatcher_for_spawn = Arc::clone(&dispatcher);
@@ -121,13 +135,6 @@ impl Erc20TransferEventDispatcher {
         });
 
         dispatcher
-    }
-
-    /// Blocks per backfill chunk for a chain with the given block time —
-    /// [`BACKFILL_CHUNK_SECONDS`] worth of blocks, at least 1 (chains whose
-    /// block time exceeds the budget, e.g. mainnet's 12s, go block-by-block).
-    fn backfill_chunk_blocks(block_time: Duration) -> u64 {
-        ((BACKFILL_CHUNK_SECONDS.as_millis() / block_time.as_millis().max(1)) as u64).max(1)
     }
 
     /// Plan the fetch for one incoming head: skip stale heads, fetch the head
@@ -175,6 +182,89 @@ impl Erc20TransferEventDispatcher {
             skipped_blocks,
             ranges,
         }
+    }
+
+    /// Empty the block channel and fold everything queued into the newest
+    /// head (max, not last — defensive against a reordered head). One
+    /// ranged plan against the newest head replaces one fetch cycle per
+    /// queued head; see the module docs ("Queue drain") for why processing
+    /// the queue one head at a time cannot keep up with a slow provider.
+    fn drain_queued_heads(
+        rx: &mut mpsc::Receiver<BlockNumber>,
+        first: BlockNumber,
+    ) -> (BlockNumber, u64) {
+        let mut newest = first;
+        let mut drained = 0;
+        while let Ok(queued) = rx.try_recv() {
+            drained += 1;
+            newest = newest.max(queued);
+        }
+        (newest, drained)
+    }
+
+    /// Fetch `from..=to` via `fetch`, bisecting on failure: a failed
+    /// multi-block range is split in half and each half refetched,
+    /// bottoming out at single blocks. Only blocks whose single-block
+    /// fetch also fails lose their logs.
+    ///
+    /// Each subrange's logs are handed to `handle_log` (oldest subrange
+    /// first) as soon as that subrange lands — downstream sessions see
+    /// events from the resolved half while the other half is still being
+    /// bisected, instead of waiting for the whole traversal. Retry/backoff
+    /// lives inside `fetch` ([`RpcClient`] short-circuits deterministic
+    /// "query too big" rejections so the bisect reacts immediately instead
+    /// of after a full backoff round).
+    ///
+    /// Returns `(handled_logs, lost_blocks)`.
+    async fn fetch_range_with_bisect<F, Fut, H, HFut>(
+        from: BlockNumber,
+        to: BlockNumber,
+        fetch: F,
+        mut handle_log: H,
+    ) -> (u64, u64)
+    where
+        F: Fn(BlockNumber, BlockNumber) -> Fut,
+        Fut: Future<Output = Result<Vec<Log>, RpcError>>,
+        H: FnMut(Log) -> HFut,
+        HFut: Future<Output = ()>,
+    {
+        let mut handled_logs = 0;
+        let mut lost_blocks = 0;
+        // LIFO with the older half pushed last → subranges resolve oldest
+        // first, preserving the pre-bisect log order.
+        let mut pending = vec![(from, to)];
+
+        while let Some((from, to)) = pending.pop() {
+            match fetch(from, to).await {
+                Ok(batch) => {
+                    for log in batch {
+                        handled_logs += 1;
+                        handle_log(log).await;
+                    }
+                }
+                Err(err) if from < to => {
+                    let mid = from + (to - from) / 2;
+                    tracing::warn!(
+                        from,
+                        to,
+                        error = %err,
+                        "event dispatcher: ranged eth_getLogs failed, bisecting"
+                    );
+                    pending.push((mid + 1, to));
+                    pending.push((from, mid));
+                }
+                Err(err) => {
+                    lost_blocks += 1;
+                    tracing::warn!(
+                        block = from,
+                        error = %err,
+                        "event dispatcher: single-block eth_getLogs failed, block logs lost"
+                    );
+                }
+            }
+        }
+
+        (handled_logs, lost_blocks)
     }
 
     /// Structured health for `/health`. Healthy from the moment the dispatcher
@@ -229,6 +319,16 @@ impl Erc20TransferEventDispatcher {
                         tracing::info!("event dispatcher: block_number_rx senders are dropped, stop dispatcher");
                         return;
                     };
+
+                    let (block_number, drained_heads) =
+                        Self::drain_queued_heads(&mut block_number_rx, block_number);
+                    if drained_heads > 0 {
+                        tracing::info!(
+                            drained_heads,
+                            head = block_number,
+                            "event dispatcher: drained queued heads, catching up in one ranged plan"
+                        );
+                    }
 
                     let latest_processed = self.latest_processed_block.load(Ordering::Relaxed);
                     let plan = Self::plan_fetch(
@@ -296,38 +396,32 @@ impl Erc20TransferEventDispatcher {
         tracing::debug!(from, to, "event dispatcher: fetching weth9 logs for range");
 
         let t0 = std::time::Instant::now();
-        match self
-            .rpc_client
-            .fetch_weth9_logs_in_range(self.weth9_address, from, to)
-            .await
-        {
-            Ok(logs) => {
-                let elapsed_ms = t0.elapsed().as_millis() as f64;
-                self.metrics.eth_get_logs_duration_ms.record(elapsed_ms);
-                tracing::debug!(
-                    from,
-                    to,
-                    count = logs.len(),
-                    duration_ms = elapsed_ms as u64,
-                    "event dispatcher: got weth9 logs for range",
-                );
+        let (count, lost_blocks) = Self::fetch_range_with_bisect(
+            from,
+            to,
+            |from, to| {
+                self.rpc_client
+                    .fetch_weth9_logs_in_range(self.weth9_address, from, to)
+            },
+            |log| self.on_weth9_log(log),
+        )
+        .await;
 
-                for log in logs {
-                    self.on_weth9_log(log).await;
-                }
-            }
-            Err(err) => {
-                self.metrics
-                    .event_dispatcher_missed_block_logs_total
-                    .increment(to - from + 1);
-                tracing::warn!(
-                    from,
-                    to,
-                    error = %err,
-                    "event dispatcher: eth_getLogs for weth9 exhausted retries, range logs lost"
-                );
-            }
+        let elapsed_ms = t0.elapsed().as_millis() as f64;
+        self.metrics.eth_get_logs_duration_ms.record(elapsed_ms);
+        if lost_blocks > 0 {
+            self.metrics
+                .event_dispatcher_missed_block_logs_total
+                .increment(lost_blocks);
         }
+        tracing::debug!(
+            from,
+            to,
+            count,
+            lost_blocks,
+            duration_ms = elapsed_ms as u64,
+            "event dispatcher: got weth9 logs for range",
+        );
     }
 
     async fn fetch_erc20_transfer_logs_and_process(&self, from: BlockNumber, to: BlockNumber) {
@@ -338,33 +432,29 @@ impl Erc20TransferEventDispatcher {
         );
 
         let t0 = std::time::Instant::now();
-        match self.rpc_client.fetch_transfer_logs_in_range(from, to).await {
-            Ok(logs) => {
-                let elapsed_ms = t0.elapsed().as_millis() as f64;
-                self.metrics.eth_get_logs_duration_ms.record(elapsed_ms);
-                tracing::debug!(
-                    from,
-                    to,
-                    count = logs.len(),
-                    duration_ms = elapsed_ms as u64,
-                    "event dispatcher: got erc20 transfer logs for range"
-                );
-                for log in logs {
-                    self.on_erc20_log(log).await;
-                }
-            }
-            Err(err) => {
-                self.metrics
-                    .event_dispatcher_missed_block_logs_total
-                    .increment(to - from + 1);
-                tracing::warn!(
-                    from,
-                    to,
-                    error = %err,
-                    "event dispatcher: eth_getLogs for erc20 exhausted retries, range logs lost"
-                );
-            }
+        let (count, lost_blocks) = Self::fetch_range_with_bisect(
+            from,
+            to,
+            |from, to| self.rpc_client.fetch_transfer_logs_in_range(from, to),
+            |log| self.on_erc20_log(log),
+        )
+        .await;
+
+        let elapsed_ms = t0.elapsed().as_millis() as f64;
+        self.metrics.eth_get_logs_duration_ms.record(elapsed_ms);
+        if lost_blocks > 0 {
+            self.metrics
+                .event_dispatcher_missed_block_logs_total
+                .increment(lost_blocks);
         }
+        tracing::debug!(
+            from,
+            to,
+            count,
+            lost_blocks,
+            duration_ms = elapsed_ms as u64,
+            "event dispatcher: got erc20 transfer logs for range"
+        );
     }
 
     async fn on_weth9_log(&self, log: Log) {
@@ -513,27 +603,180 @@ mod tests {
     }
 
     #[test]
-    fn chunk_is_time_normalized_per_network() {
-        // ~BACKFILL_CHUNK_SECONDS of chain activity per request, floor 1
+    fn drain_folds_queue_into_newest_head_and_counts() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.try_send(101).unwrap();
+        tx.try_send(103).unwrap();
+        tx.try_send(102).unwrap();
+
+        let (newest, drained) = Erc20TransferEventDispatcher::drain_queued_heads(&mut rx, 100);
+        assert_eq!(newest, 103);
+        assert_eq!(drained, 3);
+    }
+
+    #[test]
+    fn drain_on_empty_queue_keeps_first_head() {
+        let (_tx, mut rx) = mpsc::channel::<BlockNumber>(8);
+        let (newest, drained) = Erc20TransferEventDispatcher::drain_queued_heads(&mut rx, 100);
+        assert_eq!(newest, 100);
+        assert_eq!(drained, 0);
+    }
+
+    /// One synthetic log per block in `from..=to`, tagged via `block_number`.
+    fn logs_for_range(from: BlockNumber, to: BlockNumber) -> Vec<Log> {
+        (from..=to)
+            .map(|block| Log {
+                block_number: Some(block),
+                ..Log::default()
+            })
+            .collect()
+    }
+
+    /// Run the bisect over a fake provider that rejects ranges for which
+    /// `reject` returns true, collecting handled logs' block numbers in
+    /// arrival order.
+    async fn run_bisect(
+        from: BlockNumber,
+        to: BlockNumber,
+        reject: impl Fn(BlockNumber, BlockNumber) -> bool,
+    ) -> (Vec<BlockNumber>, u64, u64) {
+        let handled = std::cell::RefCell::new(Vec::new());
+        let (count, lost) = Erc20TransferEventDispatcher::fetch_range_with_bisect(
+            from,
+            to,
+            |from, to| {
+                let rejected = reject(from, to);
+                async move {
+                    if rejected {
+                        Err(RpcError::Exhausted("rejected".into()))
+                    } else {
+                        Ok(logs_for_range(from, to))
+                    }
+                }
+            },
+            |log| {
+                handled.borrow_mut().extend(log.block_number);
+                async {}
+            },
+        )
+        .await;
+        (handled.into_inner(), count, lost)
+    }
+
+    #[tokio::test]
+    async fn bisect_splits_until_provider_accepts() {
+        // provider rejects any range wider than 2 blocks
+        let (handled, count, lost) = run_bisect(1, 5, |from, to| to - from + 1 > 2).await;
+
+        assert_eq!(lost, 0);
+        assert_eq!(count, 5);
+        assert_eq!(handled, vec![1, 2, 3, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn bisect_loses_only_the_block_that_fails_alone() {
+        // any range touching block 3 fails; the rest succeeds
+        let (handled, count, lost) = run_bisect(1, 5, |from, to| (from..=to).contains(&3)).await;
+
+        assert_eq!(lost, 1);
+        assert_eq!(count, 4);
+        assert_eq!(handled, vec![1, 2, 4, 5]);
+    }
+
+    #[tokio::test]
+    async fn bisect_total_failure_loses_every_block() {
+        let (handled, count, lost) = run_bisect(1, 5, |_, _| true).await;
+
+        assert!(handled.is_empty());
+        assert_eq!(count, 0);
+        assert_eq!(lost, 5);
+    }
+
+    #[tokio::test]
+    async fn bisect_single_block_range_does_not_split() {
+        let (handled, count, lost) = run_bisect(7, 7, |from, to| {
+            assert_eq!((from, to), (7, 7));
+            false
+        })
+        .await;
+
+        assert_eq!(lost, 0);
+        assert_eq!(count, 1);
+        assert_eq!(handled, vec![7]);
+    }
+
+    #[tokio::test]
+    async fn bisect_streams_logs_before_the_traversal_completes() {
+        // Interleaving proof: with a provider that rejects ranges wider
+        // than 2 blocks, logs of an accepted older subrange must reach the
+        // handler before the younger subranges are even fetched.
+        let events = std::cell::RefCell::new(Vec::new());
+        let _ = Erc20TransferEventDispatcher::fetch_range_with_bisect(
+            1,
+            5,
+            |from, to| {
+                events.borrow_mut().push(format!("fetch {from}-{to}"));
+                let rejected = to - from + 1 > 2;
+                async move {
+                    if rejected {
+                        Err(RpcError::Exhausted("rejected".into()))
+                    } else {
+                        Ok(logs_for_range(from, to))
+                    }
+                }
+            },
+            |log| {
+                events
+                    .borrow_mut()
+                    .push(format!("handle {}", log.block_number.unwrap()));
+                async {}
+            },
+        )
+        .await;
+
         assert_eq!(
-            Erc20TransferEventDispatcher::backfill_chunk_blocks(EvmNetwork::Eth.block_time()),
-            1
+            events.into_inner(),
+            vec![
+                "fetch 1-5", // rejected, bisect into 1-3 / 4-5
+                "fetch 1-3", // rejected, bisect into 1-2 / 3-3
+                "fetch 1-2",
+                "handle 1", // streamed before the rest of the traversal
+                "handle 2",
+                "fetch 3-3",
+                "handle 3",
+                "fetch 4-5",
+                "handle 4",
+                "handle 5",
+            ]
         );
-        assert_eq!(
-            Erc20TransferEventDispatcher::backfill_chunk_blocks(EvmNetwork::Arbitrum.block_time()),
-            40
-        );
-        assert_eq!(
-            Erc20TransferEventDispatcher::backfill_chunk_blocks(EvmNetwork::Bnb.block_time()),
-            13
-        );
-        assert_eq!(
-            Erc20TransferEventDispatcher::backfill_chunk_blocks(EvmNetwork::Plasma.block_time()),
-            10
-        );
-        assert_eq!(
-            Erc20TransferEventDispatcher::backfill_chunk_blocks(EvmNetwork::Linea.block_time()),
-            2
-        );
+    }
+
+    #[test]
+    fn chunk_never_exceeds_backfill_cap_and_is_at_least_one_block() {
+        // A chunk wider than max_block_lag could never be filled: plan_fetch
+        // caps the whole backfill below it. Zero would stall the plan loop.
+        const ALL_NETWORKS: [EvmNetwork; 11] = [
+            EvmNetwork::Eth,
+            EvmNetwork::Bnb,
+            EvmNetwork::Gnosis,
+            EvmNetwork::Polygon,
+            EvmNetwork::Base,
+            EvmNetwork::Plasma,
+            EvmNetwork::Arbitrum,
+            EvmNetwork::Avalanche,
+            EvmNetwork::Ink,
+            EvmNetwork::Linea,
+            EvmNetwork::Sepolia,
+        ];
+
+        for network in ALL_NETWORKS {
+            let chunk = network.backfill_chunk_blocks();
+            assert!(chunk >= 1, "{network}: zero-width chunk");
+            assert!(
+                chunk <= network.max_block_lag(),
+                "{network}: chunk {chunk} exceeds backfill cap {}",
+                network.max_block_lag()
+            );
+        }
     }
 }
