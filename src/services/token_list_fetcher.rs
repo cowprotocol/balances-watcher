@@ -8,12 +8,11 @@
 //! trigger duplicate HTTP calls. Retries on transient HTTP failures are handled
 //! with exponential backoff ([`backon`]).
 
-use crate::config::constants::{MAX_TOKEN_LIST_RESPONSE_BYTES, TOKEN_LIST_FETCH_TIMEOUT};
-use crate::services::url_guard;
-use crate::{
-    domain::{EvmNetwork, Token},
-    metrics::Metrics,
+use crate::config::constants::{
+    MAX_TOKEN_LIST_RESPONSE_BYTES, TOKEN_LIST_FETCH_TIMEOUT, USER_AGENT,
 };
+use crate::services::url_guard;
+use crate::{domain::EvmNetwork, metrics::Metrics};
 use alloy::primitives::Address;
 use backon::{ExponentialBuilder, Retryable};
 use futures::future::try_join_all;
@@ -28,6 +27,12 @@ use std::{
 };
 
 const CACHE_CAPACITY: u64 = 256;
+
+/// How many unparseable active-chain addresses to include verbatim in the
+/// paired warn (the metric carries the full count).
+const INVALID_ADDRESS_LOG_SAMPLES: usize = 5;
+/// Per-sample length cap for those log entries.
+const MAX_SAMPLE_CHARS: usize = 64;
 
 type ListUrl = String;
 
@@ -61,7 +66,20 @@ pub struct TokenListFetcher {
 
 #[derive(Debug, Deserialize)]
 struct ApiResponse {
-    tokens: Vec<Token>,
+    /// Raw entries; parsed leniently per item in
+    /// [`TokenListFetcher::fetch_list_and_filter_by_chain`] — see the comment
+    /// there for why strict typed deserialization is not an option.
+    tokens: Vec<serde_json::Value>,
+}
+
+/// The subset of a token-list entry this service needs. `address` stays a
+/// string at this stage: multi-chain lists carry non-EVM addresses that must
+/// not be forced through the 20-byte [`Address`] parser wholesale.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawToken {
+    address: String,
+    chain_id: u64,
 }
 
 impl TokenListFetcher {
@@ -100,6 +118,7 @@ impl TokenListFetcher {
     fn build_client(allow_private_hosts: bool) -> Client {
         let builder = Client::builder()
             .timeout(TOKEN_LIST_FETCH_TIMEOUT)
+            .user_agent(USER_AGENT)
             .redirect(url_guard::redirect_policy(allow_private_hosts));
 
         let builder = if allow_private_hosts {
@@ -158,20 +177,52 @@ impl TokenListFetcher {
         })?;
 
         let network = self.network;
-        let token_set = self
-            .fetch_list(url)
-            .await?
-            .tokens
-            .into_iter()
-            .filter_map(|token| {
-                if token.chain_id == network.chain_id() {
-                    Some(token.address)
-                } else {
-                    None
-                }
-            });
+        let tokens = self.fetch_list(url).await?.tokens;
 
-        Ok(token_set.collect())
+        // Multi-chain lists (tokens.uniswap.org in particular) carry entries for
+        // chains we don't serve, including non-EVM ones whose addresses are not
+        // 20-byte hex (Solana base58 mints, since 2026-07). Entries are parsed
+        // individually and anything that doesn't fit is skipped — one foreign
+        // entry must not fail the whole list. Only unparseable addresses on the
+        // *active* chain are suspicious enough to count and log.
+        let mut invalid_count = 0usize;
+        let mut invalid_samples: Vec<String> = Vec::new();
+        let token_set: ChainTokens = tokens
+            .into_iter()
+            .filter_map(|raw| {
+                let token: RawToken = serde_json::from_value(raw).ok()?;
+                if token.chain_id != network.chain_id() {
+                    return None;
+                }
+                match token.address.parse::<Address>() {
+                    Ok(address) => Some(address),
+                    Err(_) => {
+                        invalid_count += 1;
+                        if invalid_samples.len() < INVALID_ADDRESS_LOG_SAMPLES {
+                            // char-capped: the value is attacker-suppliable and
+                            // must not dump megabytes into a log line
+                            invalid_samples
+                                .push(token.address.chars().take(MAX_SAMPLE_CHARS).collect());
+                        }
+                        None
+                    }
+                }
+            })
+            .collect();
+
+        if invalid_count > 0 {
+            self.metrics
+                .token_list_invalid_addresses_total
+                .increment(invalid_count as u64);
+            tracing::warn!(
+                url,
+                skipped = invalid_count,
+                samples = ?invalid_samples,
+                "token list entries on the active chain had unparseable addresses; skipped"
+            );
+        }
+
+        Ok(token_set)
     }
 
     /// Fetch, download and parse a single list. Reached only on a cache miss
@@ -410,6 +461,46 @@ mod token_list_fetcher_tests {
             .unwrap();
 
         assert_eq!(expected_list_by_chain, tokens);
+    }
+
+    /// Regression: tokens.uniswap.org started carrying Solana entries
+    /// (chainId 501000101, base58 addresses). Strict typed deserialization
+    /// used to fail the entire list on the first such entry — and with it
+    /// every session that referenced the list.
+    #[tokio::test]
+    async fn test_non_evm_entries_do_not_fail_the_list() {
+        let server = MockServer::start().await;
+        let evm_token = Address::random();
+
+        let body = serde_json::json!({
+            "tokens": [
+                { "chainId": 1, "address": evm_token, "symbol": "OK" },
+                // real-world Solana entry shape from tokens.uniswap.org
+                {
+                    "chainId": 501000101,
+                    "address": "5mbK36SZ7J19An8jFochhQS4of8g6BwUjbeCSxBSoWdp",
+                    "symbol": "$MICHI",
+                    "decimals": 6
+                },
+                // active chain but unparseable address — skipped, not fatal
+                { "chainId": 1, "address": "not-an-address" },
+                // malformed entry with no address at all
+                { "chainId": 1 }
+            ]
+        });
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let fetcher = make_fetcher();
+        let tokens = Arc::clone(&fetcher)
+            .get_tokens(&[server.uri()])
+            .await
+            .unwrap();
+
+        assert_eq!(tokens, HashSet::from([evm_token]));
     }
 
     #[tokio::test]
