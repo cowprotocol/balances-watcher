@@ -179,12 +179,6 @@ impl TokenListFetcher {
         let network = self.network;
         let tokens = self.fetch_list(url).await?.tokens;
 
-        // Multi-chain lists (tokens.uniswap.org in particular) carry entries for
-        // chains we don't serve, including non-EVM ones whose addresses are not
-        // 20-byte hex (Solana base58 mints, since 2026-07). Entries are parsed
-        // individually and anything that doesn't fit is skipped — one foreign
-        // entry must not fail the whole list. Only unparseable addresses on the
-        // *active* chain are suspicious enough to count and log.
         let mut invalid_count = 0usize;
         let mut invalid_samples: Vec<String> = Vec::new();
         let token_set: ChainTokens = tokens
