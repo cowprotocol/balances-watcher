@@ -83,6 +83,11 @@ pub struct Metrics {
     pub token_list_load_failed_total: Counter,
     /// token list url rejected by the ssrf guard (bad scheme / private host)
     pub token_list_url_rejected_total: Counter,
+    /// entries on the *active* chain whose address failed to parse as a
+    /// 20-byte EVM address and were skipped (other-chain / non-EVM entries
+    /// are routine filtering and not counted). A spike = the list itself is
+    /// corrupted or changed shape; sample addresses are in the paired warn.
+    pub token_list_invalid_addresses_total: Counter,
     /// single token-list fetch latency, ms — full load (headers + body +
     /// parse) on a cache miss. Recorded per actually-fetched list, so the
     /// count also tracks how often the cache is cold.
@@ -153,6 +158,7 @@ impl Metrics {
             token_list_loaded_total: counter!("token_list_loaded_total"),
             token_list_load_failed_total: counter!("token_list_load_failed_total"),
             token_list_url_rejected_total: counter!("token_list_url_rejected_total"),
+            token_list_invalid_addresses_total: counter!("token_list_invalid_addresses_total"),
             token_list_loaded_time_in_ms: histogram!("token_list_loaded_time_in_ms"),
             token_lists_resolve_duration_ms: histogram!("token_lists_resolve_duration_ms"),
 

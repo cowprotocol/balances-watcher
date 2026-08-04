@@ -27,6 +27,13 @@ pub const MAX_CLIENTS_PER_OWNER: usize = 5;
 /// session-create handler open.
 pub const TOKEN_LIST_FETCH_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// `User-Agent` for outbound token-list fetches. reqwest sends no UA by
+/// default, and public CDN fronts (Cloudflare in front of `ipfs.io` in
+/// particular) bot-score requests — a missing UA from a datacenter egress IP
+/// is heavily penalized (429s/challenges the browser never sees). Identify
+/// ourselves honestly instead.
+pub const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 /// Cap on a token-list response body. The largest legitimate lists
 /// (coingecko `all.json`) are single-digit MB; the cap exists so a
 /// caller-supplied URL serving an unbounded body cannot OOM the process.
