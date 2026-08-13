@@ -8,6 +8,23 @@ Source layout: `src/api`, `src/evm`, `src/domain`, `src/services`, `src/ws_conne
 `src/graceful_shutdown`, `src/tracing`, `src/config`, `src/metrics.rs`, `src/args.rs`,
 `src/app_state.rs`, `src/app_error.rs`. Match `rustfmt.toml` formatting.
 
+## Comments
+
+Keep comments compact. No restating-the-obvious comments, no multi-paragraph
+explanations of what the code already says. Prefer, in order:
+
+1. Clean, self-explanatory code (good names, small functions) over a comment.
+2. A `tracing::debug!`/`trace!` line instead of a comment where the "why" is
+   really runtime/operational context (e.g. why a branch was taken, what value
+   was seen) — it documents the behavior AND is useful at runtime, a plain
+   comment is neither.
+3. A short one-liner comment only for a genuinely non-obvious invariant, a
+   workaround, or a hidden constraint — not for what the code visibly does.
+
+Same bar for doc comments: a brief one-or-two-line `//!`/`///` per file, crate,
+or module is welcome (and occasionally per method when the signature alone
+doesn't convey intent), but skip long-winded doc blocks.
+
 ## CI (GitHub Actions)
 
 - `.github/workflows/code-checks.yml` — `cargo test`, `clippy -D warnings`, `rustfmt`
