@@ -52,10 +52,8 @@ fn is_allowed_token_list_host(host: &str) -> bool {
 }
 
 fn host_is_allowed(host: &str) -> Result<(), String> {
-    if let Some(ip) = ip_literal(host) {
-        if !is_public_ip(ip) {
-            return Err(format!("host {host} is not a public address"));
-        }
+    if ip_literal(host).is_some_and(|ip| !is_public_ip(ip)) {
+        return Err(format!("host {host} is not a public address"));
     }
 
     if !is_allowed_token_list_host(host) {
@@ -167,10 +165,12 @@ pub fn redirect_policy(allow_private_hosts: bool) -> redirect::Policy {
         }
 
         if !allow_private_hosts {
-            if let Some(host) = attempt.url().host_str() {
-                if let Err(reason) = host_is_allowed(host) {
-                    return attempt.error(reason);
-                }
+            if let Some(reason) = attempt
+                .url()
+                .host_str()
+                .and_then(|host| host_is_allowed(host).err())
+            {
+                return attempt.error(reason);
             }
         }
 
