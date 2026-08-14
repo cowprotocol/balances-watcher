@@ -233,7 +233,10 @@ mod url_guard_tests {
             "https://example.com/list.json",
             "http://1.1.1.1/list.json",
         ] {
-            assert!(validate_url(url, false).is_err(), "{url} should be rejected");
+            assert!(
+                validate_url(url, false).is_err(),
+                "{url} should be rejected"
+            );
         }
     }
 
