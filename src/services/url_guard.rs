@@ -14,12 +14,19 @@
 //!    hostname the client ever connects to (including redirect targets and
 //!    DNS-rebinding tricks) resolves through a filter that drops non-public
 //!    addresses.
-//! 3. [`redirect_policy`] — caps redirect hops and refuses redirects whose
-//!    target host is a non-public IP literal (literals bypass DNS, so the
-//!    resolver alone would not see them).
+//! 3. [`redirect_policy`] — caps redirect hops and applies the same
+//!    private-IP and host-allowlist checks as [`validate_url`] to every
+//!    redirect target (literals bypass DNS, so the resolver alone would not
+//!    see them, and an allowlisted host could otherwise redirect to one
+//!    that isn't).
+//! 4. [`ALLOWED_TOKEN_LIST_HOSTS`] — a hardcoded allowlist checked in
+//!    [`validate_url`]. Layers 1-3 stop SSRF into private space; this layer
+//!    additionally stops fetching from *any* public host that isn't a known,
+//!    approved token-list source.
 //!
 //! The `allow_private_hosts` escape hatch exists for local development and
-//! the integration suite, where token lists are served from `127.0.0.1`.
+//! the integration suite, where token lists are served from `127.0.0.1`; it
+//! also bypasses the host allowlist for the same reason.
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use reqwest::{redirect, Url};
@@ -28,9 +35,36 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// Hard cap on redirect hops for token-list fetches.
 const MAX_REDIRECT_HOPS: usize = 5;
 
-/// Pre-flight validation of a caller-supplied token-list URL. Cheap and
-/// synchronous — DNS-name hosts are *not* resolved here; they are enforced
-/// at connect time by [`PublicOnlyDnsResolver`].
+/// Temporary: hardcoded until we decide how to keep this in sync with
+/// cowswap-frontend's token-list sources.
+const ALLOWED_TOKEN_LIST_HOSTS: &[&str] = &[
+    "files.cow.fi",
+    "curvefi.github.io",
+    "raw.githubusercontent.com",
+    "static.optimism.io",
+    "tokens.honeyswap.org",
+    "ipfs.io",
+    "tokens-uniswap-org.ipns.inbrowser.link",
+];
+
+fn is_allowed_token_list_host(host: &str) -> bool {
+    ALLOWED_TOKEN_LIST_HOSTS.contains(&host)
+}
+
+fn host_is_allowed(host: &str) -> Result<(), String> {
+    if let Some(ip) = ip_literal(host) {
+        if !is_public_ip(ip) {
+            return Err(format!("host {host} is not a public address"));
+        }
+    }
+
+    if !is_allowed_token_list_host(host) {
+        return Err(format!("host {host} is not an allowed token-list source"));
+    }
+
+    Ok(())
+}
+
 pub fn validate_url(raw_url: &str, allow_private_hosts: bool) -> Result<(), String> {
     let url = Url::parse(raw_url).map_err(|err| format!("invalid url: {err}"))?;
 
@@ -44,11 +78,7 @@ pub fn validate_url(raw_url: &str, allow_private_hosts: bool) -> Result<(), Stri
     };
 
     if !allow_private_hosts {
-        if let Some(ip) = ip_literal(host) {
-            if !is_public_ip(ip) {
-                return Err(format!("host {host} is not a public address"));
-            }
-        }
+        host_is_allowed(host)?;
     }
 
     Ok(())
@@ -130,10 +160,6 @@ impl Resolve for PublicOnlyDnsResolver {
     }
 }
 
-/// Redirect policy for the token-list client: bounded hop count, and (when
-/// private hosts are disallowed) redirects to non-public IP literals are
-/// refused. Redirects to hostnames are safe to follow — the connection goes
-/// through [`PublicOnlyDnsResolver`] anyway.
 pub fn redirect_policy(allow_private_hosts: bool) -> redirect::Policy {
     redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > MAX_REDIRECT_HOPS {
@@ -142,10 +168,8 @@ pub fn redirect_policy(allow_private_hosts: bool) -> redirect::Policy {
 
         if !allow_private_hosts {
             if let Some(host) = attempt.url().host_str() {
-                if let Some(ip) = ip_literal(host) {
-                    if !is_public_ip(ip) {
-                        return attempt.error("redirect to a non-public address is not allowed");
-                    }
+                if let Err(reason) = host_is_allowed(host) {
+                    return attempt.error(reason);
                 }
             }
         }
@@ -188,16 +212,48 @@ mod url_guard_tests {
     }
 
     #[test]
-    fn accepts_public_hosts() {
-        assert!(validate_url("https://tokens.coingecko.com/uniswap/all.json", false).is_ok());
-        assert!(validate_url("http://1.1.1.1/list.json", false).is_ok());
-        // DNS names are validated at resolve time, not pre-flight.
-        assert!(validate_url("https://example.com/list.json", false).is_ok());
+    fn accepts_allowlisted_hosts() {
+        for url in [
+            "https://files.cow.fi/tokens/CowSwap.json",
+            "https://curvefi.github.io/curve-assets/ethereum.json",
+            "https://raw.githubusercontent.com/ondoprotocol/cowswap-global-markets-token-list/refs/heads/main/tokenlist.json",
+            "https://static.optimism.io/optimism.tokenlist.json",
+            "https://tokens.honeyswap.org",
+            "https://ipfs.io/ipns/tokens.uniswap.org",
+            "https://tokens-uniswap-org.ipns.inbrowser.link/",
+        ] {
+            assert!(validate_url(url, false).is_ok(), "{url} should be accepted");
+        }
+    }
+
+    #[test]
+    fn rejects_hosts_not_on_the_allowlist() {
+        for url in [
+            "https://tokens.coingecko.com/uniswap/all.json",
+            "https://example.com/list.json",
+            "http://1.1.1.1/list.json",
+        ] {
+            assert!(validate_url(url, false).is_err(), "{url} should be rejected");
+        }
     }
 
     #[test]
     fn allow_private_hosts_disables_ip_checks_but_not_scheme_checks() {
         assert!(validate_url("http://127.0.0.1:8080/list.json", true).is_ok());
         assert!(validate_url("ftp://127.0.0.1/list.json", true).is_err());
+    }
+
+    #[test]
+    fn host_is_allowed_rejects_private_ips_and_non_allowlisted_hosts() {
+        assert!(host_is_allowed("127.0.0.1").is_err());
+        assert!(host_is_allowed("169.254.169.254").is_err());
+        assert!(host_is_allowed("example.com").is_err());
+        assert!(host_is_allowed("1.1.1.1").is_err());
+    }
+
+    #[test]
+    fn host_is_allowed_accepts_allowlisted_hosts() {
+        assert!(host_is_allowed("files.cow.fi").is_ok());
+        assert!(host_is_allowed("raw.githubusercontent.com").is_ok());
     }
 }
