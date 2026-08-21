@@ -19,8 +19,14 @@ pub struct Metrics {
     /// balance diff broadcast to sse clients
     pub balance_updates_sent_total: Counter,
 
-    /// multicall request issued
+    /// multicall request issued (sum of the two sources below)
     pub multicall_total: Counter,
+    /// multicall issued by the periodic/on-demand snapshot updater
+    /// (`SnapshotUpdater` → `RpcClient::fetch_balances_by_chunks`)
+    pub multicall_periodic_total: Counter,
+    /// multicall issued by the event-triggered refresh queue
+    /// (`BalanceRefreshQueue` → `RpcClient::fetch_balances_via_multicall`)
+    pub multicall_event_triggered_total: Counter,
     /// multicall attempt failed (per retry)
     pub multicall_failed_total: Counter,
     /// multicall round-trip latency, ms
@@ -125,6 +131,8 @@ impl Metrics {
             balance_updates_sent_total: counter!("balance_updates_sent_total"),
 
             multicall_total: counter!("multicall_total"),
+            multicall_periodic_total: counter!("multicall_periodic_total"),
+            multicall_event_triggered_total: counter!("multicall_event_triggered_total"),
             multicall_failed_total: counter!("multicall_failed_total"),
             multicall_duration_ms: histogram!("multicall_duration_ms"),
             provider_exhausted_with_retries_total: counter!(

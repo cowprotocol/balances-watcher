@@ -255,6 +255,7 @@ impl RpcClient {
             .await
             .inspect(move |_| {
                 self.metrics.multicall_total.increment(1);
+                self.metrics.multicall_event_triggered_total.increment(1);
                 metrics
                     .multicall_duration_ms
                     .record(t0.elapsed().as_millis() as f64);
@@ -369,6 +370,7 @@ impl RpcClient {
                     .inspect(move |_| {
                         let metrics = Arc::clone(&metrics);
                         metrics.multicall_total.increment(1);
+                        metrics.multicall_periodic_total.increment(1);
                         metrics
                             .multicall_duration_ms
                             .record(t0.elapsed().as_millis() as f64);
