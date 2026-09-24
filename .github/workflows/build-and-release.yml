@@ -37,7 +37,8 @@ jobs:
   build:
     name: Build image
     # PR: validation build (no push).
-    # Merge: build with push of :sha-<7>. Semver tags happen in `release`.
+    # Merge: build + push of :sha-<7> (linux/amd64 and linux/arm64, arm64
+    # via QEMU). Semver tags happen in `release`.
     # PR-closed-without-merge: skip.
     if: >-
       github.event_name == 'pull_request'
@@ -55,6 +56,9 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
           persist-credentials: false
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -100,6 +104,7 @@ jobs:
         with:
           context: .
           push: ${{ github.event_name == 'pull_request_target' }}
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
