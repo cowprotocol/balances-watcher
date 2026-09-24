@@ -2,8 +2,8 @@ name: Build & Release
 
 # One workflow, two jobs, three events:
 #
-# - PR                          → `build` runs as a Dockerfile smoke test (no push).
-# - PR merged into main         → `build` pushes :sha-<7>, then `release`
+# - PR                          → `build` validates AMD64 + ARM64 (no push).
+# - PR merged into main         → `build` publishes a dual-architecture :sha-<7>, then `release`
 #                                 (needs: build) retags the image with
 #                                 :vX.Y.Z / :vX.Y / :latest, pushes the git
 #                                 tag, and creates the GitHub Release.
@@ -42,68 +42,20 @@ jobs:
     if: >-
       github.event_name == 'pull_request'
       || (github.event_name == 'pull_request_target' && github.event.pull_request.merged == true)
-    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
-
-    steps:
-      # persist-credentials: false — don't leave GITHUB_TOKEN in the runner's
-      # `.git/config` after checkout. Anything reading .git/config in a later
-      # step (e.g. malicious build.rs on a PR) would otherwise pick it up.
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: false
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      # Login runs on every event now — even on `pull_request` builds we
-      # need GHCR auth to pull/push the registry-hosted buildx cache tag
-      # (`cache-from`/`cache-to: type=registry,ref=ghcr.io/...:buildcache-*`).
-      # Without login, buildx falls back to an anonymous token request that
-      # 403s on private GHCR packages. GITHUB_TOKEN on same-repo PRs has
-      # `packages: write`; on fork PRs it's read-only, which is enough for
-      # `cache-from`. `cache-to` is skipped on non-merge events anyway.
-      - name: Login to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      # Only :sha-<7> here. Semver aliases (:vX.Y.Z, :vX.Y, :latest) are
-      # added by the `release` job via `docker buildx imagetools create`
-      # after the tag has been decided.
-      - name: Docker meta (tags/labels)
-        if: github.event_name == 'pull_request_target'
-        id: meta
-        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=sha
-
-      # Registry-hosted cache instead of `type=gha`. The GHA Cache API v2
-      # backend has been flaky (opaque "failed to reserve cache" 5xx from
-      # the service even under quota); a dedicated GHCR tag as a cache
-      # manifest sidesteps it entirely. We already hold `packages: write`,
-      # so no extra permission needed.
-      #
-      # PR builds only READ the cache; only merges (`pull_request_target`)
-      # WRITE it. This means a poisoned PR build cannot pollute what the
-      # next merge picks up, and fork PRs (with a read-only GITHUB_TOKEN)
-      # don't try — and fail — to push cache blobs.
-      - name: Build & push
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          context: .
-          push: ${{ github.event_name == 'pull_request_target' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: ${{ github.event_name == 'pull_request_target' && format('type=registry,ref={0}/{1}:buildcache,mode=min', env.REGISTRY, env.IMAGE_NAME) || '' }}
+    uses: cowprotocol/cow-gh-workflow-tests/.github/workflows/build-image.yml@d0c0cd20fa1f5f8cbaf926d0f45752907749ccd6
+    with:
+      image: ghcr.io/${{ github.repository }}
+      artifact-prefix: balances-watcher
+      # Pin both builds and the release tag to the same event commit.
+      # pull_request_target checks out the trusted base SHA, never the PR head.
+      checkout-ref: ${{ github.sha }}
+      push: ${{ github.event_name == 'pull_request_target' && github.event.pull_request.merged == true }}
+      tags: type=sha
+      # Separate registry caches per architecture; PRs only read them.
+      registry-cache-ref: ghcr.io/${{ github.repository }}:buildcache
 
   release:
     name: Tag & Release
@@ -115,10 +67,10 @@ jobs:
       packages: write   # `docker buildx imagetools create` on GHCR
 
     steps:
-      - name: Checkout main
+      - name: Checkout built commit
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           # Keep credentials here — we need them for `git push origin <tag>`
           # in the "Create and push tag" step below.
@@ -195,13 +147,19 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Retag the :sha-<7> image the `build` job just pushed with the semver
-      # aliases we computed. `imagetools create` writes new manifests
-      # pointing at the same digest — no rebuild, no cache, no race.
+      - name: Set up Docker Buildx
+        if: steps.changes.outputs.detected == 'true'
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # Retag the exact multi-platform index returned by the shared build,
+      # preserving both architectures without resolving a mutable SHA tag.
       - name: Add semver tags to image
         if: steps.changes.outputs.detected == 'true'
+        env:
+          IMAGE_DIGEST: ${{ needs.build.outputs.digest }}
         run: |
-          SRC="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${GITHUB_SHA::7}"
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          SRC="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${IMAGE_DIGEST}"
           docker buildx imagetools create \
             --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}" \
             --tag "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.minor_tag }}" \
