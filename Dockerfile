@@ -16,7 +16,7 @@ RUN cargo build --release && rm -rf src
 COPY src ./src
 
 RUN touch src/main.rs && cargo build --release \
-  && strip target/release/balances-watcher || true
+  && strip target/release/balances-watcher
 
 FROM debian:bookworm-slim
 
