@@ -26,6 +26,28 @@ jobs:
             - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
               with:
                 token: ${{ secrets.GITHUB_TOKEN }}
+                # Both crates are transitive and stuck behind a major bump we
+                # don't control. Revisit when the parent releases; drop any
+                # entry that `cargo audit` no longer reports.
+                #
+                # zip 3.0.0 (needs >=9.0.0) — build-dependency of
+                # utoipa-swagger-ui 9.0.2, used only by its build script to
+                # unpack the Swagger UI archive into OUT_DIR. All four
+                # advisories are about ZipArchive::extract /
+                # ZipStreamReader::extract; that build script calls neither —
+                # it walks entries itself, rejects traversal via
+                # enclosed_name() and never creates symlinks. Note the archive
+                # is downloaded at build time from the official swagger-ui tag
+                # (SWAGGER_UI_DOWNLOAD_URL), not vendored — enabling the
+                # `vendored` feature would remove that build-time fetch.
+                #
+                # crypto-bigint 0.5.5 (needs >=0.7.6) — reached through
+                # k256/ecdsa/elliptic-curve (alloy-primitives) and
+                # alloy-signer, both in the release graph. A timing
+                # side-channel on secret integers; this service holds no
+                # private key, signing happens only in the anvil tests.
+                ignore: >-
+                  RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369,RUSTSEC-2026-0429,RUSTSEC-2026-0387
 
     clippy:
         name: Clippy
