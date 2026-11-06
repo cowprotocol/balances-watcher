@@ -22,8 +22,8 @@ env:
 # Serialize releases. Two merges in quick succession would otherwise both
 # compute `v${next}` from the same `git tag --list` snapshot and race on
 # `git push origin <tag>` — leaving an orphan image (imagetools create
-# succeeds) with no matching git tag. `cancel-in-progress: false` lets
-# each run finish so we don't drop half-way through a tag+release.
+# succeeds) with no matching git tag. Releases never cancel in progress,
+# so we don't drop half-way through a tag+release.
 #
 # Keep the group event-scoped: a constant key also catches `pull_request`
 # builds, and GitHub keeps only the newest pending run per group — so an
