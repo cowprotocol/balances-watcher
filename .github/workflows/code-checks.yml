@@ -26,6 +26,20 @@ jobs:
             - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
               with:
                 token: ${{ secrets.GITHUB_TOKEN }}
+                # Both crates are transitive and stuck behind a major bump we
+                # don't control. Revisit when the parent releases.
+                #
+                # zip 3.0.0 (needs >=9.0.0) — build-dependency of
+                # utoipa-swagger-ui, used once at build time to unpack the
+                # Swagger UI assets vendored inside that crate. All four
+                # advisories are about ZipArchive::extract on an
+                # attacker-supplied archive; this one ships in the crate.
+                #
+                # crypto-bigint 0.5.5 (needs >=0.7.6) — reached via
+                # alloy-signer. A timing side-channel on secret keys; this
+                # service holds none, signing exists only in the anvil tests.
+                ignore: >-
+                  RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369,RUSTSEC-2026-0429,RUSTSEC-2026-0387
 
     clippy:
         name: Clippy
