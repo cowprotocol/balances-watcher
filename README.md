@@ -39,8 +39,8 @@ ingress — see [Deployment model](#deployment-model).
   set for the same wallet. Rationale: one device can never overwrite another
   device's watched-token list
 - **Block-lag health probe** — dispatcher goes unhealthy if it falls behind
-  chain head by more than `MAX_BLOCK_LAG` blocks; block delivery uses a
-  bounded FIFO channel with overflow detection
+  chain head by more than the chain's `max_block_lag()` blocks; block
+  delivery uses a bounded FIFO channel with overflow detection
 - **Token-list caching** with 5 h TTL + concurrent-request deduplication
 - **SSRF-guarded token-list fetching** — client-supplied list URLs must be
   `http(s)` and resolve to public addresses (private / loopback / link-local
@@ -180,10 +180,11 @@ Returns `200 OK` iff **both** of the following are green:
 1. **BlockWatcher liveness** — the process-wide `eth_subscribe("newHeads")`
    stream has produced at least one header since the last reconnect.
    Backed by an infinite-retry reconnect loop (exponential backoff 1 s → 30 s
-   with jitter) and a stall watchdog (`block_time × 3`) that flips the flag
-   red if no header arrives in the window.
+   with jitter) and a stall watchdog (`max(block_time × 3, 2s)`) that flips
+   the flag red if no header arrives in the window.
 2. **Event dispatcher lag** — the process-wide event dispatcher's
-   `last_processed_block` is within `MAX_BLOCK_LAG` (5) of the chain head.
+   `last_processed_block` is within `EvmNetwork::max_block_lag()` (per-chain,
+   each sized for ~30s of real time) of the chain head.
    Warm-up (no block seen yet, or no block processed yet) returns healthy
    to avoid flapping during initial multicall storm.
 
@@ -533,8 +534,8 @@ Compile-time in `src/config/constants.rs` (and a few module-local `const`s):
 | Multicall concurrency | `300` permits | Semaphore around concurrent multicall requests. |
 | Multicall chunk size | `500` tokens | Watched list is split into chunks of this size for streaming. |
 | Block channel capacity | `256` | Bounded FIFO from `BlockWatcher` → `Erc20TransferEventDispatcher`; overflow drops + logs error + increments a counter. |
-| Max dispatcher lag | `5` blocks | `/health` flips red if the dispatcher is more than this many blocks behind the chain head after warm-up. |
-| BlockWatcher stall timeout | `block_time × 3` | Forces a fresh WS subscription if no header arrives in this window. |
+| Max dispatcher lag | `EvmNetwork::max_block_lag()` (per-chain, ~30s worth of blocks) | `/health` flips red if the dispatcher is more than this many blocks behind the chain head after warm-up. |
+| BlockWatcher stall timeout | `max(block_time × 3, 2s)` | Forces a fresh WS subscription if no header arrives in this window. Base and Arbitrum fall under the floor and run on the flat 2s. |
 
 ## On-chain events watched
 
