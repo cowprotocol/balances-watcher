@@ -58,7 +58,7 @@ impl EvmNetwork {
             EvmNetwork::Bnb => Duration::from_millis(750),
             EvmNetwork::Gnosis => Duration::from_secs(5),
             EvmNetwork::Polygon => Duration::from_secs(2),
-            EvmNetwork::Base => Duration::from_secs(2),
+            EvmNetwork::Base => Duration::from_millis(200),
             EvmNetwork::Plasma => Duration::from_secs(1),
             EvmNetwork::Arbitrum => Duration::from_millis(250),
             EvmNetwork::Avalanche => Duration::from_secs(2),
@@ -87,7 +87,7 @@ impl EvmNetwork {
             EvmNetwork::Bnb => 40,       // * 0.75s = 30s
             EvmNetwork::Gnosis => 6,     // * 5s    = 30s
             EvmNetwork::Polygon => 15,   // * 2s    = 30s
-            EvmNetwork::Base => 15,      // * 2s    = 30s
+            EvmNetwork::Base => 150,     // * 0.2s  = 30s
             EvmNetwork::Plasma => 30,    // * 1s    = 30s
             EvmNetwork::Arbitrum => 120, // * 0.25s = 30s
             EvmNetwork::Avalanche => 15, // * 2s    = 30s
@@ -118,7 +118,7 @@ impl EvmNetwork {
             EvmNetwork::Bnb => 13,      // ~10s heuristic
             EvmNetwork::Gnosis => 2,    // ~10s heuristic
             EvmNetwork::Polygon => 15,  // ~6k logs, p50 ~1.7s — the whole cap in one request
-            EvmNetwork::Base => 5,      // ~10s heuristic
+            EvmNetwork::Base => 50,     // ~10s heuristic
             EvmNetwork::Plasma => 10,   // ~10s heuristic
             EvmNetwork::Arbitrum => 40, // ~10s heuristic
             EvmNetwork::Avalanche => 5, // ~10s heuristic
