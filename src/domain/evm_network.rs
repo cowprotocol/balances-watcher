@@ -14,6 +14,7 @@ pub enum EvmNetwork {
     Bnb = 56,
     Gnosis = 100,
     Polygon = 137,
+    Robinhood = 4663,
     Base = 8453,
     Plasma = 9745,
     Arbitrum = 42161,
@@ -43,6 +44,7 @@ impl EvmNetwork {
             EvmNetwork::Bnb => address!("0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
             EvmNetwork::Gnosis => address!("0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"),
             EvmNetwork::Polygon => address!("0x0d500b1d8e8ef31e21c99d1db9a6444d3adf1270"),
+            EvmNetwork::Robinhood => address!("0x0Bd7D308f8E1639FAb988df18A8011f41EAcAD73"),
             EvmNetwork::Base => address!("0x4200000000000000000000000000000000000006"),
             EvmNetwork::Plasma => address!("0x6100e367285b01f48d07953803a2d8dca5d19873"),
             EvmNetwork::Arbitrum => address!("0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
@@ -58,6 +60,7 @@ impl EvmNetwork {
             EvmNetwork::Bnb => Duration::from_millis(750),
             EvmNetwork::Gnosis => Duration::from_secs(5),
             EvmNetwork::Polygon => Duration::from_secs(2),
+            EvmNetwork::Robinhood => Duration::from_millis(100),
             EvmNetwork::Base => Duration::from_millis(200),
             EvmNetwork::Plasma => Duration::from_secs(1),
             EvmNetwork::Arbitrum => Duration::from_millis(250),
@@ -83,17 +86,18 @@ impl EvmNetwork {
     /// can see the exact block budget for each network at a glance.
     pub fn max_block_lag(self) -> u64 {
         match self {
-            EvmNetwork::Eth => 3,        // * 12s   = 36s
-            EvmNetwork::Bnb => 40,       // * 0.75s = 30s
-            EvmNetwork::Gnosis => 6,     // * 5s    = 30s
-            EvmNetwork::Polygon => 15,   // * 2s    = 30s
-            EvmNetwork::Base => 150,     // * 0.2s  = 30s
-            EvmNetwork::Plasma => 30,    // * 1s    = 30s
-            EvmNetwork::Arbitrum => 120, // * 0.25s = 30s
-            EvmNetwork::Avalanche => 15, // * 2s    = 30s
-            EvmNetwork::Ink => 30,       // * 1s    = 30s
-            EvmNetwork::Linea => 6,      // * 5s    = 30s
-            EvmNetwork::Sepolia => 3,    // * 12s   = 36s
+            EvmNetwork::Eth => 3,         // * 12s   = 36s
+            EvmNetwork::Bnb => 40,        // * 0.75s = 30s
+            EvmNetwork::Gnosis => 6,      // * 5s    = 30s
+            EvmNetwork::Polygon => 15,    // * 2s    = 30s
+            EvmNetwork::Robinhood => 300, // * 0.1s  = 30s
+            EvmNetwork::Base => 150,      // * 0.2s  = 30s
+            EvmNetwork::Plasma => 30,     // * 1s    = 30s
+            EvmNetwork::Arbitrum => 120,  // * 0.25s = 30s
+            EvmNetwork::Avalanche => 15,  // * 2s    = 30s
+            EvmNetwork::Ink => 30,        // * 1s    = 30s
+            EvmNetwork::Linea => 6,       // * 5s    = 30s
+            EvmNetwork::Sepolia => 3,     // * 12s   = 36s
         }
     }
 
@@ -114,17 +118,18 @@ impl EvmNetwork {
     /// be filled.
     pub fn backfill_chunk_blocks(self) -> u64 {
         match self {
-            EvmNetwork::Eth => 2,       // ~1.1k logs; covers the 3-block cap in 2 requests
-            EvmNetwork::Bnb => 13,      // ~10s heuristic
-            EvmNetwork::Gnosis => 2,    // ~10s heuristic
-            EvmNetwork::Polygon => 15,  // ~6k logs, p50 ~1.7s — the whole cap in one request
-            EvmNetwork::Base => 50,     // ~10s heuristic
-            EvmNetwork::Plasma => 10,   // ~10s heuristic
+            EvmNetwork::Eth => 2,      // ~1.1k logs; covers the 3-block cap in 2 requests
+            EvmNetwork::Bnb => 13,     // ~10s heuristic
+            EvmNetwork::Gnosis => 2,   // ~10s heuristic
+            EvmNetwork::Polygon => 15, // ~6k logs, p50 ~1.7s — the whole cap in one request
+            EvmNetwork::Robinhood => 100, // ~10s heuristic
+            EvmNetwork::Base => 50,    // ~10s heuristic
+            EvmNetwork::Plasma => 10,  // ~10s heuristic
             EvmNetwork::Arbitrum => 40, // ~10s heuristic
             EvmNetwork::Avalanche => 5, // ~10s heuristic
-            EvmNetwork::Ink => 10,      // ~10s heuristic
-            EvmNetwork::Linea => 2,     // ~10s heuristic
-            EvmNetwork::Sepolia => 1,   // ~10s heuristic (12s blocks: block-by-block)
+            EvmNetwork::Ink => 10,     // ~10s heuristic
+            EvmNetwork::Linea => 2,    // ~10s heuristic
+            EvmNetwork::Sepolia => 1,  // ~10s heuristic (12s blocks: block-by-block)
         }
     }
 }
@@ -138,6 +143,7 @@ impl TryFrom<u64> for EvmNetwork {
             56 => Ok(EvmNetwork::Bnb),
             100 => Ok(EvmNetwork::Gnosis),
             137 => Ok(EvmNetwork::Polygon),
+            4663 => Ok(EvmNetwork::Robinhood),
             8453 => Ok(EvmNetwork::Base),
             9745 => Ok(EvmNetwork::Plasma),
             42161 => Ok(EvmNetwork::Arbitrum),

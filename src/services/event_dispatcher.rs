@@ -755,11 +755,12 @@ mod tests {
     fn chunk_never_exceeds_backfill_cap_and_is_at_least_one_block() {
         // A chunk wider than max_block_lag could never be filled: plan_fetch
         // caps the whole backfill below it. Zero would stall the plan loop.
-        const ALL_NETWORKS: [EvmNetwork; 11] = [
+        const ALL_NETWORKS: [EvmNetwork; 12] = [
             EvmNetwork::Eth,
             EvmNetwork::Bnb,
             EvmNetwork::Gnosis,
             EvmNetwork::Polygon,
+            EvmNetwork::Robinhood,
             EvmNetwork::Base,
             EvmNetwork::Plasma,
             EvmNetwork::Arbitrum,

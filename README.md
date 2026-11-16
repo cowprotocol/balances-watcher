@@ -62,6 +62,7 @@ the EVM chains supported by the CoW SDK (`@cowprotocol/sdk-config` → `EvmChain
 | BNB Smart Chain | `56` |
 | Gnosis Chain | `100` |
 | Polygon | `137` |
+| Robinhood Chain | `4663` |
 | Base | `8453` |
 | Plasma | `9745` |
 | Arbitrum One | `42161` |
@@ -535,7 +536,7 @@ Compile-time in `src/config/constants.rs` (and a few module-local `const`s):
 | Multicall chunk size | `500` tokens | Watched list is split into chunks of this size for streaming. |
 | Block channel capacity | `256` | Bounded FIFO from `BlockWatcher` → `Erc20TransferEventDispatcher`; overflow drops + logs error + increments a counter. |
 | Max dispatcher lag | `EvmNetwork::max_block_lag()` (per-chain, ~30s worth of blocks) | `/health` flips red if the dispatcher is more than this many blocks behind the chain head after warm-up. |
-| BlockWatcher stall timeout | `max(block_time × 3, 2s)` | Forces a fresh WS subscription if no header arrives in this window. Base and Arbitrum fall under the floor and run on the flat 2s. |
+| BlockWatcher stall timeout | `max(block_time × 3, 2s)` | Forces a fresh WS subscription if no header arrives in this window. Base, Arbitrum and Robinhood Chain fall under the floor and run on the flat 2s. |
 
 ## On-chain events watched
 
